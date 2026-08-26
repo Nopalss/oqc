@@ -1,0 +1,15 @@
+# MS Office temporary lock files
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.doc
+~$*.pptx
+
+# OS generated files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Temporary & Log files
+*.log
+tmp/

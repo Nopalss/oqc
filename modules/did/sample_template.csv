@@ -1,0 +1,4 @@
+part_code,part_name,lot_number,cavity,inspecting_date,status_inspect,pic,remark
+PART-B002,Cover Top Aluminum Alloy,06426817D010000,1,2026-08-17,OK,Budi QC,Cek dimensi oke
+PART-A001,Housing Front Plastic Black,06426817D010001,2,2026-08-17,OK,Siti QC,Dimensi sesuai spesifikasi
+PART-C003,Main Frame Steel Stamping,06426817D010002,1,2026-08-17,NG,Ahmad QC,Ketidaksesuaian ukuran lubang

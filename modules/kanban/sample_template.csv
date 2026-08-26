@@ -1,0 +1,4 @@
+kanban_no,item_code,item_description,customer,req_date,qty,eta,str_loc,supply_area,remark
+0004573892,PART-A001,Housing Front Plastic Black,PT. Astra Honda Motor,2026-08-17 08:00,500,2026-08-18 10:00,WH-A01,LINE-01,Pengiriman Reguler
+0004573893,PART-B002,Cover Top Aluminum Alloy,PT. Yamaha Indonesia,2026-08-17 09:30,250,2026-08-18 11:30,WH-B02,LINE-02,Priority Shipment
+0004573894,PART-C003,Main Frame Steel Stamping,PT. Suzuki Indomobil,2026-08-17 11:00,1000,2026-08-18 14:00,WH-A03,LINE-01,Batch 1 Lot Kirim
