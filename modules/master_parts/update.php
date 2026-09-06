@@ -10,11 +10,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_parts/index.php');
 }
 
-$id = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
+$id        = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
 $part_code = strtoupper(sanitize($_POST['part_code'] ?? ''));
 $part_name = sanitize($_POST['part_name'] ?? '');
-$model = strtoupper(sanitize($_POST['model'] ?? ''));
-$sa_route = sanitize($_POST['sa_route'] ?? '');
+$model_id  = filter_input(INPUT_POST, 'model_id', FILTER_VALIDATE_INT) ?: null;
+$aql_level = sanitize($_POST['aql_level'] ?? 'G-II');
+if (!in_array($aql_level, ['G-I', 'G-II', 'G-III'])) {
+    $aql_level = 'G-II';
+}
 
 if (!$id || empty($part_code) || empty($part_name)) {
     set_flash('error', 'Data input tidak valid!');
@@ -33,12 +36,12 @@ if ($pdo) {
             redirect("modules/master_parts/edit.php?id={$id}");
         }
 
-        $stmt = $pdo->prepare("UPDATE master_parts SET part_code = :part_code, part_name = :part_name, model = :model, sa_route = :sa_route WHERE id = :id");
+        $stmt = $pdo->prepare("UPDATE master_parts SET part_code = :part_code, part_name = :part_name, model_id = :model_id, aql_level = :aql_level WHERE id = :id");
         $stmt->execute([
             ':part_code' => $part_code,
             ':part_name' => $part_name,
-            ':model'     => $model,
-            ':sa_route'  => $sa_route,
+            ':model_id'  => $model_id,
+            ':aql_level' => $aql_level,
             ':id'        => $id
         ]);
 

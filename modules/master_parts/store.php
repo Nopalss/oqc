@@ -12,8 +12,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $part_code = strtoupper(sanitize($_POST['part_code'] ?? ''));
 $part_name = sanitize($_POST['part_name'] ?? '');
-$model = strtoupper(sanitize($_POST['model'] ?? ''));
-$sa_route = sanitize($_POST['sa_route'] ?? '');
+$model_id  = filter_input(INPUT_POST, 'model_id', FILTER_VALIDATE_INT) ?: null;
+$aql_level = sanitize($_POST['aql_level'] ?? 'G-II');
+if (!in_array($aql_level, ['G-I', 'G-II', 'G-III'])) {
+    $aql_level = 'G-II';
+}
 
 if (empty($part_code) || empty($part_name)) {
     set_flash('error', 'Part Code dan Part Name wajib diisi!');
@@ -32,12 +35,12 @@ if ($pdo) {
             redirect('modules/master_parts/create.php');
         }
 
-        $stmt = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, model, sa_route, source, created_by, created_at) VALUES (:part_code, :part_name, :model, :sa_route, 'manual', 1, NOW())");
+        $stmt = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, model_id, aql_level, source, created_by, created_at) VALUES (:part_code, :part_name, :model_id, :aql_level, 'manual', 1, NOW())");
         $stmt->execute([
             ':part_code' => $part_code,
             ':part_name' => $part_name,
-            ':model'     => $model,
-            ':sa_route'  => $sa_route
+            ':model_id'  => $model_id,
+            ':aql_level' => $aql_level
         ]);
 
         set_flash('success', "Master Part '{$part_code}' berhasil ditambahkan!");

@@ -52,14 +52,26 @@ CREATE TABLE `master_customers` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------------------------
+-- 1C. TABEL MASTER MODELS (Master Data Model Produk)
+-- ------------------------------------------------------------------------------
+CREATE TABLE `master_models` (
+  `id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(150) NOT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_master_models_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------------------------
 -- 2. TABEL MASTER PARTS (FR-4: Master Data Part)
 -- ------------------------------------------------------------------------------
 CREATE TABLE `master_parts` (
   `id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
   `part_code` VARCHAR(50) NOT NULL,
   `part_name` VARCHAR(255) NOT NULL,
-  `model` VARCHAR(100) NULL,
-  `sa_route` VARCHAR(100) NULL,
+  `model_id` BIGINT(20) UNSIGNED NULL,
+  `aql_level` ENUM('G-I', 'G-II', 'G-III') NOT NULL DEFAULT 'G-II',
   `source` ENUM('manual', 'auto_generated') NOT NULL DEFAULT 'manual',
   `created_by` BIGINT(20) UNSIGNED NULL,
   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -67,7 +79,9 @@ CREATE TABLE `master_parts` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_master_parts_code` (`part_code`),
   KEY `fk_parts_created_by` (`created_by`),
-  CONSTRAINT `fk_parts_created_by` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
+  KEY `fk_parts_model` (`model_id`),
+  CONSTRAINT `fk_parts_created_by` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_parts_model` FOREIGN KEY (`model_id`) REFERENCES `master_models` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------------------------
@@ -89,12 +103,13 @@ CREATE TABLE `master_drawings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------------------------
--- 4. TABEL AQL STANDARDS (FR-3: Standar Sampling AQL G-II 0.4)
+-- 4. TABEL AQL STANDARDS (FR-3: Standar Sampling AQL Level G-I, G-II, G-III / AQL 0.4)
 -- ------------------------------------------------------------------------------
 CREATE TABLE `aql_standards` (
   `id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
   `qty_min` INT(11) NOT NULL,
   `qty_max` INT(11) NOT NULL,
+  `inspection_level` ENUM('G-I', 'G-II', 'G-III') NOT NULL DEFAULT 'G-II',
   `sample_code` VARCHAR(10) NULL,
   `sample_size` INT(11) NOT NULL,
   `accept_number` INT(11) NOT NULL DEFAULT 0,
@@ -192,6 +207,8 @@ CREATE TABLE `inspection_sessions` (
   `kanban_item_id` BIGINT(20) UNSIGNED NULL,
   `part_id` BIGINT(20) UNSIGNED NULL,
   `sample_size` INT(11) NOT NULL,
+  `total_scanned_qty` INT(11) NOT NULL DEFAULT 0,
+  `excess_qty` INT(11) NOT NULL DEFAULT 0,
   `reject_number` INT(11) NOT NULL,
   `samples_checked` INT(11) NOT NULL DEFAULT 0,
   `ng_count` INT(11) NOT NULL DEFAULT 0,
@@ -209,6 +226,25 @@ CREATE TABLE `inspection_sessions` (
   CONSTRAINT `fk_sessions_kanban_item` FOREIGN KEY (`kanban_item_id`) REFERENCES `kanban_items` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_sessions_part` FOREIGN KEY (`part_id`) REFERENCES `master_parts` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_sessions_inspector` FOREIGN KEY (`inspector_id`) REFERENCES `users` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------------------------
+-- 9B. TABEL INSPECTION SESSION LOTS (Detail Multi-Label QR / Lot No yang Discan per Sesi)
+-- ------------------------------------------------------------------------------
+CREATE TABLE `inspection_session_lots` (
+  `id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `inspection_session_id` BIGINT(20) UNSIGNED NOT NULL,
+  `ref_number` VARCHAR(100) NULL,
+  `lot_number` VARCHAR(100) NOT NULL,
+  `qty` INT(11) NOT NULL DEFAULT 0,
+  `scanned_qr_raw` TEXT NULL,
+  `remarks` VARCHAR(255) NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `fk_session_lots_session` (`inspection_session_id`),
+  KEY `idx_session_lots_ref` (`ref_number`),
+  KEY `idx_session_lots_lot` (`lot_number`),
+  CONSTRAINT `fk_session_lots_session` FOREIGN KEY (`inspection_session_id`) REFERENCES `inspection_sessions` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------------------------
@@ -281,23 +317,58 @@ INSERT INTO `defect_types` (`id`, `name`) VALUES
 (5, 'Contamination / Black Spot'),
 (6, 'Short Mold / Incomplete');
 
--- 3. Default Standard AQL G-II (AQL 0.4) Reference Range (15 Master Rows)
-INSERT INTO `aql_standards` (`id`, `qty_min`, `qty_max`, `sample_code`, `sample_size`, `accept_number`, `reject_number`) VALUES
-(1, 2, 8, 'A', 2, 0, 1),
-(2, 9, 15, 'B', 3, 0, 1),
-(3, 16, 25, 'C', 5, 0, 1),
-(4, 26, 50, 'D', 8, 0, 1),
-(5, 51, 90, 'E', 13, 0, 1),
-(6, 91, 150, 'F', 20, 0, 1),
-(7, 151, 280, 'G', 32, 0, 1),
-(8, 281, 500, 'H', 50, 0, 1),
-(9, 501, 1200, 'J', 80, 1, 2),
-(10, 1201, 3200, 'K', 125, 1, 2),
-(11, 3201, 10000, 'L', 200, 2, 3),
-(12, 10001, 35000, 'M', 315, 3, 4),
-(13, 35001, 150000, 'N', 500, 5, 6),
-(14, 150001, 500000, 'P', 800, 7, 8),
-(15, 500001, 99999999, 'Q', 1250, 10, 11);
+-- 3. Default Standard AQL Levels G-I, G-II, G-III (AQL 0.4) Reference Ranges (45 Master Rows)
+INSERT INTO `aql_standards` (`id`, `qty_min`, `qty_max`, `inspection_level`, `sample_code`, `sample_size`, `accept_number`, `reject_number`) VALUES
+-- G-I (Longgar / Reduced)
+(1, 2, 8, 'G-I', 'A', 2, 0, 1),
+(2, 9, 15, 'G-I', 'A', 2, 0, 1),
+(3, 16, 25, 'G-I', 'B', 3, 0, 1),
+(4, 26, 50, 'G-I', 'C', 5, 0, 1),
+(5, 51, 90, 'G-I', 'C', 5, 0, 1),
+(6, 91, 150, 'G-I', 'D', 8, 0, 1),
+(7, 151, 280, 'G-I', 'E', 13, 0, 1),
+(8, 281, 500, 'G-I', 'F', 20, 0, 1),
+(9, 501, 1200, 'G-I', 'G', 32, 0, 1),
+(10, 1201, 3200, 'G-I', 'H', 50, 0, 1),
+(11, 3201, 10000, 'G-I', 'J', 80, 1, 2),
+(12, 10001, 35000, 'G-I', 'K', 125, 1, 2),
+(13, 35001, 150000, 'G-I', 'L', 200, 2, 3),
+(14, 150001, 500000, 'G-I', 'M', 315, 3, 4),
+(15, 500001, 99999999, 'G-I', 'N', 500, 5, 6),
+
+-- G-II (Normal / Standar STI)
+(16, 2, 8, 'G-II', 'A', 2, 0, 1),
+(17, 9, 15, 'G-II', 'B', 3, 0, 1),
+(18, 16, 25, 'G-II', 'C', 5, 0, 1),
+(19, 26, 50, 'G-II', 'D', 8, 0, 1),
+(20, 51, 90, 'G-II', 'E', 13, 0, 1),
+(21, 91, 150, 'G-II', 'F', 20, 0, 1),
+(22, 151, 280, 'G-II', 'G', 32, 0, 1),
+(23, 281, 500, 'G-II', 'H', 50, 0, 1),
+(24, 501, 1200, 'G-II', 'J', 80, 1, 2),
+(25, 1201, 3200, 'G-II', 'K', 125, 1, 2),
+(26, 3201, 10000, 'G-II', 'L', 200, 2, 3),
+(27, 10001, 35000, 'G-II', 'M', 315, 3, 4),
+(28, 35001, 150000, 'G-II', 'N', 500, 5, 6),
+(29, 150001, 500000, 'G-II', 'P', 800, 7, 8),
+(30, 500001, 99999999, 'G-II', 'Q', 1250, 10, 11),
+
+-- G-III (Ketat / Tightened)
+(31, 2, 8, 'G-III', 'B', 3, 0, 1),
+(32, 9, 15, 'G-III', 'C', 5, 0, 1),
+(33, 16, 25, 'G-III', 'D', 8, 0, 1),
+(34, 26, 50, 'G-III', 'E', 13, 0, 1),
+(35, 51, 90, 'G-III', 'F', 20, 0, 1),
+(36, 91, 150, 'G-III', 'G', 32, 0, 1),
+(37, 151, 280, 'G-III', 'H', 50, 0, 1),
+(38, 281, 500, 'G-III', 'J', 80, 1, 2),
+(39, 501, 1200, 'G-III', 'K', 125, 1, 2),
+(40, 1201, 3200, 'G-III', 'L', 200, 2, 3),
+(41, 3201, 10000, 'G-III', 'M', 315, 3, 4),
+(42, 10001, 35000, 'G-III', 'N', 500, 5, 6),
+(43, 35001, 150000, 'G-III', 'P', 800, 7, 8),
+(44, 150001, 500000, 'G-III', 'Q', 1250, 10, 11),
+(45, 500001, 99999999, 'G-III', 'R', 2000, 14, 15);
 
 -- 4. Sample Master Part
 INSERT INTO `master_parts` (`id`, `part_code`, `part_name`, `source`, `created_by`) VALUES

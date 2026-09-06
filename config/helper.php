@@ -3,8 +3,11 @@
  * Helper Utility Functions
  */
 
+require_once __DIR__ . '/app.php';
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
+    session_write_close();
 }
 
 /**
@@ -26,6 +29,17 @@ function sanitize($data) {
 }
 
 /**
+ * Safely parse quantity string/number into clean integer (strips commas, dots, spaces)
+ */
+function clean_qty($data) {
+    if (is_numeric($data)) {
+        return (int)$data;
+    }
+    $cleaned = preg_replace('/[^\d]/', '', (string)$data);
+    return (int)$cleaned;
+}
+
+/**
  * Perform URL redirection
  */
 function redirect($path) {
@@ -38,22 +52,30 @@ function redirect($path) {
  * Set Session Flash Message (Success, Error, Warning, Info)
  */
 function set_flash($type, $message) {
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
     $_SESSION['flash'] = [
         'type' => $type,
         'message' => $message
     ];
+    session_write_close();
 }
 
 /**
  * Retrieve & clear Session Flash Message
  */
 function get_flash() {
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+    $flash = null;
     if (isset($_SESSION['flash'])) {
         $flash = $_SESSION['flash'];
         unset($_SESSION['flash']);
-        return $flash;
     }
-    return null;
+    session_write_close();
+    return $flash;
 }
 
 /**
@@ -179,4 +201,33 @@ function render_pagination($currentPage, $totalPages, $totalItems, $perPage = 10
     $html .= '</div>';
 
     return $html;
+}
+
+/**
+ * Check if current user is logged in
+ */
+function is_logged_in() {
+    return !empty($_SESSION['user_id']) || !empty($_SESSION['username']);
+}
+
+/**
+ * Require user authentication, redirect to login page if not logged in
+ */
+function require_login() {
+    if (!is_logged_in()) {
+        set_flash('warning', 'Silakan masuk ke akun Anda terlebih dahulu untuk mengakses sistem.');
+        redirect('login.php');
+    }
+}
+
+/**
+ * Get current logged in user details
+ */
+function current_user() {
+    return [
+        'id'       => $_SESSION['user_id'] ?? 1,
+        'name'     => $_SESSION['user_name'] ?? 'System Administrator',
+        'username' => $_SESSION['username'] ?? 'admin',
+        'role'     => $_SESSION['user_role'] ?? 'admin'
+    ];
 }

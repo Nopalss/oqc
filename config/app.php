@@ -1,8 +1,4 @@
 <?php
-// Output buffering - prevents ALL 'headers already sent' errors from whitespace/BOM
-if (!ob_get_level()) {
-    ob_start();
-}
 
 /**
  * Application Configuration & Environment Settings

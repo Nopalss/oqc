@@ -22,13 +22,12 @@ if ($pdo) {
 }
 
 // ── Date range resolver ────────────────────────────────────────────────────
-$presetFilter = sanitize($_GET['preset'] ?? 'bulanan');
-
 if (!empty($_GET['start_date']) && !empty($_GET['end_date'])) {
     $startDate    = sanitize($_GET['start_date']);
     $endDate      = sanitize($_GET['end_date']);
     $presetFilter = 'custom';
 } else {
+    $presetFilter = sanitize($_GET['preset'] ?? 'bulanan');
     switch ($presetFilter) {
         case 'hari_ini':
             $startDate = date('Y-m-d');
@@ -154,17 +153,18 @@ if ($pdo) {
             $stmtWP = $pdo->prepare("SELECT 
                         COALESCE(mp.part_name, 'UNKNOWN PART') AS part_name,
                         COALESCE(mp.part_code, '-') AS part_code,
-                        COALESCE(mp.model, '-') AS model,
+                        COALESCE(m.name, mp.model, '-') AS model,
                         COUNT(DISTINCT ss.id) AS lot_case,
-                        SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS ng_case
+                        COUNT(DISTINCT CASE WHEN ss.status = 'rejected' THEN ss.id END) AS ng_case
                     FROM inspection_ng_records ngr
                     INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
                     INNER JOIN inspection_samples s ON ngr.inspection_sample_id = s.id
                     INNER JOIN inspection_sessions ss ON s.inspection_session_id = ss.id
                     LEFT JOIN master_parts mp ON ss.part_id = mp.id
+                    LEFT JOIN master_models m ON mp.model_id = m.id
                     WHERE UPPER(dt.name) = :defname
                       AND DATE(s.checked_at) BETWEEN :sd AND :ed
-                    GROUP BY mp.id, mp.part_name, mp.part_code, mp.model
+                    GROUP BY mp.id, mp.part_name, mp.part_code, m.name, mp.model
                     ORDER BY ng_case DESC, lot_case DESC
                     LIMIT 3");
             $stmtWP->execute([':defname' => $defName, ':sd' => $startDate, ':ed' => $endDate]);
@@ -242,9 +242,9 @@ $top3PartsSummaryStr = !empty($top3PartsNames) ? implode(', ', $top3PartsNames) 
             <!-- Date Range Form -->
             <form action="" method="GET" class="flex items-center space-x-2">
                 <span class="text-xs font-semibold text-slate-500">Periode:</span>
-                <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="form-input text-xs border-slate-300 rounded-md py-1 px-2">
+                <input type="date" name="start_date" value="<?= $presetFilter === 'custom' ? htmlspecialchars($startDate) : '' ?>" class="form-input text-xs border-slate-300 rounded-md py-1 px-2">
                 <span class="text-slate-400">&ndash;</span>
-                <input type="date" name="end_date" value="<?= htmlspecialchars($endDate) ?>" class="form-input text-xs border-slate-300 rounded-md py-1 px-2">
+                <input type="date" name="end_date" value="<?= $presetFilter === 'custom' ? htmlspecialchars($endDate) : '' ?>" class="form-input text-xs border-slate-300 rounded-md py-1 px-2">
                 <button type="submit" class="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-3 py-1 rounded-md transition-all">
                     Terapkan
                 </button>

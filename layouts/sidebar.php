@@ -43,6 +43,62 @@ function nav_active($keyword, $currentUri) {
     <nav class="flex-1 px-3 py-4 space-y-4 overflow-y-auto custom-scrollbar text-xs">
         
         <!-- Group 1: Data Referensi -->
+           <!-- Group 2: Operasional -->
+        <div>
+            <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                Operasional
+            </div>
+   <a href="<?= base_url('modules/dashboard/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('dashboard', $currentUri) ?>"
+               title="Dashboard Performance OQC">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Dashboard Laporan</span>
+            </a>
+            <!-- Scan Inspeksi -->
+            <a href="<?= base_url('modules/inspection/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('inspection', $currentUri) ?>"
+               title="Scan & Inspeksi OQC">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Scan Inspeksi</span>
+            </a>
+
+            <!-- Monitoring Pekerjaan Supervisor -->
+            <a href="<?= base_url('modules/monitoring/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('monitoring', $currentUri) ?>"
+               title="Monitoring Realisasi Planning Harian">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Monitoring Pekerjaan</span>
+            </a>
+
+            <!-- Safety Stock (Monitoring Stock Realisasi) -->
+            <a href="<?= base_url('modules/safety_stock/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('safety_stock', $currentUri) ?>"
+               title="Stock Safety Stock (Barang Realisasi Inspeksi)">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                </svg>
+                <span class="sidebar-text truncate">Safety Stock</span>
+            </a>
+
+            <!-- Dashboard Laporan -->
+         
+
+            <!-- STI Survival (OQC Data) -->
+            <!-- <a href="<?= base_url('modules/performance_report/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('performance_report', $currentUri) ?>"
+               title="STI Survival & PPM Performance Report">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path>
+                </svg>
+                <span class="sidebar-text truncate">STI Survival (OQC Data)</span>
+            </a> -->
+        </div>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Data Referensi
@@ -69,42 +125,7 @@ function nav_active($keyword, $currentUri) {
             </a>
         </div>
 
-        <!-- Group 2: Operasional -->
-        <div>
-            <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                Operasional
-            </div>
-
-            <!-- Scan Inspeksi -->
-            <a href="<?= base_url('modules/inspection/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('inspection', $currentUri) ?>"
-               title="Scan & Inspeksi OQC">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
-                </svg>
-                <span class="sidebar-text truncate">Scan Inspeksi</span>
-            </a>
-
-            <!-- Dashboard Laporan -->
-            <a href="<?= base_url('modules/dashboard/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('dashboard', $currentUri) ?>"
-               title="Dashboard Performance OQC">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
-                </svg>
-                <span class="sidebar-text truncate">Dashboard Laporan</span>
-            </a>
-
-            <!-- STI Survival (OQC Data) -->
-            <a href="<?= base_url('modules/performance_report/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('performance_report', $currentUri) ?>"
-               title="STI Survival & PPM Performance Report">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path>
-                </svg>
-                <span class="sidebar-text truncate">STI Survival (OQC Data)</span>
-            </a>
-        </div>
+      
 
 
         <!-- Group 3: Master Data (Tahap 2) -->
@@ -121,6 +142,16 @@ function nav_active($keyword, $currentUri) {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
                 </svg>
                 <span class="sidebar-text truncate">Master Data Part</span>
+            </a>
+
+            <!-- Master Data Model -->
+            <a href="<?= base_url('modules/master_models/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('master_models', $currentUri) ?>"
+               title="Master Data Model Produk">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                </svg>
+                <span class="sidebar-text truncate">Master Data Model</span>
             </a>
 
             <!-- Master Data Customer -->

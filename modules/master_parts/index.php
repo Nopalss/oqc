@@ -50,8 +50,9 @@ if ($pdo) {
         $offset = ($page - 1) * $limit;
 
         // 2. Fetch Data with Limit & Offset
-        $sql = "SELECT p.*, d.drawing_2d_path, d.drawing_3d_path 
+        $sql = "SELECT p.*, m.name AS model_name, d.drawing_2d_path, d.drawing_3d_path 
                 FROM master_parts p 
+                LEFT JOIN master_models m ON p.model_id = m.id
                 LEFT JOIN master_drawings d ON p.id = d.part_id 
                 WHERE 1=1";
         $params = [];
@@ -154,6 +155,7 @@ if ($pdo) {
                             <th class="px-4 py-3">No</th>
                             <th class="px-4 py-3">Part Code</th>
                             <th class="px-4 py-3">Part Name</th>
+                            <th class="px-4 py-3">Level AQL</th>
                             <th class="px-4 py-3">Sumber Data</th>
                             <th class="px-4 py-3">Status Drawing (2D/3D)</th>
                             <th class="px-4 py-3">Tanggal Dibuat</th>
@@ -163,7 +165,7 @@ if ($pdo) {
                     <tbody class="divide-y divide-slate-100">
                         <?php if (empty($parts)): ?>
                             <tr>
-                                <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                                <td colspan="8" class="px-4 py-8 text-center text-slate-400">
                                     Belum ada data Master Part. Silakan tambah data baru.
                                 </td>
                             </tr>
@@ -173,12 +175,23 @@ if ($pdo) {
                                     <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
                                     <td class="px-4 py-3 font-extrabold text-blue-700 font-mono tracking-tight">
                                         <?= htmlspecialchars($part['part_code']) ?>
-                                        <?php if (!empty($part['model'])): ?>
-                                            <span class="text-[10px] text-slate-400 font-sans block">Model: <?= htmlspecialchars($part['model']) ?></span>
+                                        <?php if (!empty($part['model_name']) || !empty($part['model'])): ?>
+                                            <span class="text-[10px] text-slate-400 font-sans block">Model: <?= htmlspecialchars($part['model_name'] ?? $part['model'] ?? '-') ?></span>
                                         <?php endif; ?>
                                     </td>
                                     <td class="px-4 py-3 font-semibold text-slate-800">
                                         <?= htmlspecialchars($part['part_name']) ?>
+                                    </td>
+                                    <td class="px-4 py-3 font-bold">
+                                        <?php 
+                                        $aqlLvl = $part['aql_level'] ?? 'G-II';
+                                        if ($aqlLvl === 'G-I'): ?>
+                                            <span class="badge badge-warning" title="General Level I - Longgar (Reduced Inspection)">G-I</span>
+                                        <?php elseif ($aqlLvl === 'G-III'): ?>
+                                            <span class="badge" style="background-color: #ffe4e6; color: #e11d48; border: 1px solid #fecdd3;" title="General Level III - Ketat (Tightened Inspection)">G-III</span>
+                                        <?php else: ?>
+                                            <span class="badge badge-blue" title="General Level II - Normal (Standar STI)">G-II</span>
+                                        <?php endif; ?>
                                     </td>
                                     <td class="px-4 py-3">
                                         <?php if ($part['source'] === 'manual'): ?>

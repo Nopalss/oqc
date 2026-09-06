@@ -157,6 +157,35 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
+        <!-- Shift Handover Alert Banner for In Progress Sessions -->
+        <?php 
+        $inProgressSessions = array_filter($sessions, fn($item) => $item['status'] === 'in_progress');
+        if (!empty($inProgressSessions)): 
+        ?>
+            <div style="background-color: #fffbe6; border: 1px solid #ffe58f; border-radius: 1rem; padding: 0.875rem 1rem;" class="flex items-center justify-between shadow-2xs">
+                <div class="flex items-center space-x-3">
+                    <div style="background-color: #d97706; color: #ffffff; padding: 0.5rem; border-radius: 0.75rem;" class="flex-shrink-0">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                    </div>
+                    <div>
+                        <h4 style="color: #78350f; font-weight: 700; font-size: 0.75rem;" class="flex items-center">
+                            <span>Perhatian Oper Shift: Ada <?= count($inProgressSessions) ?> Sesi Inspeksi Belum Selesai</span>
+                        </h4>
+                        <p style="color: #92400e; font-size: 0.6875rem; font-weight: 500; margin-top: 2px;">
+                            Sesi pemeriksaan ini terhenti/terpotong pergantian shift. Klik tombol <b style="text-decoration: underline; font-weight: 800; color: #78350f;">Lanjutkan Kerja</b> pada tabel untuk meneruskan pemeriksaan.
+                        </p>
+                    </div>
+                </div>
+                <?php if ($statusFilter !== 'in_progress'): ?>
+                    <a href="?status=in_progress" style="background-color: #d97706; color: #ffffff; font-weight: 700; font-size: 0.75rem; border-radius: 0.75rem; padding: 0.4rem 0.85rem; text-decoration: none;" class="transition-all flex-shrink-0 whitespace-nowrap">
+                        Filter In Progress
+                    </a>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
         <!-- History Table Container -->
         <div class="card p-0 overflow-hidden">
             <div class="overflow-x-auto">
@@ -183,7 +212,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             </tr>
                         <?php else: ?>
                             <?php foreach ($sessions as $idx => $s): ?>
-                                <tr class="hover:bg-slate-50/80 transition-colors">
+                                <tr class="hover:bg-slate-50/80 transition-colors <?= ($s['status'] === 'in_progress') ? 'bg-amber-50/30' : '' ?>">
                                     <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $idx + 1 ?></td>
                                     <td class="px-4 py-3 font-bold text-slate-800">
                                         <?= date('d M Y, H:i', strtotime($s['started_at'])) ?> WIB
@@ -206,45 +235,66 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <?= $s['ng_count'] ?> / <?= $s['reject_number'] ?>
                                     </td>
                                     <td class="px-4 py-3 whitespace-nowrap">
-                                        <?php if ($s['status'] === 'passed'): ?>
-                                            <span style="white-space: nowrap; display: inline-flex; align-items: center;" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-2xs">
-                                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-600 mr-1.5 flex-shrink-0"></span>
-                                                PASSED
-                                            </span>
-                                        <?php elseif ($s['status'] === 'rejected'): ?>
-                                            <span style="white-space: nowrap; display: inline-flex; align-items: center;" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200 shadow-2xs">
-                                                <span class="w-1.5 h-1.5 rounded-full bg-rose-600 mr-1.5 flex-shrink-0"></span>
-                                                REJECTED
-                                            </span>
-                                        <?php else: ?>
-                                            <span style="white-space: nowrap; display: inline-flex; align-items: center;" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200 shadow-2xs">
-                                                <span class="w-1.5 h-1.5 rounded-full bg-blue-600 mr-1.5 flex-shrink-0 animate-pulse"></span>
-                                                IN PROGRESS
-                                            </span>
-                                        <?php endif; ?>
+                                        <div class="flex items-center gap-1.5 flex-wrap">
+                                            <?php if ($s['status'] === 'passed'): ?>
+                                                <span style="white-space: nowrap; display: inline-flex; align-items: center;" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-2xs">
+                                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-600 mr-1.5 flex-shrink-0"></span>
+                                                    PASSED
+                                                </span>
+                                            <?php elseif ($s['status'] === 'rejected'): ?>
+                                                <span style="white-space: nowrap; display: inline-flex; align-items: center;" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200 shadow-2xs">
+                                                    <span class="w-1.5 h-1.5 rounded-full bg-rose-600 mr-1.5 flex-shrink-0"></span>
+                                                    REJECTED
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #fffbe6; color: #92400e; border: 1px solid #ffe58f; padding: 0.2rem 0.65rem; border-radius: 9999px; font-size: 10px; font-weight: 700;">
+                                                    <span style="width: 6px; height: 6px; border-radius: 9999px; background-color: #d97706; margin-right: 6px; display: inline-block;"></span>
+                                                    IN PROGRESS
+                                                </span>
+                                            <?php endif; ?>
+
+                                            <?php if (!empty($s['is_reinspection'])): ?>
+                                                <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs">
+                                                    ⚡ RE-INSPEKSI
+                                                </span>
+                                            <?php endif; ?>
+                                        </div>
                                     </td>
                                     <td class="px-4 py-3 text-right whitespace-nowrap">
                                         <div class="inline-flex items-center space-x-1.5 flex-nowrap justify-end">
-                                            <!-- Workbench Icon Button -->
-                                            <a href="<?= base_url('modules/inspection/session.php?id=' . $s['id']) ?>" 
-                                               class="p-2 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 text-blue-600 rounded-xl border border-blue-200/80 transition-all inline-flex items-center justify-center shadow-2xs hover:shadow-xs" 
-                                               title="Buka Workbench Inspeksi">
-                                                <svg style="width: 18px; height: 18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                                                </svg>
-                                            </a>
-
-                                            <?php if ($s['status'] === 'rejected'): ?>
-                                                <!-- Cetak Rejection Sheet Icon Button -->
-                                                <a href="<?= base_url('modules/inspection/print_rejection.php?session_id=' . $s['id']) ?>" 
-                                                   target="_blank" 
-                                                   class="p-2 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-600 rounded-xl border border-rose-200/80 transition-all inline-flex items-center justify-center shadow-2xs hover:shadow-xs" 
-                                                   title="Cetak Rejection Sheet">
+                                            <?php if ($s['status'] === 'in_progress'): ?>
+                                                <!-- Action Button: Lanjutkan Kerja for IN PROGRESS Status -->
+                                                <a href="<?= base_url('modules/inspection/session.php?id=' . $s['id']) ?>" 
+                                                   style="background-color: #d97706; color: #ffffff; font-weight: 700; font-size: 11px; border-radius: 8px; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; text-decoration: none; white-space: nowrap; line-height: 1; box-shadow: 0 1px 2px rgba(0,0,0,0.1);" 
+                                                   title="Lanjutkan Sesi Inspeksi Ini (Shift Operasi)">
+                                                    <svg style="width: 14px; height: 14px; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                    </svg>
+                                                    <span style="white-space: nowrap;">Lanjutkan Kerja</span>
+                                                </a>
+                                            <?php else: ?>
+                                                <!-- Workbench Icon Button -->
+                                                <a href="<?= base_url('modules/inspection/session.php?id=' . $s['id']) ?>" 
+                                                   class="p-2 bg-blue-50 hover:bg-blue-100 active:bg-blue-200 text-blue-600 rounded-xl border border-blue-200/80 transition-all inline-flex items-center justify-center shadow-2xs hover:shadow-xs" 
+                                                   title="Lihat Detail Workbench Inspeksi">
                                                     <svg style="width: 18px; height: 18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path>
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
                                                     </svg>
                                                 </a>
+
+                                                <?php if ($s['status'] === 'rejected'): ?>
+                                                    <!-- Cetak Rejection Sheet Icon Button -->
+                                                    <a href="<?= base_url('modules/inspection/print_rejection.php?session_id=' . $s['id']) ?>" 
+                                                       target="_blank" rel="noopener noreferrer" 
+                                                       class="p-2 bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-600 rounded-xl border border-rose-200/80 transition-all inline-flex items-center justify-center shadow-2xs hover:shadow-xs" 
+                                                       title="Cetak Rejection Sheet">
+                                                        <svg style="width: 18px; height: 18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path>
+                                                        </svg>
+                                                    </a>
+                                                <?php endif; ?>
                                             <?php endif; ?>
                                         </div>
                                     </td>

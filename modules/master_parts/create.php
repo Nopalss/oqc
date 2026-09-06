@@ -5,6 +5,14 @@ $pageSubtitle = "Tambahkan referensi Part Code dan Part Name baru ke dalam siste
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
+
+$pdo = getDB();
+$modelsList = [];
+if ($pdo) {
+    try {
+        $modelsList = $pdo->query("SELECT * FROM master_models ORDER BY name ASC")->fetchAll();
+    } catch (Exception $e) {}
+}
 ?>
 
 <div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300">
@@ -38,17 +46,31 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <input type="text" id="part_name" name="part_name" required class="form-input" placeholder="Contoh: Cover Hinge Bracket">
                 </div>
 
-                <!-- Model Part -->
+                <!-- Model Part Dropdown -->
                 <div>
-                    <label for="model" class="form-label">Model Part</label>
-                    <input type="text" id="model" name="model" class="form-input uppercase font-mono" placeholder="Contoh: K1AA / K59 / BEAT">
-                    <p class="text-[10px] text-slate-400 mt-1">Digunakan otomatis saat mencetak Rejection Sheet resmi (STQC-F-167 REV.00).</p>
+                    <label for="model_id" class="form-label">Model Produk</label>
+                    <select id="model_id" name="model_id" class="form-input text-xs font-semibold">
+                        <option value="">-- Tanpa Model / Pilih Model --</option>
+                        <?php foreach ($modelsList as $m): ?>
+                            <option value="<?= $m['id'] ?>"><?= htmlspecialchars($m['name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <p class="text-[10px] text-slate-400 mt-1">
+                        Pilih model produk terdaftar. Jika model belum ada, silakan tambahkan di menu <a href="<?= base_url('modules/master_models/create.php') ?>" class="text-blue-600 underline font-semibold" target="_blank">Master Data Model</a>.
+                    </p>
                 </div>
 
-                <!-- SA Route -->
+                <!-- Level AQL Sampling Dropdown -->
                 <div>
-                    <label for="sa_route" class="form-label">SA Route (Sub-Assembly Route)</label>
-                    <input type="text" id="sa_route" name="sa_route" class="form-input" placeholder="Contoh: LINE-1 / ASSY-02">
+                    <label for="aql_level" class="form-label">Level Inspeksi AQL <span class="text-rose-500">*</span></label>
+                    <select id="aql_level" name="aql_level" required class="form-input text-xs font-semibold">
+                        <option value="G-I">G-I (Longgar / Reduced Inspection)</option>
+                        <option value="G-II" selected>G-II (Normal / Standar STI Default)</option>
+                        <option value="G-III">G-III (Ketat / Tightened Inspection)</option>
+                    </select>
+                    <p class="text-[10px] text-slate-400 mt-1">
+                        Tingkat ketelitian sampling AQL G-II 0.4. Pilih G-III jika part memiliki riwayat NG tinggi untuk meningkatkan jumlah sampel pemeriksaan.
+                    </p>
                 </div>
 
                 <!-- Submit Bar -->

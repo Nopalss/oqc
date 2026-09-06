@@ -9,12 +9,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 $pdo = getDB();
 $part = null;
+$modelsList = [];
 
 if ($id && $pdo) {
     try {
         $stmt = $pdo->prepare("SELECT * FROM master_parts WHERE id = :id");
         $stmt->execute([':id' => $id]);
         $part = $stmt->fetch();
+
+        $modelsList = $pdo->query("SELECT * FROM master_models ORDER BY name ASC")->fetchAll();
     } catch (PDOException $e) {
         $part = null;
     }
@@ -58,17 +61,34 @@ if (!$part) {
                     <input type="text" id="part_name" name="part_name" value="<?= htmlspecialchars($part['part_name']) ?>" required class="form-input">
                 </div>
 
-                <!-- Model Part -->
+                <!-- Model Part Dropdown -->
                 <div>
-                    <label for="model" class="form-label">Model Part</label>
-                    <input type="text" id="model" name="model" value="<?= htmlspecialchars($part['model'] ?? '') ?>" class="form-input uppercase font-mono" placeholder="Contoh: K1AA / K59 / BEAT">
-                    <p class="text-[10px] text-slate-400 mt-1">Digunakan otomatis saat mencetak Rejection Sheet resmi (STQC-F-167 REV.00).</p>
+                    <label for="model_id" class="form-label">Model Produk</label>
+                    <select id="model_id" name="model_id" class="form-input text-xs font-semibold">
+                        <option value="">-- Tanpa Model / Pilih Model --</option>
+                        <?php foreach ($modelsList as $m): ?>
+                            <option value="<?= $m['id'] ?>" <?= ((int)($part['model_id'] ?? 0) === (int)$m['id']) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($m['name']) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <p class="text-[10px] text-slate-400 mt-1">
+                        Pilih model produk terdaftar. Jika model belum ada, silakan tambahkan di menu <a href="<?= base_url('modules/master_models/create.php') ?>" class="text-blue-600 underline font-semibold" target="_blank">Master Data Model</a>.
+                    </p>
                 </div>
 
-                <!-- SA Route -->
+                <!-- Level AQL Sampling Dropdown -->
                 <div>
-                    <label for="sa_route" class="form-label">SA Route (Sub-Assembly Route)</label>
-                    <input type="text" id="sa_route" name="sa_route" value="<?= htmlspecialchars($part['sa_route'] ?? '') ?>" class="form-input" placeholder="Contoh: LINE-1 / ASSY-02">
+                    <?php $currentAql = $part['aql_level'] ?? 'G-II'; ?>
+                    <label for="aql_level" class="form-label">Level Inspeksi AQL <span class="text-rose-500">*</span></label>
+                    <select id="aql_level" name="aql_level" required class="form-input text-xs font-semibold">
+                        <option value="G-I" <?= ($currentAql === 'G-I') ? 'selected' : '' ?>>G-I (Longgar / Reduced Inspection)</option>
+                        <option value="G-II" <?= ($currentAql === 'G-II') ? 'selected' : '' ?>>G-II (Normal / Standar STI Default)</option>
+                        <option value="G-III" <?= ($currentAql === 'G-III') ? 'selected' : '' ?>>G-III (Ketat / Tightened Inspection)</option>
+                    </select>
+                    <p class="text-[10px] text-slate-400 mt-1">
+                        Tingkat ketelitian sampling AQL G-II 0.4. Pilih G-III jika part memiliki riwayat NG tinggi untuk meningkatkan jumlah sampel pemeriksaan.
+                    </p>
                 </div>
 
                 <!-- Submit Bar -->

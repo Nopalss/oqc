@@ -6,6 +6,7 @@
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+session_write_close();
 
 $sessionId = (int)($_GET['session_id'] ?? $_GET['id'] ?? 0);
 $isAutoPrint = isset($_GET['autoprint']) && $_GET['autoprint'] == 1;
@@ -20,7 +21,7 @@ if ($sessionId > 0 && $pdo) {
             SELECT s.*, 
                    did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
                    k.kanban_no, k.customer, k.qty as kanban_qty, b.document_number as doc_no,
-                   p.model, p.sa_route, u.name as inspector_name
+                   COALESCE(m.name, p.model) as model, u.name as inspector_name
             FROM inspection_sessions s
             JOIN daily_inspection_data did ON did.id = s.did_id
             LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -29,6 +30,7 @@ if ($sessionId > 0 && $pdo) {
                 s.part_id,
                 (SELECT mp.id FROM master_parts mp WHERE UPPER(mp.part_code) = UPPER(did.part_code) LIMIT 1)
             )
+            LEFT JOIN master_models m ON m.id = p.model_id
             LEFT JOIN users u ON u.id = s.inspector_id
             WHERE s.id = :id
         ");
@@ -175,7 +177,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             display: inline-block;
             width: 24px;
             height: 24px;
-            border: 2.5px solid #000;
+            border: 1.5px solid #000;
             text-align: center;
             line-height: 20px;
             font-size: 18px;
@@ -185,8 +187,8 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             background: #ffffff;
         }
         .judgment-cell {
-            border: 2.5px solid #000 !important;
-            background: #fffde7 !important;
+            border: 1px solid #000000 !important;
+            background: #ffffff !important;
         }
         .checked::after { content: '✓'; }
     </style>
@@ -296,12 +298,12 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
                             <td class="bg-gray" style="font-weight: bold;">DELAY / STOP LINE (EFFECT)</td>
                             <td>
                                 <span style="margin-right: 15px;"><span class="checkbox-box"></span> YES</span>
-                                <span><span class="checkbox-box checked"></span> NO</span>
+                                <span><span class="checkbox-box"></span> NO</span>
                             </td>
                         </tr>
                         <tr>
                             <td class="bg-gray" style="font-weight: bold;">SA ROUTE</td>
-                            <td class="font-mono"><?= htmlspecialchars($session['sa_route'] ?: '-') ?></td>
+                            <td class="font-mono"></td>
                         </tr>
                     </table>
 
