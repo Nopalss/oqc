@@ -67,7 +67,7 @@ if (!$session) {
 // Build defect names summary string
 $defectSummaryList = [];
 foreach ($ngRecords as $rec) {
-    $defectSummaryList[] = $rec['defect_name'] . ' (Qty ' . $rec['qty_ng'] . ')';
+    $defectSummaryList[] = $rec['defect_name'];
 }
 $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($defectSummaryList)) : 'Visual / Dimension Defect';
 ?>
@@ -292,7 +292,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
                         </tr>
                         <tr>
                             <td class="bg-gray" style="font-weight: bold;">NG</td>
-                            <td class="font-mono font-black" style="color: #dc2626; font-size: 12px; font-weight: 900;"><?= number_format($session['ng_count']) ?> Pcs (Reject Limit: <?= $session['reject_number'] ?>)</td>
+                            <td class="font-mono font-black" style="color: #dc2626; font-size: 12px; font-weight: 900;"><?= number_format($session['ng_count']) ?> Pcs</td>
                         </tr>
                         <tr>
                             <td class="bg-gray" style="font-weight: bold;">DELAY / STOP LINE (EFFECT)</td>

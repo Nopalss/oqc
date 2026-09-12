@@ -4,6 +4,7 @@
  * Supports explicit Planning selection (kanban_item_id) matching & DID validation
  */
 header('Content-Type: application/json');
+ob_start();
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
@@ -12,8 +13,10 @@ session_write_close();
 $partCode = strtoupper(trim(sanitize($_REQUEST['part_code'] ?? '')));
 $lotNumber = strtoupper(trim(sanitize($_REQUEST['lot_number'] ?? '')));
 $kanbanItemId = (int)($_REQUEST['kanban_item_id'] ?? 0);
+$reqInspectionType = sanitize($_REQUEST['inspection_type'] ?? '');
 
 if (empty($partCode) || empty($lotNumber)) {
+    if (ob_get_length()) ob_clean();
     echo json_encode([
         'success' => false,
         'message' => 'Part Code dan Lot Number wajib diisi!'
@@ -23,6 +26,7 @@ if (empty($partCode) || empty($lotNumber)) {
 
 $pdo = getDB();
 if (!$pdo) {
+    if (ob_get_length()) ob_clean();
     echo json_encode([
         'success' => false,
         'message' => 'Gagal terhubung ke database server!'
@@ -45,6 +49,7 @@ try {
         if ($kanbanRow) {
             $expectedCode = strtoupper(trim($kanbanRow['item_code']));
             if ($expectedCode !== $partCode) {
+                if (ob_get_length()) ob_clean();
                 echo json_encode([
                     'success' => false,
                     'error_type' => 'part_mismatch',
@@ -56,7 +61,8 @@ try {
     }
 
     // Fallback: If no explicit planning selected or not found, match via FIFO by part code
-    if (!$kanbanRow) {
+    // JANGAN fallback FIFO untuk Safety Stock — harus pakai kanban_item bertipe safety_stock
+    if (!$kanbanRow && $reqInspectionType !== 'safety_stock') {
         $stmtKanban = $pdo->prepare("SELECT k.*, b.document_number, b.vendor, b.plan_type as batch_plan_type 
                                      FROM kanban_items k 
                                      JOIN kanban_batches b ON b.id = k.batch_id 
@@ -67,8 +73,6 @@ try {
         $kanbanRow = $stmtKanban->fetch(PDO::FETCH_ASSOC);
     }
 
-    $reqInspectionType = sanitize($_REQUEST['inspection_type'] ?? '');
-    
     // 2. Validasi DID (Daily Inspection Data) - Memastikan lot sudah melampaui Cek Dimensi
     $stmtDid = $pdo->prepare("SELECT * FROM daily_inspection_data WHERE UPPER(part_code) = :pcode AND UPPER(lot_number) = :lot ORDER BY id DESC LIMIT 1");
     $stmtDid->execute([':pcode' => $partCode, ':lot' => $lotNumber]);
@@ -76,8 +80,12 @@ try {
 
     // Auto-create DID if missing for Safety Stock Warehouse Scan
     if (!$didRow && ($reqInspectionType === 'safety_stock' || ($kanbanRow && ($kanbanRow['plan_type'] ?? '') === 'safety_stock'))) {
+        $stmtMP = $pdo->prepare("SELECT part_name FROM master_parts WHERE UPPER(part_code) = :pcode LIMIT 1");
+        $stmtMP->execute([':pcode' => $partCode]);
+        $officialPartName = $stmtMP->fetchColumn();
+        $partNameDid = $officialPartName ?: ($kanbanRow['item_description'] ?? ('Part ' . $partCode));
+
         $stmtInsDid = $pdo->prepare("INSERT INTO daily_inspection_data (part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, created_at) VALUES (:pcode, :pname, :lot, '1', CURDATE(), 'OK', 'SAFETY_STOCK_SCAN', NOW())");
-        $partNameDid = $kanbanRow['item_description'] ?? ('Part ' . $partCode);
         $stmtInsDid->execute([':pcode' => $partCode, ':pname' => $partNameDid, ':lot' => $lotNumber]);
         $didIdNew = $pdo->lastInsertId();
 
@@ -99,6 +107,7 @@ try {
         $stmtAvail->execute([':pcode' => $partCode]);
         $availableLots = $stmtAvail->fetchAll(PDO::FETCH_ASSOC);
 
+        if (ob_get_length()) ob_clean();
         echo json_encode([
             'success' => false,
             'error_type' => 'did_missing',
@@ -109,6 +118,7 @@ try {
     }
 
     if (strtoupper($didRow['status_inspect']) === 'NG') {
+        if (ob_get_length()) ob_clean();
         echo json_encode([
             'success' => false,
             'error_type' => 'did_ng',
@@ -119,6 +129,7 @@ try {
 
     // Fast-path: Quick real-time check per scanned label
     if (isset($_REQUEST['mode']) && $_REQUEST['mode'] === 'check_did_only') {
+        if (ob_get_length()) ob_clean();
         echo json_encode([
             'success' => true,
             'message' => "Lot Number \"{$lotNumber}\" terverifikasi lolos cek dimensi (DID).",
@@ -134,22 +145,59 @@ try {
     }
 
     // 2.B. Validasi Status Pengerjaan Terdahulu di Safety Stock (Auto-Bypass PASSED & Peringatan REJECTED)
-    $stmtPrevSS = $pdo->prepare("
-        SELECT ss.*, 
-               ki.item_code, ki.item_description, ki.customer, ki.id AS kanban_item_id,
-               did.lot_number, did.part_code, did.pic AS did_pic,
-               u.name AS inspector_name
-        FROM inspection_sessions ss
-        JOIN daily_inspection_data did ON ss.did_id = did.id
-        LEFT JOIN kanban_items ki ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
-        LEFT JOIN users u ON ss.inspector_id = u.id
-        WHERE UPPER(did.part_code) = :pcode 
-          AND UPPER(did.lot_number) = :lot
-          AND (ss.inspection_type = 'safety_stock' OR ki.plan_type = 'safety_stock' OR ki.kanban_no LIKE 'SS%')
-        ORDER BY ss.id DESC LIMIT 1
-    ");
-    $stmtPrevSS->execute([':pcode' => $partCode, ':lot' => $lotNumber]);
-    $prevSSRow = $stmtPrevSS->fetch(PDO::FETCH_ASSOC);
+    $refParam = strtoupper(trim(sanitize($_REQUEST['ref_number'] ?? '')));
+    $scannedRefRaw = $_REQUEST['scanned_ref_numbers'] ?? '[]';
+    $scannedRefs = is_string($scannedRefRaw) ? json_decode($scannedRefRaw, true) : (is_array($scannedRefRaw) ? $scannedRefRaw : []);
+    if (!is_array($scannedRefs)) $scannedRefs = [];
+    if (!empty($refParam)) $scannedRefs[] = $refParam;
+    $scannedRefs = array_values(array_unique(array_filter(array_map('strtoupper', array_map('trim', $scannedRefs)))));
+
+    $prevSSRow = null;
+
+    if ($reqInspectionType === 'safety_stock') {
+        // If inspecting Safety Stock, check if any of the specific Ref Numbers being scanned were ALREADY passed/rejected
+        if (!empty($scannedRefs)) {
+            $inRefPlaceholders = implode(',', array_fill(0, count($scannedRefs), '?'));
+            $sqlPrevRef = "
+                SELECT ss.*, isl.ref_number AS matched_ref_number,
+                       ki.item_code, ki.item_description, ki.customer, ki.id AS kanban_item_id,
+                       did.lot_number, did.part_code, did.pic AS did_pic,
+                       u.name AS inspector_name
+                FROM inspection_sessions ss
+                JOIN daily_inspection_data did ON ss.did_id = did.id
+                JOIN inspection_session_lots isl ON isl.inspection_session_id = ss.id
+                LEFT JOIN kanban_items ki ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
+                LEFT JOIN users u ON ss.inspector_id = u.id
+                WHERE UPPER(did.part_code) = ? 
+                  AND UPPER(did.lot_number) = ?
+                  AND UPPER(isl.ref_number) IN ($inRefPlaceholders)
+                  AND ss.inspection_type = 'safety_stock'
+                ORDER BY ss.id DESC LIMIT 1
+            ";
+            $paramsPrev = array_merge([$partCode, $lotNumber], $scannedRefs);
+            $stmtPrevSS = $pdo->prepare($sqlPrevRef);
+            $stmtPrevSS->execute($paramsPrev);
+            $prevSSRow = $stmtPrevSS->fetch(PDO::FETCH_ASSOC);
+        }
+    } else {
+        // For Kanban customer inspection, check if an existing Safety Stock session exists for this part_code and lot_number
+        $stmtPrevSS = $pdo->prepare("
+            SELECT ss.*, 
+                   ki.item_code, ki.item_description, ki.customer, ki.id AS kanban_item_id,
+                   did.lot_number, did.part_code, did.pic AS did_pic,
+                   u.name AS inspector_name
+            FROM inspection_sessions ss
+            JOIN daily_inspection_data did ON ss.did_id = did.id
+            LEFT JOIN kanban_items ki ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
+            LEFT JOIN users u ON ss.inspector_id = u.id
+            WHERE UPPER(did.part_code) = :pcode 
+              AND UPPER(did.lot_number) = :lot
+              AND (ss.inspection_type = 'safety_stock' OR ki.plan_type = 'safety_stock' OR ki.kanban_no LIKE 'SS%')
+            ORDER BY ss.id DESC LIMIT 1
+        ");
+        $stmtPrevSS->execute([':pcode' => $partCode, ':lot' => $lotNumber]);
+        $prevSSRow = $stmtPrevSS->fetch(PDO::FETCH_ASSOC);
+    }
 
     if ($prevSSRow) {
         if ($prevSSRow['status'] === 'passed') {
@@ -189,11 +237,12 @@ try {
             echo json_encode([
                 'success' => true,
                 'already_safety_stock_passed' => true,
-                'message' => "🎉 Selamat! Lot Number \"{$lotNumber}\" ini sudah terdaftar & PASSED (Lolos) di Safety Stock.",
+                'message' => "Lot Number \"{$lotNumber}\" " . (!empty($prevSSRow['matched_ref_number']) ? "(Ref No: {$prevSSRow['matched_ref_number']}) " : "") . "sudah terdaftar & PASSED (Lolos) di Safety Stock.",
                 'session_id' => (int)$prevSSRow['id'],
                 'kanban_item_id' => $kanbanItemId ?: (int)($prevSSRow['kanban_item_id'] ?? $prevSSRow['id']),
                 'inspector_name' => $prevSSRow['inspector_name'] ?: ($prevSSRow['did_pic'] ?: 'Inspector QC'),
                 'customer' => $customerName,
+                'matched_ref_number' => $prevSSRow['matched_ref_number'] ?? '',
                 'closed_at' => $prevSSRow['closed_at'] ? date('d M Y, H:i', strtotime($prevSSRow['closed_at'])) : '-'
             ]);
             exit;
@@ -201,20 +250,29 @@ try {
             echo json_encode([
                 'success' => true,
                 'already_safety_stock_rejected' => true,
-                'message' => "⚠️ PERINGATAN: Lot Number \"{$lotNumber}\" sebelumnya tercatat REJECTED (NG) di Safety Stock.",
+                'message' => "⚠️ PERINGATAN: Lot Number \"{$lotNumber}\" " . (!empty($prevSSRow['matched_ref_number']) ? "(Ref No: {$prevSSRow['matched_ref_number']}) " : "") . "sebelumnya tercatat REJECTED (NG) di Safety Stock.",
                 'session_id' => (int)$prevSSRow['id'],
                 'kanban_item_id' => (int)($prevSSRow['kanban_item_id'] ?? $prevSSRow['id']),
                 'inspector_name' => $prevSSRow['inspector_name'] ?: ($prevSSRow['did_pic'] ?: 'Inspector QC'),
+                'matched_ref_number' => $prevSSRow['matched_ref_number'] ?? '',
                 'closed_at' => $prevSSRow['closed_at'] ? date('d M Y, H:i', strtotime($prevSSRow['closed_at'])) : '-'
             ]);
             exit;
         }
     }
 
-    $inspectionType = ($reqInspectionType === 'safety_stock' || ($kanbanRow && ($kanbanRow['plan_type'] ?? 'kanban') === 'safety_stock')) ? 'safety_stock' : 'kanban';
+    // Prioritaskan reqInspectionType jika eksplisit 'safety_stock'; jangan biarkan kanbanRow dari order lain mengoverride
+    $inspectionType = ($reqInspectionType === 'safety_stock')
+        ? 'safety_stock'
+        : (($kanbanRow && ($kanbanRow['plan_type'] ?? 'kanban') === 'safety_stock') ? 'safety_stock' : 'kanban');
     $reqTotalScanned = clean_qty($_REQUEST['total_scanned_qty'] ?? 0);
     $totalQty = ($reqTotalScanned > 0) ? $reqTotalScanned : ($kanbanRow ? clean_qty($kanbanRow['qty']) : 500); // Priority to Total Scanned Qty
-    $customerName = $kanbanRow ? ($kanbanRow['customer'] ?? ($inspectionType === 'safety_stock' ? 'INTERNAL SAFETY STOCK' : 'PT. Indonesia Epson Industry')) : ($inspectionType === 'safety_stock' ? 'INTERNAL SAFETY STOCK' : 'PT. Indonesia Epson Industry');
+    // Safety Stock selalu customer INTERNAL — jangan ambil customer dari kanbanRow order lain
+    if ($inspectionType === 'safety_stock') {
+        $customerName = 'INTERNAL SAFETY STOCK';
+    } else {
+        $customerName = $kanbanRow ? ($kanbanRow['customer'] ?? 'PT. Indonesia Epson Industry') : 'PT. Indonesia Epson Industry';
+    }
 
     // 3. Fetch Master Part & Master Drawings (2D PDF & 3D STP) to get assigned aql_level
     $stmtPart = $pdo->prepare("SELECT p.id as part_id, p.part_code, p.part_name, p.aql_level, d.drawing_2d_path, d.drawing_3d_path 
@@ -259,6 +317,7 @@ try {
         $aqlRow = ['sample_size' => 50, 'reject_number' => 1, 'sample_code' => 'H', 'accept_number' => 0];
     }
 
+    if (ob_get_length()) ob_clean();
     echo json_encode([
         'success' => true,
         'did' => [
@@ -299,6 +358,7 @@ try {
     ]);
 
 } catch (PDOException $e) {
+    if (ob_get_length()) ob_clean();
     echo json_encode([
         'success' => false,
         'message' => 'Kesalahan Database: ' . $e->getMessage()

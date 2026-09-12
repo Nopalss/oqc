@@ -12,6 +12,33 @@ $sessionId = (int)($_GET['id'] ?? $_GET['session_id'] ?? 0);
 $autoScanNew = isset($_GET['scan_new']) && $_GET['scan_new'] == 1;
 
 $pdo = getDB();
+
+if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) {
+    header('Content-Type: application/json');
+    $items = [];
+    try {
+        $stmtPlan = $pdo->query("
+            SELECT k.*, b.document_number, b.vendor, b.plan_type as batch_plan_type,
+                   (SELECT COALESCE(SUM(s.total_scanned_qty), 0)
+                    FROM inspection_sessions s
+                    LEFT JOIN daily_inspection_data d ON d.id = s.did_id
+                    LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                    WHERE s.inspection_type = 'safety_stock'
+                      AND s.status = 'passed'
+                      AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                      AND (UPPER(d.part_code) = UPPER(k.item_code) OR UPPER(ki.item_code) = UPPER(k.item_code))) AS avail_ss_qty
+            FROM kanban_items k
+            JOIN kanban_batches b ON b.id = k.batch_id
+            LEFT JOIN inspection_sessions ss ON ss.kanban_item_id = k.id
+            WHERE ss.id IS NULL
+            ORDER BY COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id DESC
+            LIMIT 100
+        ");
+        $items = $stmtPlan->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $ePlan) {}
+    echo json_encode(['success' => true, 'items' => $items]);
+    exit;
+}
 $session = null;
 $defectTypes = [];
 $ngRecords = [];
@@ -30,10 +57,18 @@ if ($pdo) {
     $activePlanningItems = [];
     try {
         $stmtPlan = $pdo->query("
-            SELECT k.*, b.document_number, b.vendor, b.plan_type as batch_plan_type
+            SELECT k.*, b.document_number, b.vendor, b.plan_type as batch_plan_type,
+                   (SELECT COALESCE(SUM(s.total_scanned_qty), 0)
+                    FROM inspection_sessions s
+                    LEFT JOIN daily_inspection_data d ON d.id = s.did_id
+                    LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                    WHERE s.inspection_type = 'safety_stock'
+                      AND s.status = 'passed'
+                      AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                      AND (UPPER(d.part_code) = UPPER(k.item_code) OR UPPER(ki.item_code) = UPPER(k.item_code))) AS avail_ss_qty
             FROM kanban_items k
             JOIN kanban_batches b ON b.id = k.batch_id
-            LEFT JOIN inspection_sessions ss ON (ss.kanban_item_id = k.id OR ss.did_id = k.id)
+            LEFT JOIN inspection_sessions ss ON ss.kanban_item_id = k.id
             WHERE ss.id IS NULL
             ORDER BY COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id DESC
             LIMIT 100
@@ -46,9 +81,9 @@ if ($pdo) {
             $stmt = $pdo->prepare("
                 SELECT s.*, 
                        did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
-                       k.kanban_no, k.item_code as kanban_item_code, k.item_description as kanban_item_desc, k.customer, k.req_date as kanban_req_date, k.eta as kanban_eta, k.str_loc as kanban_str_loc, k.supply_area as kanban_supply_area, k.check_type as kanban_check_type, k.remark as kanban_remark, k.qty as kanban_qty,
+                       k.kanban_no, k.item_code as kanban_item_code, k.item_description as kanban_item_desc, k.customer, k.req_date as kanban_req_date, k.eta as kanban_eta, k.str_loc as kanban_str_loc, k.supply_area as kanban_supply_area, k.check_type as kanban_check_type, COALESCE(NULLIF(k.remark, ''), did.remark) as kanban_remark, k.qty as kanban_qty,
                        b.document_number as doc_no, b.vendor as kanban_vendor, b.plan_type as batch_plan_type,
-                       p.id as part_id, p.aql_level as part_aql_level, p.model as part_model, d.drawing_2d_path, d.drawing_3d_path
+                       p.id as part_id, p.aql_level as part_aql_level, COALESCE(m.name, p.model) as part_model, d.drawing_2d_path, d.drawing_3d_path
                 FROM inspection_sessions s
                 JOIN daily_inspection_data did ON did.id = s.did_id
                 LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -57,6 +92,7 @@ if ($pdo) {
                     s.part_id,
                     (SELECT mp.id FROM master_parts mp WHERE UPPER(mp.part_code) = UPPER(did.part_code) LIMIT 1)
                 )
+                LEFT JOIN master_models m ON m.id = p.model_id
                 LEFT JOIN master_drawings d ON d.part_id = p.id
                 WHERE s.id = :id
             ");
@@ -64,7 +100,16 @@ if ($pdo) {
             $session = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if ($session) {
-                $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 500));
+                $ssQty = (int)($session['use_safety_stock_qty'] ?? 0);
+                $physQty = max(0, (int)$session['total_scanned_qty'] - $ssQty);
+                
+                // AQL sample size is calculated ONLY from new physical scanned Qty when Safety Stock is used
+                if ($ssQty > 0 && ($session['inspection_type'] ?? 'kanban') === 'kanban') {
+                    $qty = ($physQty > 0) ? $physQty : 1;
+                } else {
+                    $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 500));
+                }
+
                 $partAqlLvl = !empty($session['part_aql_level']) ? $session['part_aql_level'] : 'G-II';
                 $stmtAql = $pdo->prepare("SELECT sample_code, sample_size, accept_number, reject_number FROM aql_standards WHERE inspection_level = :lvl AND :qty BETWEEN qty_min AND qty_max LIMIT 1");
                 $stmtAql->execute([':lvl' => $partAqlLvl, ':qty' => $qty]);
@@ -76,7 +121,7 @@ if ($pdo) {
                 }
                 if ($aqlExtra) {
                     $session['sample_code'] = $aqlExtra['sample_code'];
-                    $session['sample_size'] = (int)$aqlExtra['sample_size'];
+                    $session['sample_size'] = ($ssQty > 0 && $physQty == 0) ? 0 : (int)$aqlExtra['sample_size'];
                     $session['accept_number'] = (int)$aqlExtra['accept_number'];
                     $session['reject_number'] = (int)$aqlExtra['reject_number'];
                 }
@@ -115,23 +160,91 @@ if ($pdo) {
                 }
                 $lotSummaryList = array_values($lotSummary);
 
-                // Fetch previous inspection sessions for the same part_code
+                // Fetch previous inspection sessions specifically focused on this Kanban Item / Safety Stock
                 if (!empty($session['part_code'])) {
-                    $stmtPrev = $pdo->prepare("
-                        SELECT s.id, s.started_at, s.status, s.samples_checked, s.sample_size, s.ng_count, s.reject_number,
-                               did.lot_number, did.cavity, did.pic as did_pic, u.name as inspector_name
-                        FROM inspection_sessions s
-                        JOIN daily_inspection_data did ON did.id = s.did_id
-                        LEFT JOIN users u ON u.id = s.inspector_id
-                        WHERE UPPER(did.part_code) = UPPER(:pcode) AND s.id != :curr_id
-                        ORDER BY s.id DESC
-                        LIMIT 5
-                    ");
-                    $stmtPrev->execute([
-                        ':pcode' => $session['part_code'],
-                        ':curr_id' => $session['id']
-                    ]);
+                    $kanbanItemId = (int)($session['kanban_item_id'] ?? 0);
+                    $parentSessId = (int)($session['parent_session_id'] ?? 0);
+
+                    if ($kanbanItemId > 0) {
+                        // Focused ONLY on this specific Kanban Item (and its re-inspection lineage)
+                        $sqlPrev = "
+                            SELECT s.id, s.started_at, s.status, s.samples_checked, s.sample_size, s.ng_count, s.reject_number,
+                                   s.inspection_type, s.total_scanned_qty, s.parent_session_id, s.reinspection_notes,
+                                   did.lot_number, did.cavity, did.pic as did_pic,
+                                   k.kanban_no, k.customer,
+                                   COALESCE(NULLIF(mp.part_name, ''), did.part_name) as display_part_name,
+                                   u.name as inspector_name
+                            FROM inspection_sessions s
+                            JOIN daily_inspection_data did ON did.id = s.did_id
+                            LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+                            LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(did.part_code))
+                            LEFT JOIN users u ON u.id = s.inspector_id
+                            WHERE (s.kanban_item_id = :kb_id OR s.id = :parent_id OR s.parent_session_id = :curr_id1)
+                              AND s.id != :curr_id2
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM inspection_session_lots isl_chk 
+                                  WHERE isl_chk.inspection_session_id = s.id 
+                                    AND isl_chk.remarks LIKE '%Sisa Split Safety Stock%'
+                              )
+                            ORDER BY s.id DESC
+                            LIMIT 10
+                        ";
+                        $paramsPrev = [
+                            ':kb_id'     => $kanbanItemId,
+                            ':parent_id' => $parentSessId,
+                            ':curr_id1'  => $session['id'],
+                            ':curr_id2'  => $session['id']
+                        ];
+                    } else {
+                        // Focused ONLY on Safety Stock sessions for this part code
+                        $sqlPrev = "
+                            SELECT s.id, s.started_at, s.status, s.samples_checked, s.sample_size, s.ng_count, s.reject_number,
+                                   s.inspection_type, s.total_scanned_qty, s.parent_session_id, s.reinspection_notes,
+                                   did.lot_number, did.cavity, did.pic as did_pic,
+                                   k.kanban_no, k.customer,
+                                   COALESCE(NULLIF(mp.part_name, ''), did.part_name) as display_part_name,
+                                   u.name as inspector_name
+                            FROM inspection_sessions s
+                            JOIN daily_inspection_data did ON did.id = s.did_id
+                            LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+                            LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(did.part_code))
+                            LEFT JOIN users u ON u.id = s.inspector_id
+                            WHERE s.inspection_type = 'safety_stock'
+                              AND UPPER(did.part_code) = UPPER(:pcode)
+                              AND s.id != :curr_id
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM inspection_session_lots isl_chk 
+                                  WHERE isl_chk.inspection_session_id = s.id 
+                                    AND isl_chk.remarks LIKE '%Sisa Split Safety Stock%'
+                              )
+                            ORDER BY s.id DESC
+                            LIMIT 10
+                        ";
+                        $paramsPrev = [
+                            ':pcode'   => $session['part_code'],
+                            ':curr_id' => $session['id']
+                        ];
+                    }
+
+                    $stmtPrev = $pdo->prepare($sqlPrev);
+                    $stmtPrev->execute($paramsPrev);
                     $previousSessions = $stmtPrev->fetchAll(PDO::FETCH_ASSOC);
+
+                    // Fetch defect breakdown for each previous session
+                    foreach ($previousSessions as &$ps) {
+                        $stmtDefects = $pdo->prepare("
+                            SELECT dt.name as defect_name, SUM(n.qty_ng) as total_qty_ng
+                            FROM inspection_ng_records n
+                            JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+                            JOIN defect_types dt ON dt.id = n.defect_type_id
+                            WHERE sp.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                            GROUP BY n.defect_type_id, dt.name
+                            ORDER BY total_qty_ng DESC
+                        ");
+                        $stmtDefects->execute([':sid' => $ps['id']]);
+                        $ps['defects'] = $stmtDefects->fetchAll(PDO::FETCH_ASSOC);
+                    }
+                    unset($ps);
                 }
             }
         } catch (PDOException $e) {
@@ -173,28 +286,30 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <span class="text-blue-600">SCAN INSPEKSI</span>
                 </div>
                 <h1 class="text-sm font-extrabold text-slate-900 leading-tight truncate flex items-center" id="header-session-title">
-                    <?php if ($session): ?>
-                        <span>Inspeksi Barang — <span class="font-mono text-blue-700 font-black"><?= htmlspecialchars($session['part_code']) ?></span>
-                        <span class="font-semibold text-slate-600 text-xs hidden sm:inline"> (<?= htmlspecialchars($session['part_name']) ?>)</span></span>
-                        <span id="header-customer-badge" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shadow-2xs ml-2 flex-shrink-0">
-                            🏢 <?= htmlspecialchars($session['customer'] ?? 'PT. Indonesia Epson Industry') ?>
-                        </span>
-                        <?php if (!empty($session['is_reinspection'])): ?>
-                        <span id="header-reinspection-badge" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs ml-2 flex-shrink-0">
-                            🔄 RE-INSPEKSI
-                            <?php if (!empty($session['reinspection_type'])): ?>
-                            <span class="ml-1 font-normal">(<?= $session['reinspection_type'] === 'rescan_same_lot' ? 'Scan Ulang' : 'Ganti Lot' ?>)</span>
-                            <?php endif; ?>
+                    <span>Inspeksi Barang</span>
+                    <span id="header-reinspection-wrapper" class="inline-flex items-center">
+                    <?php if ($session && !empty($session['is_reinspection'])): ?>
+                        <?php
+                        $rTypeLabelsPHP = [
+                            'rescan_restart'   => 'Scan Ulang (Awal)',
+                            'rescan_continue'  => 'Scan Ulang (Lanjut)',
+                            'rescan_same_lot'  => 'Scan Ulang',
+                            'replace_ng_only'  => 'Ganti Lot NG',
+                            'replace_all_lots' => 'Ganti Semua Lot'
+                        ];
+                        $rTypeLblPHP = $rTypeLabelsPHP[$session['reinspection_type'] ?? ''] ?? 'Re-Inspeksi';
+                        $roundNumPHP = $session['reinspection_round'] ?? 1;
+                        ?>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs ml-2 flex-shrink-0">
+                            ⚡ RE-INSPEKSI #<?= htmlspecialchars($roundNumPHP) ?> (<?= htmlspecialchars($rTypeLblPHP) ?>)
                         </span>
                         <?php if (!empty($session['parent_session_id'])): ?>
                         <a href="<?= base_url('modules/inspection/session.php?id=' . $session['parent_session_id']) ?>" class="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-300 ml-2 flex-shrink-0 hover:bg-slate-200 transition-colors">
-                            ← Sesi Original #<?= $session['parent_session_id'] ?>
+                            ← Sesi Original #<?= htmlspecialchars($session['parent_session_id']) ?>
                         </a>
                         <?php endif; ?>
-                        <?php endif; ?>
-                    <?php else: ?>
-                        Workbench Scan & Inspeksi OQC
                     <?php endif; ?>
+                    </span>
                 </h1>
             </div>
         </div>
@@ -210,11 +325,18 @@ require_once __DIR__ . '/../../layouts/header.php';
             </button>
 
             <?php if ($session): ?>
-                <button type="button" onclick="openPrevHistoryModal()" class="btn-secondary py-1.5 px-3 text-xs font-bold flex items-center shadow-xs text-slate-700 hover:bg-slate-100" title="Lihat Riwayat Sesi Inspeksi Lot-Lot Sebelumnya untuk Part Ini">
+                <button type="button" onclick="openPrevHistoryModal()" class="btn-secondary py-1.5 px-3 text-xs font-bold flex items-center shadow-xs text-slate-700 hover:bg-slate-100" title="Lihat Riwayat Sesi Inspeksi Terdahulu untuk Part Code Ini">
                     <svg class="w-3.5 h-3.5 mr-1.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
-                    <span>Riwayat Lot Part (<?= count($previousSessions) ?>)</span>
+                    <span>Riwayat Inspeksi (<?= count($previousSessions) ?>)</span>
+                </button>
+                
+                <button type="button" id="btn-top-substitution-log" onclick="openSubstitutionLogModal()" class="hidden btn-secondary py-1.5 px-3 text-xs font-bold flex items-center shadow-xs text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 transition-all cursor-pointer" title="Lihat Rincian Lineage Penggantian Lot & Ref No">
+                    <svg class="w-3.5 h-3.5 mr-1.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>Substitusi Lot (<span id="top-subst-log-count">0</span>)</span>
                 </button>
             <?php endif; ?>
 
@@ -342,11 +464,16 @@ require_once __DIR__ . '/../../layouts/header.php';
                             🏢 <?= $session ? htmlspecialchars($session['customer'] ?? 'PT. Indonesia Epson Industry') : '-' ?>
                         </span>
                     </div>
-                    <button type="button" onclick="openKanbanDetailModal()" class="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[10px] rounded-md border border-blue-200 shadow-2xs inline-flex items-center transition-all flex-shrink-0 cursor-pointer" title="Lihat Rincian Detail Planning Kanban">
-                        📋 Detail 
-                    </button>
+                    <div class="flex items-center space-x-1">
+                        <button type="button" onclick="openKanbanDetailModal()" class="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[10px] rounded-md border border-blue-200 shadow-2xs inline-flex items-center transition-all flex-shrink-0 cursor-pointer" title="Lihat Rincian Detail Planning Kanban">
+                            📋 Detail 
+                        </button>
+                        <button type="button" id="btn-card-substitution-log" onclick="openSubstitutionLogModal()" class="hidden px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded-md border border-emerald-300 shadow-2xs inline-flex items-center transition-all flex-shrink-0 cursor-pointer" title="Lihat Rincian Lineage Penggantian Lot & Ref No">
+                            🔄 Substitusi (<span id="card-subst-log-count">0</span>)
+                        </button>
+                    </div>
                 </div>
-                <div class="grid grid-cols-4 gap-1.5">
+                <div class="grid grid-cols-3 gap-1.5">
                     <div>
                         <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">TIPE INSPEKSI</span>
                         <span id="card-type-badge">
@@ -366,32 +493,41 @@ require_once __DIR__ . '/../../layouts/header.php';
                         <span class="font-mono font-extrabold text-slate-900 text-xs truncate block" id="card-part-code"><?= $session ? htmlspecialchars($session['part_code']) : '-' ?></span>
                     </div>
                     <div>
-                        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">LOT NO</span>
-                        <span class="font-mono font-extrabold text-slate-900 text-[11px] truncate block" id="card-lot-no">
-                            <?php if (isset($lotSummaryList) && count($lotSummaryList) > 1): ?>
-                                <span onclick="openKanbanDetailModal()" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300 font-mono cursor-pointer hover:bg-amber-200" title="Klik untuk lihat rincian Multi-Lot">📦 Multi-Lot (<?= count($lotSummaryList) ?> Lot)</span>
-                            <?php else: ?>
-                                <?= $session ? htmlspecialchars($session['lot_number']) : '-' ?>
-                            <?php endif; ?>
-                        </span>
-                    </div>
-                    <div>
                         <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">TOTAL QTY</span>
-                        <span class="font-extrabold text-slate-900 text-xs block" id="card-total-qty"><?= $session ? number_format(($session['total_scanned_qty'] && (int)$session['total_scanned_qty'] > 0) ? $session['total_scanned_qty'] : ($session['kanban_qty'] ?? 0)) : '0' ?> <span class="text-[10px] font-normal text-slate-500">pcs</span></span>
-                    </div>
-                </div>
-            </div>
+                        <?php 
+                        $totalScanned = $session ? (int)$session['total_scanned_qty'] : 0;
+                        $kanbanTarget = $session ? (int)($session['kanban_qty'] ?? 0) : 0;
+                        $usedSs = $session ? (int)($session['use_safety_stock_qty'] ?? 0) : 0;
+                        $excessQty = $session ? (int)($session['excess_qty'] ?? 0) : 0;
+                        $isKanbanMode = !$session || ($session['inspection_type'] ?? 'kanban') === 'kanban';
 
-            <!-- Card 1.5: Rincian Penggantian Lot & Ref No (Substitution Lineage Mapping) -->
-            <div id="substitution-mapping-card" class="hidden" style="background-color: #f0fdf4; border: 1.5px solid #bbf7d0; border-radius: 16px; padding: 12px; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(22,101,52,0.06);">
-                <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #dcfce7; padding-bottom: 6px; margin-bottom: 8px;">
-                    <span style="font-size: 11px; font-weight: 800; color: #166534; text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center; gap: 6px;">
-                        <span>🔄</span> RINCIAN PENGGANTIAN LOT &amp; REF NO
-                    </span>
-                    <span id="subst-log-count-badge" style="font-size: 10px; font-weight: 800; color: #15803d; background-color: #ffffff; border: 1px solid #86efac; padding: 1px 8px; border-radius: 8px;"></span>
-                </div>
-                <div id="subst-log-list-body" style="display: flex; flex-direction: column; gap: 6px; max-height: 140px; overflow-y: auto; padding-right: 2px;">
-                    <!-- Populated via JS -->
+                        if ($isKanbanMode) {
+                            $targetDisplay = ($kanbanTarget > 0) ? $kanbanTarget : max(500, $totalScanned);
+                            $mainQtyText = number_format($totalScanned) . ' / ' . number_format($targetDisplay) . ' pcs';
+                        } else {
+                            $mainQtyText = number_format($totalScanned) . ' pcs';
+                        }
+                        ?>
+                        <span class="font-extrabold text-slate-900 text-xs block" id="card-total-qty"><?= $mainQtyText ?></span>
+
+                        <div id="card-qty-subbadge">
+                        <?php if ($isKanbanMode): ?>
+                            <?php if ($usedSs > 0 && $totalScanned >= $targetDisplay && ($totalScanned - $usedSs) <= 0): ?>
+                                <span class="text-[8.5px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1 py-0.2 rounded block mt-0.5" title="Seluruh Qty target Kanban dipenuhi dari Safety Stock">
+                                    ✨ 100% Safety Stock (<?= number_format($usedSs) ?> pcs)
+                                </span>
+                            <?php elseif ($usedSs > 0): ?>
+                                <span class="text-[8.5px] font-bold text-blue-800 bg-blue-50 border border-blue-200 px-1 py-0.2 rounded block mt-0.5" title="Kombinasi Scan Fisik & Alokasi Safety Stock">
+                                    📦 <?= number_format(max(0, $totalScanned - $usedSs)) ?> Fisik + <?= number_format($usedSs) ?> Safety Stock
+                                </span>
+                            <?php elseif ($excessQty > 0): ?>
+                                <span class="text-[8.5px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-1 py-0.2 rounded block mt-0.5" title="Sisa kelebihan Qty akan otomatis disimpan ke Safety Stock saat PASSED">
+                                    📦 +<?= number_format($excessQty) ?> pcs Kelebihan → Safety Stock
+                                </span>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div style="background-color: #1e40af; color: #ffffff; border-radius: 16px; padding: 14px; margin-bottom: 10px; box-shadow: 0 4px 6px -1px rgba(30,64,175,0.2); position: relative; overflow: hidden;" class="flex-shrink-0">
@@ -409,7 +545,20 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <div style="text-align: right;">
                         <span style="color: #bfdbfe; font-size: 10px; font-weight: 600; display: block;">SAMPLE SIZE</span>
                         <span style="color: #ffffff; font-size: 20px; font-weight: 900; display: block;" id="card-sample-size"><?= $session ? $session['sample_size'] : '8' ?> <span style="font-size: 12px; font-weight: 400;">pcs</span></span>
-                        <span style="color: #bfdbfe; font-size: 10px; font-weight: 500; display: block; margin-top: 2px;">wajib diperiksa </span>
+                        <?php 
+                        $physQtyExp = max(0, $totalScanned - $usedSs);
+                        $expText = '';
+                        if ($usedSs > 0) {
+                            if ($physQtyExp > 0) {
+                                $expText = 'ℹ️ dari ' . number_format($physQtyExp) . ' pcs fisik baru (' . number_format($usedSs) . ' pcs SS Passed)';
+                            } else {
+                                $expText = '✨ 100% dipenuhi dari Safety Stock';
+                            }
+                        } else {
+                            $expText = 'wajib diperiksa';
+                        }
+                        ?>
+                        <span style="color: #bfdbfe; font-size: 10px; font-weight: 500; display: block; margin-top: 2px;" id="card-aql-explanation"><?= $expText ?></span>
                     </div>
                 </div>
             </div>
@@ -648,18 +797,16 @@ require_once __DIR__ . '/../../layouts/header.php';
     
     <div style="background-color: #ffffff; border-radius: 24px; max-width: 640px; width: 95vw; max-height: 88vh; padding: 24px; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); position: relative; margin: auto; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto;" class="animate-fadeIn space-y-4">
         
-        <?php if ($session): ?>
-            <button type="button" onclick="closeScanModal()" class="absolute right-5 top-5 text-slate-400 hover:text-slate-600 font-bold text-xl">&times;</button>
-        <?php endif; ?>
+        <button type="button" onclick="closeScanModal(true)" class="absolute right-5 top-5 text-slate-400 hover:text-slate-600 font-bold text-xl cursor-pointer" title="Tutup / Batal">&times;</button>
 
         <!-- Wizard Step Indicator Header -->
         <div class="text-center space-y-1.5 flex-shrink-0">
             <div class="flex items-center justify-center space-x-2 flex-wrap gap-y-1">
-                <span id="step-pill-1" class="px-3 py-1 rounded-full text-xs font-bold bg-blue-600 text-white shadow-2xs whitespace-nowrap">
+                <span id="step-pill-1" style="background-color: #2563eb; color: #ffffff; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;">
                     1. Pilih Planning
                 </span>
-                <span class="text-slate-300 font-bold hidden sm:inline">&rarr;</span>
-                <span id="step-pill-2" class="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-400 border border-slate-200 whitespace-nowrap">
+                <span style="color: #cbd5e1; font-weight: 800;" class="hidden sm:inline">&rarr;</span>
+                <span id="step-pill-2" style="background-color: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 700; display: inline-block;">
                     2. Scan Label QR
                 </span>
             </div>
@@ -728,13 +875,16 @@ require_once __DIR__ . '/../../layouts/header.php';
                     ?>
                     <div class="planning-card p-3 bg-white hover:bg-blue-50/80 border border-slate-200 hover:border-blue-400 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-3 shadow-2xs"
                          data-plan-type="<?= $isSafetyStock ? 'safety_stock' : 'kanban' ?>"
-                         onclick="selectPlanningItem(<?= (int)$plan['id'] ?>, '<?= addslashes($plan['item_code']) ?>', '<?= addslashes($plan['item_description']) ?>', '<?= addslashes($pCust) ?>', <?= (int)$plan['qty'] ?>, '<?= addslashes($pCek) ?>', '<?= $isSafetyStock ? 'safety_stock' : 'kanban' ?>')">
+                         onclick="selectPlanningItem(<?= (int)$plan['id'] ?>, '<?= addslashes($plan['item_code']) ?>', '<?= addslashes($plan['item_description']) ?>', '<?= addslashes($pCust) ?>', <?= (int)$plan['qty'] ?>, '<?= addslashes($pCek) ?>', '<?= $isSafetyStock ? 'safety_stock' : 'kanban' ?>', <?= (int)($plan['avail_ss_qty'] ?? 0) ?>)">
                         <div class="min-w-0 flex-1 space-y-1">
                             <div class="flex items-center space-x-1.5 flex-wrap gap-y-1">
                                 <span class="font-mono font-black text-blue-700 text-xs"><?= $pCode ?></span>
                                 <span class="badge text-[9px] <?= $isSafetyStock ? 'bg-purple-100 text-purple-800 border border-purple-200 font-extrabold' : 'bg-blue-100 text-blue-800 border border-blue-200 font-bold' ?>"><?= $pType ?></span>
                                 <?php if ($pCek): ?>
                                     <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300"><?= $pCek ?> Cek</span>
+                                <?php endif; ?>
+                                <?php if (!empty($plan['avail_ss_qty']) && (int)$plan['avail_ss_qty'] > 0 && !$isSafetyStock): ?>
+                                    <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-300" title="Tersedia stok Safety Stock yang bisa dipakai memotong Qty Kanban">📦 Safety Stock: <?= number_format($plan['avail_ss_qty']) ?> pcs (Potong Qty)</span>
                                 <?php endif; ?>
 
                                 <!-- ETA Schedule & Prioritas Badge (Compact & Small Text) -->
@@ -760,6 +910,13 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <?php endforeach; ?>
                 <?php endif; ?>
             </div>
+
+            <!-- Step 1 Footer Action Bar (Batal / Kembali Button) -->
+            <div style="display: flex; align-items: center; justify-content: flex-end; padding-top: 8px; border-top: 1px solid #e2e8f0;" class="flex-shrink-0">
+                <button type="button" onclick="closeScanModal(true)" style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; font-weight: 700; padding: 6px 14px; border-radius: 9px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
+                    ❌ Batal / Kembali
+                </button>
+            </div>
         </div>
 
         <!-- ── STEP 2: SCAN BARCODE LABEL ─────────────────────────── -->
@@ -780,9 +937,69 @@ require_once __DIR__ . '/../../layouts/header.php';
                         Cust: <b id="selected-plan-cust" class="text-slate-700">-</b> &middot; Target Qty: <b id="selected-plan-qty" class="text-blue-700 font-extrabold">0</b>
                     </div>
                 </div>
-                <button type="button" onclick="backToStep1()" class="text-xs text-blue-700 font-bold hover:bg-slate-100 bg-white border border-blue-300 px-2.5 py-1.5 rounded-xl shadow-2xs ml-2 flex-shrink-0 flex items-center space-x-1">
-                    <span>✏️ Ganti</span>
-                </button>
+                <div style="display: flex; align-items: center; gap: 6px;" class="flex-shrink-0">
+                    <button type="button" onclick="backToStep1()" class="text-xs text-blue-700 font-bold hover:bg-slate-100 bg-white border border-blue-300 px-2.5 py-1.5 rounded-xl shadow-2xs flex items-center space-x-1">
+                        <span>✏️ Ganti</span>
+                    </button>
+                    <button type="button" onclick="closeScanModal(true)" class="text-xs text-rose-700 font-bold hover:bg-rose-50 bg-white border border-rose-300 px-2.5 py-1.5 rounded-xl shadow-2xs flex items-center space-x-1">
+                        <span>❌ Batal</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Safety Stock Allocation Card (Muncul jika ada Safety Stock PASSED tersedia) -->
+            <div id="safety-stock-deduction-card" class="hidden p-3 bg-gradient-to-r from-emerald-50 to-teal-50 border-2 border-emerald-300 rounded-xl space-y-2 text-xs shadow-2xs">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-1.5 font-extrabold text-emerald-900">
+                        <span class="text-sm">📦</span>
+                        <span>SAFETY STOCK PASSED TERSEDIA!</span>
+                    </div>
+                    <span id="ss-deduct-badge" class="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white shadow-2xs">
+                        ALOKASI 0 PCS
+                    </span>
+                </div>
+                <div class="text-[11px] text-slate-700 space-y-1 bg-white/80 p-2 rounded-lg border border-emerald-200">
+                    <div class="flex justify-between">
+                        <span class="text-slate-500">Target Kanban Pesanan:</span>
+                        <span id="ss-deduct-orig-qty" class="font-bold text-slate-900">0 pcs</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-emerald-700 font-semibold">Dipenuhi dari Safety Stock (Passed):</span>
+                        <span id="ss-deduct-used-qty" class="font-black text-emerald-700">- 0 pcs</span>
+                    </div>
+                    <div class="flex justify-between border-t border-slate-200 pt-1 font-bold">
+                        <span class="text-blue-900">Sisa Perlu Scan Fisik Baru:</span>
+                        <span id="ss-deduct-remain-qty" class="font-black text-blue-700 text-xs">0 pcs</span>
+                    </div>
+                </div>
+
+                <!-- Interactive Multi-Lot Safety Stock Selection List -->
+                <div class="space-y-1 bg-emerald-100/50 p-2 rounded-lg border border-emerald-200">
+                    <div class="flex items-center justify-between font-extrabold text-[11px] text-emerald-900 pb-1 border-b border-emerald-200/80">
+                        <span class="flex items-center space-x-1">
+                            <span>📋 Pilih Lot Safety Stock Tersedia</span>
+                        </span>
+                        <span class="text-[10px] text-emerald-700 font-semibold" id="ss-lots-count-info">0 Lot</span>
+                    </div>
+                    <div id="ss-lots-checkbox-list" class="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                        <!-- Populated dynamically via JS -->
+                    </div>
+                </div>
+
+                <!-- 100% Safety Stock Completion Banner (Tampil saat 100% Kanban terpenuhi dari SS) -->
+                <div id="ss-full-fulfill-banner" style="background-color: #059669; color: #ffffff; padding: 14px; border-radius: 12px; text-align: center;" class="hidden space-y-2 shadow-sm">
+                    <p style="font-weight: 900; font-size: 13px; color: #ffffff; margin: 0;">✨ 100% Target Qty Terpenuhi dari Safety Stock!</p>
+                    <p style="font-size: 11px; font-weight: 500; color: #d1fae5; margin: 0 0 6px 0;">Seluruh lot barang telah terverifikasi PASSED di Safety Stock. Tidak perlu pengujian sample atau scan barcode fisik baru.</p>
+                    <button type="button" onclick="triggerDirectSsCompletion()" style="width: 100%; padding: 12px 14px; background-color: #ffffff !important; color: #064e3b !important; border: 2px solid #047857; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.15); transition: all 0.2s;" onmouseover="this.style.backgroundColor='#ecfdf5'" onmouseout="this.style.backgroundColor='#ffffff'">
+                        <span style="color: #064e3b !important; font-weight: 900 !important; font-size: 13px !important; line-height: 1.2; display: inline-block;">🚀 Selesaikan &amp; Loloskan Inspeksi Kanban (100% Safety Stock) &rarr;</span>
+                    </button>
+                </div>
+
+                <div class="flex items-center justify-end pt-0.5">
+                    <button type="button" id="btn-toggle-ss-deduct" onclick="toggleSafetyStockDeduction()" class="px-2.5 py-1 bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-300 font-extrabold text-[10px] rounded-lg shadow-2xs transition-all flex items-center space-x-1 cursor-pointer">
+                        <span>❌ Jangan Pakai Safety Stock</span>
+                    </button>
+                </div>
             </div>
 
             <!-- Multi-Label Accumulation Progress Card -->
@@ -809,29 +1026,29 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <label class="block font-extrabold text-slate-900 text-[11px] flex items-center justify-between">
                         <span class="flex items-center">
                             <svg class="w-3.5 h-3.5 mr-1 text-blue-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
-                            Scan Barcode / QR Code Label (Z1|Z2|Z3|Z4|Z5)
+                            Scan Barcode / QR Code Label
                         </span>
                         <span class="text-[10px] text-blue-600 font-semibold">Auto-Add per Scan</span>
                     </label>
                     <input type="text" id="scan-qr-raw" oninput="parseBarcodeQRInput(this.value, false)" onkeydown="handleScanInputKeydown(event)" placeholder="Tempel atau Scan Barcode / QR Code Label di sini..." class="form-input py-2 px-3 text-xs font-mono font-bold bg-white border-blue-400 focus:border-blue-600 w-full min-w-0 box-border" autocomplete="off">
-                    <p class="text-[10px] text-slate-500 font-medium">Sistem membaca Ref No (Z5 - Unik), Lot No (Z2), Qty (Z3). Scan bertahap hingga target Qty terpenuhi.</p>
+                    <p class="text-[10px] text-slate-500 font-medium">Sistem membaca Ref No, Lot No, Qty secara otomatis. Scan bertahap hingga target Qty terpenuhi.</p>
                 </div>
 
                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full min-w-0">
                     <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Part Code (Z1) <span class="text-rose-500">*</span></label>
+                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Part Code <span class="text-rose-500">*</span></label>
                         <input type="text" id="scan-part-code" list="modal-parts-list" placeholder="190041102" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase w-full min-w-0 box-border" autocomplete="off">
                     </div>
                     <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Lot Number (Z2) <span class="text-rose-500">*</span></label>
+                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Lot Number <span class="text-rose-500">*</span></label>
                         <input type="text" id="scan-lot-number" placeholder="06426817" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase w-full min-w-0 box-border" autocomplete="off">
                     </div>
                     <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Qty Box (Z3) <span class="text-rose-500">*</span></label>
+                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Qty Box <span class="text-rose-500">*</span></label>
                         <input type="number" id="scan-label-qty" min="1" placeholder="20" class="form-input py-1.5 px-2 text-xs font-mono font-bold w-full min-w-0 box-border" autocomplete="off">
                     </div>
                     <div class="min-w-0">
-                        <label class="block font-extrabold text-blue-700 mb-1 text-[10px] truncate">Ref Number (Z5) <span class="text-rose-500">*</span></label>
+                        <label class="block font-extrabold text-blue-700 mb-1 text-[10px] truncate">Ref Number <span class="text-rose-500">*</span></label>
                         <input type="text" id="scan-ref-number" placeholder="KSKA" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase bg-blue-50/50 border-blue-300 w-full min-w-0 box-border" autocomplete="off">
                     </div>
                 </div>
@@ -855,9 +1072,9 @@ require_once __DIR__ . '/../../layouts/header.php';
                         <thead class="bg-slate-100 text-slate-600 font-bold border-b border-slate-200 uppercase text-[9px]">
                             <tr>
                                 <th class="px-2.5 py-1.5">No</th>
-                                <th class="px-2.5 py-1.5">Ref No (Z5)</th>
-                                <th class="px-2.5 py-1.5">Lot No (Z2)</th>
-                                <th class="px-2.5 py-1.5 text-right">Qty (Z3)</th>
+                                <th class="px-2.5 py-1.5">Ref No</th>
+                                <th class="px-2.5 py-1.5">Lot No</th>
+                                <th class="px-2.5 py-1.5 text-right">Qty</th>
                                 <th class="px-2.5 py-1.5 text-center">Aksi</th>
                             </tr>
                         </thead>
@@ -1065,69 +1282,106 @@ require_once __DIR__ . '/../../layouts/header.php';
     </div>
 </div>
 
-<!-- Modal Riwayat Inspeksi Lot Sebelumnya untuk Part Ini -->
+<!-- Modal Riwayat Inspeksi Sesi Terdahulu untuk Part Ini -->
 <div id="prev-history-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
-    <div style="background-color: #ffffff; border-radius: 20px; max-width: 600px; width: 100%; max-height: 85vh; display: flex; flex-direction: column; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); margin: auto; overflow: hidden;" class="animate-fadeIn">
+    <div style="background-color: #ffffff; border-radius: 20px; max-width: 620px; width: 100%; max-height: 88vh; display: flex; flex-direction: column; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); margin: auto; overflow: hidden;" class="animate-fadeIn">
         
         <!-- Modal Header -->
         <div class="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50 flex-shrink-0">
             <div>
-                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">RIWAYAT INSPEKSI PREVIOUS LOT</span>
+                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                    <?= ($session && !empty($session['kanban_no'])) ? ('RIWAYAT INSPEKSI KANBAN NO: KB-' . htmlspecialchars($session['kanban_no'])) : 'RIWAYAT INSPEKSI SESI TERDAHULU' ?>
+                </span>
                 <h3 class="text-sm font-extrabold text-slate-900 flex items-center">
                     <span class="font-mono text-blue-700 mr-1.5"><?= $session ? htmlspecialchars($session['part_code']) : '' ?></span>
-                    <span class="text-slate-600 text-xs font-semibold">(<?= $session ? htmlspecialchars($session['part_name']) : '' ?>)</span>
+                    <span class="text-slate-600 text-xs font-semibold">(<?= $session ? htmlspecialchars($session['display_part_name'] ?? $session['part_name']) : '' ?>)</span>
                 </h3>
             </div>
             <button type="button" onclick="closePrevHistoryModal()" class="text-slate-400 hover:text-slate-600 font-bold text-xl leading-none px-2">&times;</button>
         </div>
 
-        <!-- Modal Body: Cards List of Previous Lots (Strictly Scrollable Flex-1 Container) -->
-        <div style="min-height: 0; flex: 1; max-height: 60vh; overflow-y: auto; -webkit-overflow-scrolling: touch;" class="p-4 space-y-2.5">
+        <!-- Modal Body: Cards List of Previous Inspection Sessions (Strictly Scrollable Flex-1 Container) -->
+        <div style="min-height: 0; flex: 1; max-height: 65vh; overflow-y: auto; -webkit-overflow-scrolling: touch;" class="p-4 space-y-3">
             <?php if (empty($previousSessions)): ?>
                 <div class="text-center py-8 space-y-2">
                     <svg class="w-10 h-10 text-slate-300 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                     </svg>
-                    <p class="text-xs font-bold text-slate-500">Belum ada riwayat sesi inspeksi lain untuk Part Code ini.</p>
-                    <p class="text-[11px] text-slate-400">Sesi saat ini adalah sesi pertama yang tercatat untuk part ini.</p>
+                    <p class="text-xs font-bold text-slate-500">
+                        <?= ($session && !empty($session['kanban_no'])) ? ('Belum ada riwayat sesi inspeksi / re-inspeksi lain untuk Kanban No: KB-' . htmlspecialchars($session['kanban_no'])) : 'Belum ada riwayat sesi inspeksi lain.' ?>
+                    </p>
+                    <p class="text-[11px] text-slate-400">Sesi saat ini adalah sesi inspeksi pertama yang tercatat untuk item ini.</p>
                 </div>
             <?php else: ?>
-                <?php foreach ($previousSessions as $ps): ?>
+                <?php foreach ($previousSessions as $ps): 
+                    $isReinspection = (!empty($ps['parent_session_id']) && $ps['parent_session_id'] > 0) || !empty($ps['reinspection_notes']);
+                    $inspType = $ps['inspection_type'] ?? 'kanban';
+                ?>
                     <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 hover:border-slate-300 transition-colors">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center space-x-2">
-                                <span class="font-mono font-black text-slate-900 text-xs">Lot: <?= htmlspecialchars($ps['lot_number']) ?></span>
-                                <span class="text-[10px] text-slate-400 bg-slate-200 px-1.5 py-0.5 rounded font-mono">Cavity <?= htmlspecialchars($ps['cavity']) ?></span>
+                        <div class="flex items-center justify-between flex-wrap gap-1">
+                            <div class="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                                <!-- Inspection Type Badge -->
+                                <?php if ($isReinspection): ?>
+                                    <span class="bg-amber-100 text-amber-900 border border-amber-300 text-[9.5px] font-black px-2 py-0.5 rounded-full inline-flex items-center">⚡ RE-INSPEKSI</span>
+                                <?php elseif ($inspType === 'safety_stock'): ?>
+                                    <span class="bg-purple-100 text-purple-900 border border-purple-300 text-[9.5px] font-black px-2 py-0.5 rounded-full inline-flex items-center">📦 SAFETY STOCK</span>
+                                <?php else: ?>
+                                    <span class="bg-blue-100 text-blue-900 border border-blue-300 text-[9.5px] font-black px-2 py-0.5 rounded-full inline-flex items-center">📋 KANBAN</span>
+                                <?php endif; ?>
+
+                                <span class="font-mono font-extrabold text-slate-900 text-xs">Lot: #<?= htmlspecialchars($ps['lot_number']) ?></span>
+                                <?php if (!empty($ps['kanban_no'])): ?>
+                                    <span class="text-[10px] text-slate-600 bg-slate-200/80 px-1.5 py-0.5 rounded font-mono font-bold">No. KB: <?= htmlspecialchars($ps['kanban_no']) ?></span>
+                                <?php endif; ?>
                             </div>
+
                             <div>
                                 <?php if ($ps['status'] === 'passed'): ?>
-                                    <span class="badge badge-emerald text-[10px] font-bold">PASSED</span>
+                                    <span class="badge badge-emerald text-[10px] font-extrabold">PASSED</span>
                                 <?php elseif ($ps['status'] === 'rejected'): ?>
-                                    <span class="badge badge-rose text-[10px] font-bold">REJECTED</span>
+                                    <span class="badge badge-rose text-[10px] font-extrabold">REJECTED</span>
                                 <?php else: ?>
-                                    <span class="badge badge-blue text-[10px] font-bold">IN PROGRESS</span>
+                                    <span class="badge badge-blue text-[10px] font-extrabold">IN PROGRESS</span>
                                 <?php endif; ?>
                             </div>
                         </div>
 
+                        <!-- Defect Summary Pills -->
+                        <div class="pt-1">
+                            <?php if (!empty($ps['defects'])): ?>
+                                <div class="flex items-center gap-1 flex-wrap">
+                                    <span class="text-[10px] font-bold text-rose-800 mr-1">Temuan Defect:</span>
+                                    <?php foreach ($ps['defects'] as $df): ?>
+                                        <span class="bg-rose-100 text-rose-900 border border-rose-200 text-[9.5px] font-extrabold px-1.5 py-0.5 rounded">
+                                            <?= htmlspecialchars($df['defect_name']) ?> ×<?= $df['total_qty_ng'] ?>
+                                        </span>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php else: ?>
+                                <span class="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded inline-block">✅ Zero Defect (Lolos Full)</span>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Time, Inspector, & Sampling Details -->
                         <div class="grid grid-cols-2 gap-2 text-[11px] text-slate-600 border-t border-slate-200/60 pt-2">
                             <div>
-                                <span class="text-[10px] text-slate-400 block font-bold">WAKTU & INSPECTOR</span>
-                                <span class="font-semibold text-slate-800"><?= date('d M Y H:i', strtotime($ps['started_at'])) ?> WIB</span>
-                                <span class="text-[10px] text-slate-500 block">by <?= htmlspecialchars($ps['inspector_name'] ?? $ps['did_pic'] ?? 'Inspector') ?></span>
+                                <span class="text-[10px] text-slate-400 block font-bold uppercase">Waktu & Inspector</span>
+                                <span class="font-semibold text-slate-800 block"><?= date('d M Y H:i', strtotime($ps['started_at'])) ?> WIB</span>
+                                <span class="text-[10px] text-slate-500 block">by <?= htmlspecialchars($ps['inspector_name'] ?? $ps['did_pic'] ?? 'Inspector QC') ?></span>
                             </div>
                             <div class="text-right">
-                                <span class="text-[10px] text-slate-400 block font-bold">HASIL SAMPLING</span>
-                                <span class="font-mono font-bold text-slate-800"><?= $ps['samples_checked'] ?> / <?= $ps['sample_size'] ?> pcs sample</span>
+                                <span class="text-[10px] text-slate-400 block font-bold uppercase">Hasil Sampling & Total Qty</span>
+                                <span class="font-mono font-extrabold text-slate-900 block"><?= number_format($ps['total_scanned_qty'] ?? 0) ?> pcs <span class="text-slate-400 font-normal">| Sample:</span> <?= $ps['samples_checked'] ?>/<?= $ps['sample_size'] ?></span>
                                 <span class="text-[10px] font-mono block <?= ($ps['ng_count'] > 0) ? 'text-rose-600 font-bold' : 'text-slate-500' ?>">
-                                    <?= $ps['ng_count'] ?> NG (Limit: <?= $ps['reject_number'] ?>)
+                                    <?= $ps['ng_count'] ?> NG (Limit Reject: <?= $ps['reject_number'] ?>)
                                 </span>
                             </div>
                         </div>
 
-                        <div class="pt-1 text-right">
+                        <div class="pt-1.5 border-t border-slate-200/40 flex items-center justify-between">
+                            <span class="text-[10px] text-slate-400 font-mono">Sesi #<?= $ps['id'] ?></span>
                             <a href="<?= base_url('modules/inspection/session.php?id=' . $ps['id']) ?>" class="text-[11px] text-blue-600 font-bold hover:underline inline-flex items-center">
-                                Buka Sesi Inspeksi Ini &rarr;
+                                Lihat Sesi Inspeksi Ini &rarr;
                             </a>
                         </div>
                     </div>
@@ -1142,6 +1396,38 @@ require_once __DIR__ . '/../../layouts/header.php';
             </button>
         </div>
 
+    </div>
+</div>
+
+<!-- Modal Rincian Penggantian Lot & Ref No -->
+<div id="substitution-log-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 99999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
+    <div style="background-color: #ffffff; border-radius: 20px; max-width: 550px; width: 100%; max-height: 85vh; padding: 20px; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); margin: auto; display: flex; flex-direction: column; overflow: hidden;" class="animate-fadeIn space-y-3">
+        
+        <!-- Modal Header -->
+        <div class="flex items-center justify-between border-b border-slate-200 pb-2.5 flex-shrink-0">
+            <div class="flex items-center space-x-2.5">
+                <div class="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-base shadow-2xs">
+                    🔄
+                </div>
+                <div>
+                    <h3 class="text-sm font-extrabold text-slate-900 leading-tight">Rincian Penggantian Lot &amp; Ref No</h3>
+                    <p class="text-[11px] text-slate-500 font-medium">Histori pemetaan lot pengganti untuk sesi ini</p>
+                </div>
+            </div>
+            <button type="button" onclick="closeSubstitutionLogModal()" class="w-8 h-8 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 font-bold text-xl flex items-center justify-center transition-all cursor-pointer">&times;</button>
+        </div>
+
+        <!-- Modal Body Content -->
+        <div id="modal-subst-log-list-body" style="display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; padding-right: 2px;" class="flex-1 min-h-0">
+            <!-- Populated via JS -->
+        </div>
+
+        <!-- Modal Footer -->
+        <div class="pt-2 border-t border-slate-100 flex justify-end flex-shrink-0">
+            <button type="button" onclick="closeSubstitutionLogModal()" class="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-lg transition-all cursor-pointer">
+                Tutup
+            </button>
+        </div>
     </div>
 </div>
 
@@ -1170,17 +1456,24 @@ require_once __DIR__ . '/../../layouts/header.php';
         <!-- Modal Body -->
         <div style="padding: 18px; overflow-y: auto; flex: 1; background-color: #f8fafc; display: flex; flex-direction: column; gap: 16px;">
 
-            <!-- Section 1: Ringkasan Lot NG Terdampak -->
-            <div style="background-color: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
-                <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #fca5a5; padding-bottom: 6px;">
-                    <span style="font-size: 11px; font-weight: 800; color: #9f1239; text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center;">
-                        <span style="width: 7px; height: 7px; border-radius: 50%; background-color: #e11d48; margin-right: 6px; display: inline-block;"></span>
-                        LOT TERDAMPAK NG PADA SESI INI
+            <!-- Section 1: Ringkasan Lot NG Terdampak & Semua Lot Kanban -->
+            <div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; padding-bottom: 8px;">
+                    <span style="font-size: 11px; font-weight: 800; color: #1e293b; text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center;">
+                        📦 DAFTAR LOT KANBAN SESI INI
                     </span>
-                    <span id="batch-modal-ng-count" style="font-size: 10px; font-weight: 800; color: #be123c; background-color: #ffffff; border: 1px solid #fecdd3; padding: 2px 8px; border-radius: 8px;"></span>
+                    <!-- Tab Switcher / Segmented Control -->
+                    <div style="display: flex; gap: 4px; background: #e2e8f0; padding: 2px; border-radius: 8px;">
+                        <button type="button" id="btn-batch-tab-ng" onclick="renderBatchLotList('ng')" style="font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.15s; background-color: #ffffff; color: #be123c; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                            🔴 Lot NG (<span id="batch-modal-ng-count">0</span>)
+                        </button>
+                        <button type="button" id="btn-batch-tab-all" onclick="renderBatchLotList('all')" style="font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 6px; border: none; cursor: pointer; transition: all 0.15s; background-color: transparent; color: #64748b;">
+                            📦 Semua Lot (<span id="batch-modal-all-count">0</span>)
+                        </button>
+                    </div>
                 </div>
-                <div id="batch-modal-ng-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 110px; overflow-y: auto; padding-right: 2px;">
-                    <!-- Populated by JS -->
+                <div id="batch-modal-lot-list" style="display: flex; flex-direction: column; gap: 6px; max-height: 125px; overflow-y: auto; padding-right: 2px;">
+                    <!-- Populated dynamically by JS renderBatchLotList() -->
                 </div>
             </div>
 
@@ -1194,8 +1487,8 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <!-- Card Button Strategi 1: Scan Ulang -->
                     <div id="card-btn-rescan" onclick="selectBatchStrategy('rescan')" style="text-align: left; cursor: pointer; border: 2px solid #f59e0b; background-color: #fffbeb; border-radius: 14px; padding: 14px; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.2s; box-shadow: 0 4px 12px rgba(245,158,11,0.12);">
                         <div>
-                            <span style="font-size: 12px; font-weight: 900; color: #78350f; display: block; line-height: 1.3;">🔄 SCAN ULANG KANBAN</span>
-                            <span style="font-size: 10px; font-weight: 700; color: #b45309; display: block; margin-top: 2px;">Gunakan Lot Existing (Total Kanban)</span>
+                            <span style="font-size: 12px; font-weight: 900; color: #78350f; display: block; line-height: 1.3;">🔄 INSPEKSI ULANG </span>
+                            <span style="font-size: 10px; font-weight: 700; color: #b45309; display: block; margin-top: 2px;">Gunakan Lot Existing</span>
                         </div>
 
                         <!-- Sub Action Buttons for Rescan -->
@@ -1257,7 +1550,7 @@ require_once __DIR__ . '/../../layouts/header.php';
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px;">
                     <div>
                         <label style="font-size: 10px; font-weight: 700; color: #475569; display: block; margin-bottom: 2px;">Part Code <span style="color: #e11d48;">*</span></label>
-                        <input id="batch-input-z1" type="text" placeholder="Part Code..." style="width: 100%; padding: 7px 10px; font-family: monospace; font-size: 11px; border: 1px solid #cbd5e1; border-radius: 8px; outline: none; background-color: #ffffff;">
+                        <input id="batch-input-z1" type="text" value="<?= $session ? htmlspecialchars($session['part_code']) : '' ?>" placeholder="Part Code..." style="width: 100%; padding: 7px 10px; font-family: monospace; font-size: 11px; border: 1px solid #cbd5e1; border-radius: 8px; outline: none; background-color: #f1f5f9; font-weight: 700; color: #1e293b;">
                     </div>
                     <div>
                         <label style="font-size: 10px; font-weight: 700; color: #475569; display: block; margin-bottom: 2px;">Lot Number <span style="color: #e11d48;">*</span></label>
@@ -1288,7 +1581,7 @@ require_once __DIR__ . '/../../layouts/header.php';
                             <thead>
                                 <tr style="background-color: #f1f5f9; color: #475569; font-weight: 800; text-transform: uppercase; border-bottom: 1px solid #cbd5e1;">
                                     <th style="padding: 6px 10px; text-align: left; width: 35px;">NO</th>
-                                    <th style="padding: 6px 10px; text-align: left;">REF NO (Z5)</th>
+                                    <th style="padding: 6px 10px; text-align: left;">REF NO</th>
                                     <th style="padding: 6px 10px; text-align: left;">PEMETAAN LOT PENGGANTIAN</th>
                                     <th style="padding: 6px 10px; text-align: center;">QTY</th>
                                     <th style="padding: 6px 10px; text-align: center; width: 55px;">AKSI</th>
@@ -1420,7 +1713,12 @@ function parseBarcodeQRInput(val, forceProcess) {
         var lotToUse = parsed.Z2 || (document.getElementById('scan-lot-number') ? document.getElementById('scan-lot-number').value.trim() : '') || val.toUpperCase();
         var qtyToUse = parsed.Z3 || (document.getElementById('scan-label-qty') ? parseInt(document.getElementById('scan-label-qty').value) : 500);
         var remToUse = parsed.Z4 || (document.getElementById('scan-remarks') ? document.getElementById('scan-remarks').value.trim() : '');
-        var refToUse = parsed.Z5 || (document.getElementById('scan-ref-number') ? document.getElementById('scan-ref-number').value.trim() : '') || ('REF-' + Date.now() + '-' + Math.floor(Math.random() * 1000));
+        var refToUse = parsed.Z5 || (document.getElementById('scan-ref-number') ? document.getElementById('scan-ref-number').value.trim() : '');
+
+        if (!refToUse) {
+            Swal.fire({ icon: 'warning', title: 'Ref Number Wajib Diisi', text: 'Ref Number tidak terbaca dari barcode. Silakan isi field Ref Number secara manual sebelum menambah label.' });
+            return;
+        }
 
         if (!effectivePartCode || !lotToUse) return;
 
@@ -1441,7 +1739,12 @@ function handleManualAddLabel() {
     var lNum = document.getElementById('scan-lot-number').value.trim();
     var qty = parseInt(document.getElementById('scan-label-qty').value) || 500;
     var rem = document.getElementById('scan-remarks').value.trim();
-    var ref = document.getElementById('scan-ref-number').value.trim() || ('MANUAL-' + Date.now() + '-' + Math.floor(Math.random() * 1000));
+    var ref = document.getElementById('scan-ref-number').value.trim();
+
+    if (!ref) {
+        Swal.fire({ icon: 'warning', title: 'Ref Number Wajib Diisi', text: 'Silakan isi Ref Number terlebih dahulu. Ref Number harus diisi manual oleh user.' });
+        return;
+    }
 
     if (!pCode || !lNum) {
         Swal.fire({
@@ -1596,7 +1899,7 @@ function renderScannedLabelsTable() {
         }
         if (btnClear) btnClear.style.display = 'none';
         if (excessMsg) excessMsg.classList.add('hidden');
-        if (statusMsg) statusMsg.textContent = isSafetyStock ? 'Scan / input label QR (Z1..Z5) dari gudang untuk mengumpulkan Qty...' : 'Scan label QR untuk mengumpulkan Qty...';
+        if (statusMsg) statusMsg.textContent = isSafetyStock ? 'Scan / input label QR dari gudang untuk mengumpulkan Qty...' : 'Scan label QR untuk mengumpulkan Qty...';
         return;
     }
 
@@ -1657,18 +1960,33 @@ function renderScannedLabelsTable() {
     }
 
     if (btnSubmit) {
-        if (totalScanned > 0) {
-            btnSubmit.disabled = false;
-            btnSubmit.style.opacity = '1';
-            if (isSafetyStock) {
+        if (isSafetyStock) {
+            // Safety Stock: enable selama ada scan (tidak ada batasan target qty)
+            if (totalScanned > 0) {
+                btnSubmit.disabled = false;
+                btnSubmit.style.opacity = '1';
                 btnSubmit.innerHTML = '📦 MULAI INSPEKSI SAFETY STOCK (' + scannedLabelsList.length + ' Label / ' + totalScanned.toLocaleString() + ' pcs) &rarr;';
             } else {
-                btnSubmit.innerHTML = '🚀 MULAI INSPEKSI OQC (' + scannedLabelsList.length + ' Label / ' + totalScanned.toLocaleString() + ' pcs) &rarr;';
+                btnSubmit.disabled = true;
+                btnSubmit.style.opacity = '0.6';
+                btnSubmit.innerHTML = '📦 Mulai Inspeksi Safety Stock';
             }
         } else {
-            btnSubmit.disabled = true;
-            btnSubmit.style.opacity = '0.6';
-            btnSubmit.innerHTML = isSafetyStock ? '📦 Mulai Inspeksi Safety Stock' : '🚀 Mulai Inspeksi OQC';
+            // Kanban: harus mencapai target qty sebelum bisa submit
+            var kanbanQtyMet = (totalScanned >= targetQty);
+            if (totalScanned > 0 && kanbanQtyMet) {
+                btnSubmit.disabled = false;
+                btnSubmit.style.opacity = '1';
+                btnSubmit.innerHTML = '🚀 MULAI INSPEKSI OQC (' + scannedLabelsList.length + ' Label / ' + totalScanned.toLocaleString() + ' pcs) &rarr;';
+            } else if (totalScanned > 0 && !kanbanQtyMet) {
+                btnSubmit.disabled = true;
+                btnSubmit.style.opacity = '0.5';
+                btnSubmit.innerHTML = '⚠️ Belum Cukup Qty: ' + totalScanned.toLocaleString() + ' / ' + targetQty.toLocaleString() + ' pcs (kurang ' + (targetQty - totalScanned).toLocaleString() + ' pcs)';
+            } else {
+                btnSubmit.disabled = true;
+                btnSubmit.style.opacity = '0.6';
+                btnSubmit.innerHTML = '🚀 Mulai Inspeksi OQC';
+            }
         }
     }
 
@@ -1696,26 +2014,152 @@ function toggleNativeFullscreen() {
     }
 }
 
+function resetScanModalState() {
+    // 1. Always return wizard UI to Step 1: Pilih Planning
+    if (typeof backToStep1 === 'function') backToStep1();
+
+    // 2. Clear scanned labels list and state
+    scannedLabelsList = [];
+    selectedPlanningId = 0;
+    selectedPlanningType = 'kanban';
+    selectedPlanningPartCode = '';
+    selectedPlanningQty = 0;
+    selectedAvailableSsQty = 0;
+    isSafetyStockDeducted = false;
+    availableSsLots = [];
+    selectedSsSessionIds = [];
+
+    // 3. Reset form input fields
+    if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = '';
+    if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '';
+    if (document.getElementById('scan-qty-box')) document.getElementById('scan-qty-box').value = '';
+    if (document.getElementById('scan-ref-number')) document.getElementById('scan-ref-number').value = '';
+    if (document.getElementById('scan-qr-raw')) document.getElementById('scan-qr-raw').value = '';
+
+    if (document.getElementById('selected-plan-part-code')) document.getElementById('selected-plan-part-code').textContent = 'AUTOMATIC FIFO MATCHING';
+    if (document.getElementById('selected-plan-desc')) document.getElementById('selected-plan-desc').textContent = 'Sistem otomatis mencocokkan planning berdasarkan Part Code';
+    if (document.getElementById('selected-plan-cust')) document.getElementById('selected-plan-cust').textContent = '-';
+    if (document.getElementById('selected-plan-qty')) document.getElementById('selected-plan-qty').textContent = '-';
+    if (document.getElementById('selected-plan-tag')) document.getElementById('selected-plan-tag').classList.add('hidden');
+
+    // 4. Update UI tables & cards
+    if (typeof renderScannedLabelsTable === 'function') renderScannedLabelsTable();
+    if (typeof updateSafetyStockDeductionUI === 'function') updateSafetyStockDeductionUI();
+}
+
+function refreshPlanningItemsAjax() {
+    fetch('<?= base_url("modules/inspection/session.php?action=get_planning_items") ?>')
+        .then(function(r) { return r.json(); })
+        .then(function(res) {
+            if (res && res.success && Array.isArray(res.items)) {
+                renderPlanningCardsList(res.items);
+            }
+        })
+        .catch(function(err) {
+            console.error('Gagal memperbarui list planning items:', err);
+        });
+}
+
+function renderPlanningCardsList(items) {
+    var container = document.getElementById('planning-cards-container');
+    if (!container) return;
+
+    if (!items || items.length === 0) {
+        container.innerHTML = '<div class="text-center py-6 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">Belum ada data Planning (Kanban / Safety Stock) tersimpan di sistem.</div>';
+        return;
+    }
+
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+        var plan = items[i];
+        var pCode = escapeHtml(plan.item_code || '');
+        var pDesc = escapeHtml(plan.item_description || '');
+        var pCust = escapeHtml(plan.customer || 'PT. Indonesia Epson Industry');
+        var rawQty = parseInt(plan.qty) || 0;
+        var pQty = rawQty.toLocaleString();
+        
+        var isSafetyStock = (plan.plan_type === 'safety_stock' || (plan.batch_plan_type || '') === 'safety_stock' || (plan.kanban_no || '').toUpperCase().indexOf('SS') === 0);
+        var pType = isSafetyStock ? 'Safety Stock' : 'Kanban';
+        var pCek = plan.check_type ? escapeHtml(plan.check_type) : '';
+        
+        var etaRaw = plan.eta || plan.req_date || '';
+        var etaFormatted = 'Reguler';
+        if (etaRaw) {
+            var dt = new Date(etaRaw.replace(/-/g, '/'));
+            if (!isNaN(dt.getTime())) {
+                var months = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+                var day = String(dt.getDate()).padStart(2, '0');
+                var mName = months[dt.getMonth()];
+                var year = dt.getFullYear();
+                var hours = String(dt.getHours()).padStart(2, '0');
+                var mins = String(dt.getMinutes()).padStart(2, '0');
+                etaFormatted = day + ' ' + mName + ' ' + year + ', ' + hours + ':' + mins + ' WIB';
+            }
+        }
+        var isEarliest = (i === 0);
+        var availSsQty = parseInt(plan.avail_ss_qty) || 0;
+
+        var planTypeAttr = isSafetyStock ? 'safety_stock' : 'kanban';
+        var pCekBadge = pCek ? ('<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300">' + pCek + ' Cek</span>') : '';
+        var ssBadge = (availSsQty > 0 && !isSafetyStock) ? ('<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-300" title="Tersedia stok Safety Stock yang bisa dipakai memotong Qty Kanban">📦 Safety Stock: ' + availSsQty.toLocaleString() + ' pcs (Potong Qty)</span>') : '';
+        var etaBadge = '<span class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-extrabold ' + (isEarliest ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-600 border border-slate-200') + '">🚚 ETA: ' + etaFormatted + (isEarliest ? ' ⚡ (P1)' : '') + '</span>';
+        var kanbanNoBadge = (plan.kanban_no && plan.kanban_no !== '-') ? ('<span>&middot;</span><span class="font-mono">No. Kanban: <b>#' + escapeHtml(plan.kanban_no) + '</b></span>') : '';
+
+        var codeEsc = (plan.item_code || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var descEsc = (plan.item_description || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var custEsc = (plan.customer || 'PT. Indonesia Epson Industry').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var cekEsc = (plan.check_type || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+        html += '<div class="planning-card p-3 bg-white hover:bg-blue-50/80 border border-slate-200 hover:border-blue-400 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-3 shadow-2xs" ' +
+                'data-plan-type="' + planTypeAttr + '" ' +
+                'onclick="selectPlanningItem(' + parseInt(plan.id) + ', \'' + codeEsc + '\', \'' + descEsc + '\', \'' + custEsc + '\', ' + rawQty + ', \'' + cekEsc + '\', \'' + planTypeAttr + '\', ' + availSsQty + ')">' +
+                '<div class="min-w-0 flex-1 space-y-1">' +
+                    '<div class="flex items-center space-x-1.5 flex-wrap gap-y-1">' +
+                        '<span class="font-mono font-black text-blue-700 text-xs">' + pCode + '</span>' +
+                        '<span class="badge text-[9px] ' + (isSafetyStock ? 'bg-purple-100 text-purple-800 border border-purple-200 font-extrabold' : 'bg-blue-100 text-blue-800 border border-blue-200 font-bold') + '">' + pType + '</span>' +
+                        pCekBadge +
+                        ssBadge +
+                        etaBadge +
+                    '</div>' +
+                    '<div class="font-bold text-slate-800 text-xs truncate">' + pDesc + '</div>' +
+                    '<div class="text-[10px] text-slate-500 flex items-center space-x-2 flex-wrap">' +
+                        '<span>Cust: <b>' + pCust + '</b></span>' +
+                        '<span>&middot;</span>' +
+                        '<span>Qty: <b>' + pQty + ' pcs</b></span>' +
+                        kanbanNoBadge +
+                    '</div>' +
+                '</div>' +
+                '<button type="button" class="btn-primary py-1.5 px-3 text-xs font-bold flex-shrink-0 shadow-2xs">Pilih &rarr;</button>' +
+                '</div>';
+    }
+
+    container.innerHTML = html;
+    filterPlanningItems();
+}
+
 function openScanModal() {
-    document.getElementById('scan-modal-overlay').classList.remove('hidden');
-    document.getElementById('scan-modal-overlay').style.display = 'flex';
+    resetScanModalState();
+    refreshPlanningItemsAjax();
+    var modal = document.getElementById('scan-modal-overlay');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.style.display = 'flex';
+    }
     var qrInput = document.getElementById('scan-qr-raw');
     if (qrInput) {
         qrInput.value = '';
-        qrInput.focus();
+        setTimeout(function() { qrInput.focus(); }, 150);
     }
 }
 
-function closeScanModal() {
-    if (currentSessionId > 0) {
-        document.getElementById('scan-modal-overlay').classList.add('hidden');
-        document.getElementById('scan-modal-overlay').style.display = 'none';
-    } else {
-        Swal.fire({
-            icon: 'info',
-            title: 'Perhatian',
-            text: 'Silakan scan / validasi Part Code & Lot Number terlebih dahulu!'
-        });
+function closeScanModal(forceClose) {
+    var overlay = document.getElementById('scan-modal-overlay');
+    if (overlay) {
+        overlay.classList.add('hidden');
+        overlay.style.display = 'none';
+    }
+    if (!currentSessionId || currentSessionId == 0 || forceClose) {
+        window.location.href = '<?= base_url("modules/inspection/index.php") ?>';
     }
 }
 
@@ -1745,6 +2189,22 @@ function openPrevHistoryModal() {
 
 function closePrevHistoryModal() {
     var modal = document.getElementById('prev-history-modal-overlay');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.style.display = 'none';
+    }
+}
+
+function openSubstitutionLogModal() {
+    var modal = document.getElementById('substitution-log-modal-overlay');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.style.display = 'flex';
+    }
+}
+
+function closeSubstitutionLogModal() {
+    var modal = document.getElementById('substitution-log-modal-overlay');
     if (modal) {
         modal.classList.add('hidden');
         modal.style.display = 'none';
@@ -1900,12 +2360,18 @@ var selectedPlanningId = 0;
 var selectedPlanningType = 'kanban';
 var selectedPlanningPartCode = '';
 var selectedPlanningQty = 0;
+var selectedAvailableSsQty = 0;
+var isSafetyStockDeducted = false;
 
-function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, planType) {
+var availableSsLots = [];
+var selectedSsSessionIds = [];
+
+function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, planType, availSsQty) {
     selectedPlanningId = id;
     selectedPlanningType = planType || 'kanban';
     selectedPlanningPartCode = itemCode || '';
     selectedPlanningQty = parseInt(qty) || 0;
+    selectedAvailableSsQty = parseInt(availSsQty) || 0;
 
     document.getElementById('selected-plan-part-code').textContent = itemCode;
     document.getElementById('selected-plan-desc').textContent = itemDesc;
@@ -1922,10 +2388,19 @@ function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, pl
 
     document.getElementById('scan-part-code').value = itemCode;
 
+    // Fetch multi-lot Safety Stock sessions via API
+    fetchAndRenderAvailableSsLots(itemCode, selectedPlanningQty);
+
     // Switch step UI
-    document.getElementById('step-pill-1').className = 'px-3 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300';
-    document.getElementById('step-pill-1').textContent = '✓ Step 1 Complete';
-    document.getElementById('step-pill-2').className = 'px-3 py-1 rounded-full text-xs font-bold bg-blue-600 text-white shadow-xs';
+    var p1 = document.getElementById('step-pill-1');
+    if (p1) {
+        p1.style.cssText = 'background-color: #dcfce7 !important; color: #166534 !important; border: 1px solid #bbf7d0 !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
+        p1.textContent = '✓ Step 1 Complete';
+    }
+    var p2 = document.getElementById('step-pill-2');
+    if (p2) {
+        p2.style.cssText = 'background-color: #2563eb !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; box-shadow: 0 2px 4px rgba(37,99,235,0.3);';
+    }
     
     document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan QR Code Label Barcode';
     document.getElementById('wizard-modal-subtitle').textContent = 'Scan barcode label barang yang mau diuji';
@@ -1940,6 +2415,261 @@ function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, pl
     }
 }
 
+function fetchAndRenderAvailableSsLots(itemCode, targetQty) {
+    var container = document.getElementById('ss-lots-checkbox-list');
+    var countInfo = document.getElementById('ss-lots-count-info');
+
+    if (!itemCode || selectedPlanningType !== 'kanban') {
+        availableSsLots = [];
+        selectedSsSessionIds = [];
+        if (container) container.innerHTML = '';
+        if (countInfo) countInfo.textContent = '0 Lot';
+        updateSafetyStockDeductionUI();
+        return;
+    }
+
+    if (container) {
+        container.innerHTML = '<div class="text-center py-2 text-slate-500 font-medium text-xs">⌛ Memuat lot Safety Stock...</div>';
+    }
+
+    fetch('<?= base_url("modules/inspection/api/get_available_ss.php") ?>?part_code=' + encodeURIComponent(itemCode))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var rawLots = data.lots || data.items || [];
+            if (data.success && Array.isArray(rawLots) && rawLots.length > 0) {
+                availableSsLots = rawLots;
+                
+                var totalAvail = 0;
+                availableSsLots.forEach(function(l) { totalAvail += parseInt(l.available_qty) || 0; });
+                selectedAvailableSsQty = totalAvail;
+
+                // Pre-check checkboxes in order up to targetQty
+                selectedSsSessionIds = [];
+                var accumQty = 0;
+                availableSsLots.forEach(function(lot) {
+                    var lQty = parseInt(lot.available_qty) || 0;
+                    if (accumQty < targetQty) {
+                        selectedSsSessionIds.push(parseInt(lot.session_id));
+                        accumQty += lQty;
+                    }
+                });
+
+                isSafetyStockDeducted = (selectedSsSessionIds.length > 0);
+
+                if (countInfo) countInfo.textContent = availableSsLots.length + ' Lot Tersedia';
+            } else {
+                availableSsLots = [];
+                selectedSsSessionIds = [];
+                selectedAvailableSsQty = 0;
+                isSafetyStockDeducted = false;
+                if (container) container.innerHTML = '<div class="text-center py-2 text-slate-400 font-medium text-xs">Tidak ada Safety Stock PASSED tersedia untuk part ini.</div>';
+                if (countInfo) countInfo.textContent = '0 Lot';
+            }
+            updateSafetyStockDeductionUI();
+        })
+        .catch(function(err) {
+            console.error('Error fetching available SS lots:', err);
+            availableSsLots = [];
+            selectedSsSessionIds = [];
+            if (container) container.innerHTML = '<div class="text-center py-2 text-rose-500 font-medium text-xs">Gagal memuat list Safety Stock.</div>';
+            updateSafetyStockDeductionUI();
+        });
+}
+
+function onSsLotCheckboxChange() {
+    selectedSsSessionIds = [];
+    var checkboxes = document.querySelectorAll('.ss-lot-checkbox:checked');
+    checkboxes.forEach(function(cb) {
+        selectedSsSessionIds.push(parseInt(cb.value));
+    });
+    isSafetyStockDeducted = (selectedSsSessionIds.length > 0);
+    updateSafetyStockDeductionUI();
+}
+
+function toggleSafetyStockDeduction(forceState) {
+    if (typeof forceState !== 'undefined') {
+        isSafetyStockDeducted = !!forceState;
+    } else {
+        isSafetyStockDeducted = !isSafetyStockDeducted;
+    }
+
+    if (!isSafetyStockDeducted) {
+        selectedSsSessionIds = [];
+    } else {
+        selectedSsSessionIds = [];
+        var accumQty = 0;
+        if (availableSsLots && availableSsLots.length > 0) {
+            availableSsLots.forEach(function(lot) {
+                var lQty = parseInt(lot.available_qty) || 0;
+                if (accumQty < selectedPlanningQty) {
+                    selectedSsSessionIds.push(parseInt(lot.session_id));
+                    accumQty += lQty;
+                }
+            });
+        }
+        isSafetyStockDeducted = (selectedSsSessionIds.length > 0);
+    }
+    updateSafetyStockDeductionUI();
+}
+
+function updateSafetyStockDeductionUI() {
+    var card = document.getElementById('safety-stock-deduction-card');
+    if (!card) return;
+
+    var totalCheckedQty = 0;
+    if (availableSsLots && availableSsLots.length > 0 && selectedSsSessionIds.length > 0) {
+        availableSsLots.forEach(function(lot) {
+            if (selectedSsSessionIds.indexOf(parseInt(lot.session_id)) !== -1) {
+                totalCheckedQty += parseInt(lot.available_qty) || 0;
+            }
+        });
+    }
+
+    if (availableSsLots.length > 0 && selectedPlanningType === 'kanban') {
+        card.classList.remove('hidden');
+        card.style.display = 'block';
+
+        var usedQty = isSafetyStockDeducted ? Math.min(selectedPlanningQty, totalCheckedQty) : 0;
+        var remainQty = isSafetyStockDeducted ? Math.max(0, selectedPlanningQty - totalCheckedQty) : selectedPlanningQty;
+
+        if (document.getElementById('ss-deduct-badge')) {
+            if (isSafetyStockDeducted) {
+                if (totalCheckedQty > selectedPlanningQty) {
+                    document.getElementById('ss-deduct-badge').textContent = 'ALOKASI ' + usedQty.toLocaleString() + ' PCS (' + totalCheckedQty.toLocaleString() + ' PCS DICENTANG)';
+                    document.getElementById('ss-deduct-badge').className = 'text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white shadow-2xs';
+                } else {
+                    document.getElementById('ss-deduct-badge').textContent = 'ALOKASI ' + usedQty.toLocaleString() + ' PCS (' + selectedSsSessionIds.length + ' LOT)';
+                    document.getElementById('ss-deduct-badge').className = 'text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-600 text-white shadow-2xs';
+                }
+            } else {
+                document.getElementById('ss-deduct-badge').textContent = 'TIDAK DIPAKAI';
+                document.getElementById('ss-deduct-badge').className = 'text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-slate-400 text-white shadow-2xs';
+            }
+        }
+        if (document.getElementById('ss-deduct-orig-qty')) document.getElementById('ss-deduct-orig-qty').textContent = selectedPlanningQty.toLocaleString() + ' pcs';
+        if (document.getElementById('ss-deduct-used-qty')) {
+            if (totalCheckedQty > selectedPlanningQty) {
+                document.getElementById('ss-deduct-used-qty').innerHTML = '- ' + usedQty.toLocaleString() + ' pcs <span class="text-[10px] font-normal text-slate-500 ml-1">(sisa ' + (totalCheckedQty - usedQty).toLocaleString() + ' pcs stok utuh)</span>';
+            } else {
+                document.getElementById('ss-deduct-used-qty').textContent = '- ' + usedQty.toLocaleString() + ' pcs';
+            }
+        }
+        if (document.getElementById('ss-deduct-remain-qty')) {
+            if (remainQty === 0 && isSafetyStockDeducted) {
+                document.getElementById('ss-deduct-remain-qty').innerHTML = '<span class="text-emerald-700 font-extrabold">0 pcs (100% Terpenuhi dari Safety Stock)</span>';
+            } else {
+                document.getElementById('ss-deduct-remain-qty').textContent = remainQty.toLocaleString() + ' pcs';
+            }
+        }
+
+        var fullBanner = document.getElementById('ss-full-fulfill-banner');
+        if (fullBanner) {
+            if (remainQty === 0 && isSafetyStockDeducted) {
+                fullBanner.classList.remove('hidden');
+                fullBanner.style.display = 'block';
+            } else {
+                fullBanner.classList.add('hidden');
+                fullBanner.style.display = 'none';
+            }
+        }
+
+        var btn = document.getElementById('btn-toggle-ss-deduct');
+        if (btn) {
+            if (isSafetyStockDeducted) {
+                btn.className = 'px-2.5 py-1 bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-300 font-extrabold text-[10px] rounded-lg shadow-2xs transition-all flex items-center space-x-1 cursor-pointer';
+                btn.innerHTML = '<span>❌ Hapus Semua Pilihan Safety Stock</span>';
+            } else {
+                btn.className = 'px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[10px] rounded-lg shadow-2xs transition-all flex items-center space-x-1 cursor-pointer';
+                btn.innerHTML = '<span>⚡ Pilih Safety Stock Otomatis</span>';
+            }
+        }
+
+        // Render lot rows with real-time per-lot status
+        renderSsLotRows();
+
+    } else {
+        card.classList.add('hidden');
+        card.style.display = 'none';
+    }
+}
+
+function renderSsLotRows() {
+    var container = document.getElementById('ss-lots-checkbox-list');
+    if (!container || !availableSsLots) return;
+
+    var remainingTarget = selectedPlanningQty;
+    var html = '';
+
+    availableSsLots.forEach(function(lot, idx) {
+        var sId = parseInt(lot.session_id);
+        var lQty = parseInt(lot.available_qty) || 0;
+        var isChecked = selectedSsSessionIds.indexOf(sId) !== -1;
+        var refBadge = lot.ref_numbers ? ('<span class="bg-blue-100 text-blue-800 text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded border border-blue-200 truncate">Ref: ' + escapeHtml(lot.ref_numbers) + '</span>') : '';
+        var lotNumStr = lot.lot_number ? escapeHtml(lot.lot_number) : '-';
+
+        var statusBadgeHtml = '';
+        if (isChecked) {
+            var takenFromThisLot = Math.min(remainingTarget, lQty);
+            if (takenFromThisLot > 0) {
+                statusBadgeHtml = '<span class="text-emerald-800 font-extrabold bg-emerald-100 px-1.5 py-0.5 rounded border border-emerald-300">✓ Dipotong: ' + takenFromThisLot.toLocaleString() + ' pcs</span>';
+                remainingTarget -= takenFromThisLot;
+            } else {
+                statusBadgeHtml = '<span class="text-slate-600 font-semibold bg-slate-100 px-1.5 py-0.5 rounded border border-slate-300">ℹ️ Stok Utuh (Tidak Dipotong)</span>';
+            }
+        } else {
+            statusBadgeHtml = '<span class="text-slate-500 font-medium">Lot #' + (idx + 1) + '</span>';
+        }
+
+        html += '<label class="flex items-start space-x-2.5 p-2 bg-white rounded-lg border ' + (isChecked ? 'border-emerald-400 bg-emerald-50/30' : 'border-slate-200') + ' hover:border-emerald-500 cursor-pointer transition-all shadow-2xs">' +
+                    '<input type="checkbox" value="' + sId + '" data-qty="' + lQty + '" ' + (isChecked ? 'checked' : '') + ' onchange="onSsLotCheckboxChange()" class="ss-lot-checkbox mt-0.5 rounded text-emerald-600 focus:ring-emerald-500 w-4 h-4 cursor-pointer">' +
+                    '<div class="flex-1 min-w-0">' +
+                        '<div class="flex items-center justify-between gap-1">' +
+                            '<div class="flex items-center space-x-1.5 truncate">' +
+                                '<span class="font-mono font-extrabold text-slate-900 text-xs truncate">' + lotNumStr + '</span>' +
+                                refBadge +
+                            '</div>' +
+                            '<span class="font-mono font-black text-emerald-700 text-xs flex-shrink-0">' + lQty.toLocaleString() + ' pcs</span>' +
+                        '</div>' +
+                        '<div class="flex items-center justify-between text-[10px] text-slate-500 mt-0.5">' +
+                            '<span>Passed: ' + escapeHtml(lot.formatted_date) + '</span>' +
+                            statusBadgeHtml +
+                        '</div>' +
+                    '</div>' +
+                '</label>';
+    });
+
+    container.innerHTML = html;
+}
+
+function triggerDirectSsCompletion() {
+    var pCode = selectedPlanningPartCode || document.getElementById('scan-part-code').value.trim();
+    var lNum = 'SAFETY-STOCK';
+
+    var totalCheckedQty = 0;
+    availableSsLots.forEach(function(lot) {
+        if (selectedSsSessionIds.indexOf(parseInt(lot.session_id)) !== -1) {
+            totalCheckedQty += parseInt(lot.available_qty) || 0;
+        }
+    });
+    var usedQty = Math.min(selectedPlanningQty, totalCheckedQty);
+
+    document.getElementById('modal-loading').classList.remove('hidden');
+    document.getElementById('modal-error-box').classList.add('hidden');
+
+    var validateUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?part_code=' + encodeURIComponent(pCode) + '&lot_number=' + encodeURIComponent(lNum) + '&total_scanned_qty=' + usedQty + '&kanban_item_id=' + selectedPlanningId + '&inspection_type=' + encodeURIComponent(selectedPlanningType);
+
+    fetch(validateUrl)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            executeCreateSession(data, pCode, lNum);
+        })
+        .catch(function(err) {
+            document.getElementById('modal-loading').classList.add('hidden');
+            document.getElementById('modal-error-box').classList.remove('hidden');
+            document.getElementById('modal-error-msg').textContent = 'Gagal memproses alokasi Safety Stock!';
+        });
+}
+
 function openKanbanDetailModal() {
     var modal = document.getElementById('kanban-detail-modal-overlay');
     if (modal) modal.classList.remove('hidden');
@@ -1951,9 +2681,15 @@ function closeKanbanDetailModal() {
 }
 
 function backToStep1() {
-    document.getElementById('step-pill-1').className = 'px-3 py-1 rounded-full text-xs font-bold bg-blue-600 text-white shadow-xs';
-    document.getElementById('step-pill-1').textContent = '1. Pilih Planning';
-    document.getElementById('step-pill-2').className = 'px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-400 border border-slate-200';
+    var p1 = document.getElementById('step-pill-1');
+    if (p1) {
+        p1.style.cssText = 'background-color: #2563eb !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
+        p1.textContent = '1. Pilih Planning';
+    }
+    var p2 = document.getElementById('step-pill-2');
+    if (p2) {
+        p2.style.cssText = 'background-color: #f1f5f9 !important; color: #64748b !important; border: 1px solid #cbd5e1 !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 700; display: inline-block;';
+    }
 
     document.getElementById('wizard-modal-title').textContent = 'Step 1: Pilih Item Planning Aktif';
     document.getElementById('wizard-modal-subtitle').textContent = 'Pilih Kanban / Safety Stock yang akan diinspeksi sebelum melakukan scan label ';
@@ -1990,7 +2726,7 @@ function startDirectSafetyStockScan() {
     selectedPlanningQty = 0;
 
     document.getElementById('selected-plan-part-code').textContent = 'SAFETY STOCK (DIRECT GUDANG)';
-    document.getElementById('selected-plan-desc').textContent = 'Direct Scan Barcode QR (Z1..Z5) atau Input Form Manual Barang dari Gudang';
+    document.getElementById('selected-plan-desc').textContent = 'Direct Scan Barcode QR atau Input Form Manual Barang dari Gudang';
     document.getElementById('selected-plan-cust').textContent = 'INTERNAL SAFETY STOCK';
     document.getElementById('selected-plan-qty').textContent = 'Akumulasi Lot Gudang';
     
@@ -2005,12 +2741,18 @@ function startDirectSafetyStockScan() {
     document.getElementById('scan-ref-number').value = '';
 
     // Switch step UI
-    document.getElementById('step-pill-1').className = 'px-3 py-1 rounded-full text-xs font-bold bg-purple-100 text-purple-800 border border-purple-300';
-    document.getElementById('step-pill-1').textContent = '✓ Step 1: Safety Stock Gudang';
-    document.getElementById('step-pill-2').className = 'px-3 py-1 rounded-full text-xs font-bold bg-purple-600 text-white shadow-xs';
+    var p1 = document.getElementById('step-pill-1');
+    if (p1) {
+        p1.style.cssText = 'background-color: #f3e8ff !important; color: #6b21a8 !important; border: 1px solid #d8b4fe !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
+        p1.textContent = '✓ Step 1: Safety Stock Gudang';
+    }
+    var p2 = document.getElementById('step-pill-2');
+    if (p2) {
+        p2.style.cssText = 'background-color: #7c3aed !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; box-shadow: 0 2px 4px rgba(124,58,237,0.3);';
+    }
     
-    document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan / Input Barcode Label (Z1..Z5)';
-    document.getElementById('wizard-modal-subtitle').textContent = 'Scan QR Barcode (Z1|Z2|Z3|Z4|Z5) atau ketik manual field label barang di bawah';
+    document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan / Input Barcode Label';
+    document.getElementById('wizard-modal-subtitle').textContent = 'Scan QR Barcode atau ketik manual field label barang di bawah';
 
     document.getElementById('wizard-step-1-content').classList.add('hidden');
     document.getElementById('wizard-step-2-content').classList.remove('hidden');
@@ -2094,12 +2836,7 @@ function loadWorkbenchSessionData(sessionId) {
             var ngRecords = data.ng_records || [];
             var custName = s.customer || 'PT. Indonesia Epson Industry';
 
-            // Update Header Title & Customer
-            var titleEl = document.getElementById('header-session-title');
-            if (titleEl) {
-                titleEl.innerHTML = '<span>Inspeksi Barang — <span class="font-mono text-blue-700 font-black">' + escapeHtml(s.part_code) + '</span><span class="font-semibold text-slate-600 text-xs hidden sm:inline"> (' + escapeHtml(s.part_name) + ')</span></span>' +
-                    '<span id="header-customer-badge" class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shadow-2xs ml-2 flex-shrink-0">🏢 ' + escapeHtml(custName) + '</span>';
-            }
+
 
             // Update Card 1 Customer Name
             var cardCustEl = document.getElementById('card-customer-name');
@@ -2108,9 +2845,59 @@ function loadWorkbenchSessionData(sessionId) {
             }
 
             if (document.getElementById('card-part-code')) document.getElementById('card-part-code').textContent = s.part_code || '-';
-            if (document.getElementById('card-lot-no')) document.getElementById('card-lot-no').textContent = s.lot_number || '-';
-            var displayQty = (s.total_scanned_qty && parseInt(s.total_scanned_qty) > 0) ? parseInt(s.total_scanned_qty) : parseInt(s.kanban_qty || 0);
-            if (document.getElementById('card-total-qty')) document.getElementById('card-total-qty').innerHTML = displayQty.toLocaleString() + ' <span class="text-[10px] font-normal text-slate-500">pcs</span>';
+            
+            var totScanned = parseInt(s.total_scanned_qty || 0);
+            var kbTarget = parseInt(s.kanban_qty || 0);
+            var usedSsQty = parseInt(s.use_safety_stock_qty || 0);
+            var excQty = parseInt(s.excess_qty || 0);
+            var isKanban = (s.inspection_type || 'kanban') === 'kanban';
+
+            var cardQtyEl = document.getElementById('card-total-qty');
+            var cardBadgeEl = document.getElementById('card-qty-subbadge');
+
+            if (cardQtyEl) {
+                if (isKanban) {
+                    var targetDisp = (kbTarget > 0) ? kbTarget : Math.max(500, totScanned);
+                    cardQtyEl.textContent = totScanned.toLocaleString() + ' / ' + targetDisp.toLocaleString() + ' pcs';
+                } else {
+                    cardQtyEl.textContent = totScanned.toLocaleString() + ' pcs';
+                }
+            }
+
+            if (cardBadgeEl) {
+                if (isKanban) {
+                    var physQty = Math.max(0, totScanned - usedSsQty);
+                    if (usedSsQty > 0 && totScanned >= kbTarget && physQty === 0) {
+                        cardBadgeEl.innerHTML = '<span class="text-[8.5px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1 py-0.2 rounded block mt-0.5" title="Seluruh Qty target Kanban dipenuhi dari Safety Stock">✨ 100% Safety Stock (' + usedSsQty.toLocaleString() + ' pcs)</span>';
+                    } else if (usedSsQty > 0) {
+                        cardBadgeEl.innerHTML = '<span class="text-[8.5px] font-bold text-blue-800 bg-blue-50 border border-blue-200 px-1 py-0.2 rounded block mt-0.5" title="Kombinasi Scan Fisik & Alokasi Safety Stock">📦 ' + physQty.toLocaleString() + ' Fisik + ' + usedSsQty.toLocaleString() + ' Safety Stock</span>';
+                    } else if (excQty > 0) {
+                        cardBadgeEl.innerHTML = '<span class="text-[8.5px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-1 py-0.2 rounded block mt-0.5" title="Sisa kelebihan Qty akan otomatis disimpan ke Safety Stock saat PASSED">📦 +' + excQty.toLocaleString() + ' pcs Kelebihan → Safety Stock</span>';
+                    } else {
+                        cardBadgeEl.innerHTML = '';
+                    }
+                } else {
+                    cardBadgeEl.innerHTML = '';
+                }
+            }
+
+            // Update Card 2 Acuan Sampling Wajib
+            if (document.getElementById('card-spl-code')) document.getElementById('card-spl-code').textContent = s.sample_code || 'H';
+            if (document.getElementById('card-sample-size')) document.getElementById('card-sample-size').innerHTML = (s.sample_size || 0).toLocaleString() + ' <span style="font-size: 12px; font-weight: 400;">pcs</span>';
+            
+            var cardExpEl = document.getElementById('card-aql-explanation');
+            if (cardExpEl) {
+                var pQty = Math.max(0, totScanned - usedSsQty);
+                if (usedSsQty > 0) {
+                    if (pQty > 0) {
+                        cardExpEl.textContent = 'ℹ️ dari ' + pQty.toLocaleString() + ' pcs fisik baru (' + usedSsQty.toLocaleString() + ' pcs SS Passed)';
+                    } else {
+                        cardExpEl.textContent = '✨ 100% dipenuhi dari Safety Stock';
+                    }
+                } else {
+                    cardExpEl.textContent = 'wajib diperiksa';
+                }
+            }
 
             // Populate Modal Detail Kanban fields
             if (document.getElementById('modal-kb-plan-type')) document.getElementById('modal-kb-plan-type').textContent = (s.inspection_type === 'safety_stock') ? 'SAFETY STOCK' : 'KANBAN';
@@ -2122,8 +2909,20 @@ function loadWorkbenchSessionData(sessionId) {
             if (document.getElementById('modal-kb-part-model')) document.getElementById('modal-kb-part-model').textContent = s.part_model || '-';
             if (document.getElementById('modal-kb-item-desc')) document.getElementById('modal-kb-item-desc').textContent = s.kanban_item_desc || s.part_name || '-';
             if (document.getElementById('modal-kb-cavity')) document.getElementById('modal-kb-cavity').textContent = 'Cavity ' + (s.cavity || '1');
-            if (document.getElementById('modal-kb-eta')) document.getElementById('modal-kb-eta').textContent = s.kanban_eta ? (s.kanban_eta + ' WIB') : '-';
-            if (document.getElementById('modal-kb-req-date')) document.getElementById('modal-kb-req-date').textContent = s.kanban_req_date ? (s.kanban_req_date + ' WIB') : '-';
+            function formatKanbanDT(dtStr) {
+                if (!dtStr || dtStr === '-' || dtStr === '0000-00-00 00:00:00') return '-';
+                var d = new Date(String(dtStr).replace(/-/g, '/'));
+                if (isNaN(d.getTime())) return dtStr + ' WIB';
+                var months = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+                var day = ('0' + d.getDate()).slice(-2);
+                var month = months[d.getMonth()];
+                var year = d.getFullYear();
+                var hours = ('0' + d.getHours()).slice(-2);
+                var mins = ('0' + d.getMinutes()).slice(-2);
+                return day + ' ' + month + ' ' + year + ', ' + hours + ':' + mins + ' WIB';
+            }
+            if (document.getElementById('modal-kb-eta')) document.getElementById('modal-kb-eta').textContent = formatKanbanDT(s.kanban_eta);
+            if (document.getElementById('modal-kb-req-date')) document.getElementById('modal-kb-req-date').textContent = formatKanbanDT(s.kanban_req_date);
             if (document.getElementById('modal-kb-qty')) document.getElementById('modal-kb-qty').textContent = (s.kanban_qty ? parseInt(s.kanban_qty).toLocaleString() : '0') + ' pcs';
             if (document.getElementById('modal-kb-str-loc')) document.getElementById('modal-kb-str-loc').textContent = s.kanban_str_loc || 'WH-A01';
             if (document.getElementById('modal-kb-check-type')) document.getElementById('modal-kb-check-type').textContent = s.kanban_check_type ? (s.kanban_check_type + ' Cek') : 'Normal Cek';
@@ -2133,14 +2932,7 @@ function loadWorkbenchSessionData(sessionId) {
             var lotsList = data.session_lots || [];
             var lotSumList = data.lot_summary || [];
 
-            // Card 1 Lot No Badging
-            if (document.getElementById('card-lot-no')) {
-                if (lotSumList.length > 1) {
-                    document.getElementById('card-lot-no').innerHTML = '<span onclick="openKanbanDetailModal()" class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300 font-mono cursor-pointer hover:bg-amber-200" title="Klik untuk lihat rincian Multi-Lot">📦 Multi-Lot (' + lotSumList.length + ' Lot)</span>';
-                } else {
-                    document.getElementById('card-lot-no').textContent = s.lot_number || '-';
-                }
-            }
+
 
             // Modal Group 2 Lot No
             if (document.getElementById('modal-kb-lot-no')) {
@@ -2189,7 +2981,7 @@ function loadWorkbenchSessionData(sessionId) {
 
             // Group 2.5 Scanned Session Lots Table Body
             if (document.getElementById('modal-kb-lots-count')) document.getElementById('modal-kb-lots-count').textContent = lotsList.length;
-            if (document.getElementById('modal-kb-lots-total-qty')) document.getElementById('modal-kb-lots-total-qty').textContent = displayQty.toLocaleString() + ' pcs';
+            if (document.getElementById('modal-kb-lots-total-qty')) document.getElementById('modal-kb-lots-total-qty').textContent = totScanned.toLocaleString() + ' pcs';
 
             var lotsTbody = document.getElementById('modal-kb-session-lots-tbody');
             if (lotsTbody) {
@@ -2250,20 +3042,27 @@ function loadWorkbenchSessionData(sessionId) {
                 currentSessionPartCode = data.session.part_code;
             }
 
-            // Render Substitution Lineage Card on Workbench & Kanban Detail Modal
-            var substCard       = document.getElementById('substitution-mapping-card');
-            var substCountBadge = document.getElementById('subst-log-count-badge');
-            var substListBody   = document.getElementById('subst-log-list-body');
-            var modalSubstWrap  = document.getElementById('modal-kb-substitution-container');
-            var modalSubstList  = document.getElementById('modal-kb-substitution-list');
-            var substLog        = data.substitution_log || [];
+            // Render Substitution Lineage Modal & Buttons (Top Navbar & Card Header)
+            var btnTopSubst    = document.getElementById('btn-top-substitution-log');
+            var btnCardSubst   = document.getElementById('btn-card-substitution-log');
+            var topSubstCount  = document.getElementById('top-subst-log-count');
+            var cardSubstCount = document.getElementById('card-subst-log-count');
+            var modalSubstBody = document.getElementById('modal-subst-log-list-body');
+            var modalKbSubWrap = document.getElementById('modal-kb-substitution-container');
+            var modalKbSubList = document.getElementById('modal-kb-substitution-list');
+            var substLog       = data.substitution_log || [];
 
             if (substLog.length > 0) {
-                if (substCard) {
-                    substCard.classList.remove('hidden');
-                    substCard.style.display = 'block';
+                if (btnTopSubst) {
+                    btnTopSubst.classList.remove('hidden');
+                    btnTopSubst.style.display = 'flex';
                 }
-                if (substCountBadge) substCountBadge.textContent = substLog.length + ' Lot';
+                if (btnCardSubst) {
+                    btnCardSubst.classList.remove('hidden');
+                    btnCardSubst.style.display = 'inline-flex';
+                }
+                if (topSubstCount) topSubstCount.textContent = substLog.length;
+                if (cardSubstCount) cardSubstCount.textContent = substLog.length;
 
                 var sHtml = '';
                 substLog.forEach(function(item) {
@@ -2275,34 +3074,38 @@ function loadWorkbenchSessionData(sessionId) {
                     var actionLabel = (item.action_type === 'replace_ng_only') ? 'Ganti Lot NG' :
                                       (item.action_type === 'replace_all_lots') ? 'Ganti Semua Lot' : 'Re-Inspeksi';
 
-                    sHtml += '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:10px; padding:8px 10px; font-size:11px; box-shadow:0 1px 2px rgba(0,0,0,0.03);">' +
-                                '<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">' +
-                                    '<span style="font-size:10px; font-weight:800; color:#166534; background:#dcfce7; border:1px solid #bbf7d0; padding:1px 6px; border-radius:6px;">' + actionLabel + '</span>' +
-                                    '<span style="font-size:9px; color:#64748b; font-weight:600;">' + escapeHtml(item.actioned_by || 'QC') + ' • ' + (item.created_at || '') + '</span>' +
+                    sHtml += '<div style="background:#ffffff; border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font-size:11px; box-shadow:0 1px 3px rgba(0,0,0,0.04);">' +
+                                '<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">' +
+                                    '<span style="font-size:10px; font-weight:800; color:#166534; background:#dcfce7; border:1px solid #bbf7d0; padding:2px 8px; border-radius:6px;">' + actionLabel + '</span>' +
+                                    '<span style="font-size:9.5px; color:#64748b; font-weight:600;">' + escapeHtml(item.actioned_by || 'QC') + ' • ' + (item.created_at || '') + '</span>' +
                                 '</div>' +
                                 '<div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-family:monospace;">' +
-                                    '<div style="background:#ffe4e6; color:#9f1239; border:1px solid #fecdd3; padding:3px 8px; border-radius:6px; font-weight:700;">' +
+                                    '<div style="background:#ffe4e6; color:#9f1239; border:1px solid #fecdd3; padding:4px 9px; border-radius:6px; font-weight:700;">' +
                                         '🎯 ' + ngLotStr + '<span style="font-size:9px; opacity:0.85;">' + ngRefStr + '</span>' +
                                     '</div>' +
-                                    '<span style="font-size:12px; font-weight:900; color:#475569;">➔</span>' +
-                                    '<div style="background:#dcfce7; color:#166534; border:1px solid #bbf7d0; padding:3px 8px; border-radius:6px; font-weight:800;">' +
+                                    '<span style="font-size:13px; font-weight:900; color:#475569;">➔</span>' +
+                                    '<div style="background:#dcfce7; color:#166534; border:1px solid #bbf7d0; padding:4px 9px; border-radius:6px; font-weight:800;">' +
                                         '📦 ' + repLotStr + '<span style="font-size:9px; opacity:0.85;">' + repRefStr + '</span>' +
                                     '</div>' +
                                 '</div>' +
-                                (item.notes ? '<div style="font-size:10px; color:#475569; margin-top:4px; font-style:italic;">💬 ' + escapeHtml(item.notes) + '</div>' : '') +
+                                (item.notes ? '<div style="font-size:10px; color:#475569; margin-top:6px; font-style:italic;">💬 ' + escapeHtml(item.notes) + '</div>' : '') +
                              '</div>';
                 });
-                if (substListBody) substListBody.innerHTML = sHtml;
-                if (modalSubstList) modalSubstList.innerHTML = sHtml;
-                if (modalSubstWrap) modalSubstWrap.classList.remove('hidden');
+                if (modalSubstBody) modalSubstBody.innerHTML = sHtml;
+                if (modalKbSubList) modalKbSubList.innerHTML = sHtml;
+                if (modalKbSubWrap) modalKbSubWrap.classList.remove('hidden');
             } else {
-                if (substCard) {
-                    substCard.classList.add('hidden');
-                    substCard.style.display = 'none';
+                if (btnTopSubst) {
+                    btnTopSubst.classList.add('hidden');
+                    btnTopSubst.style.display = 'none';
                 }
-                if (substListBody) substListBody.innerHTML = '';
-                if (modalSubstWrap) modalSubstWrap.classList.add('hidden');
-                if (modalSubstList) modalSubstList.innerHTML = '';
+                if (btnCardSubst) {
+                    btnCardSubst.classList.add('hidden');
+                    btnCardSubst.style.display = 'none';
+                }
+                if (modalSubstBody) modalSubstBody.innerHTML = '<p style="font-size:12px; color:#64748b; text-align:center; padding:16px 0;">Belum ada riwayat penggantian lot untuk sesi ini.</p>';
+                if (modalKbSubWrap) modalKbSubWrap.classList.add('hidden');
+                if (modalKbSubList) modalKbSubList.innerHTML = '';
             }
 
             // Tombol Ringkas Tindakan Re-Inspeksi Kanban (Hanya muncul jika REJECTED dan ada lot NG aktif)
@@ -2321,35 +3124,29 @@ function loadWorkbenchSessionData(sessionId) {
             }
 
             // Badge RE-INSPEKSI di Header (Selalu di-update untuk semua status sesi)
-            var existingBadge = document.getElementById('header-reinspection-badge-js');
-            var existingParentLink = document.getElementById('header-parent-link-js');
-            if (existingBadge) existingBadge.remove();
-            if (existingParentLink) existingParentLink.remove();
-            if (s.is_reinspection) {
-                var titleEl = document.getElementById('header-session-title');
-                if (titleEl) {
+            var reinspWrapper = document.getElementById('header-reinspection-wrapper');
+            if (reinspWrapper) {
+                if (s.is_reinspection) {
                     var rTypeLabels = {
                         'rescan_restart':   'Scan Ulang (Awal)',
                         'rescan_continue':  'Scan Ulang (Lanjut)',
+                        'rescan_same_lot':  'Scan Ulang',
                         'replace_ng_only':  'Ganti Lot NG',
                         'replace_all_lots': 'Ganti Semua Lot'
                     };
                     var rTypeLabel = rTypeLabels[s.reinspection_type] || 'Re-Inspeksi';
                     var roundNum = s.reinspection_round || 1;
-                    var badge = document.createElement('span');
-                    badge.id = 'header-reinspection-badge-js';
-                    badge.style.cssText = 'display:inline-flex;align-items:center;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:800;background:#fef3c7;color:#92400e;border:1px solid #fde68a;margin-left:6px;flex-shrink:0;';
-                    badge.textContent = '⚡ RE-INSPEKSI #' + roundNum + ' (' + rTypeLabel + ')';
-                    titleEl.appendChild(badge);
-
+                    var reinspHtml = '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 shadow-2xs ml-2 flex-shrink-0">' +
+                                     '⚡ RE-INSPEKSI #' + roundNum + ' (' + escapeHtml(rTypeLabel) + ')' +
+                                     '</span>';
                     if (s.parent_session_id) {
-                        var pLink = document.createElement('a');
-                        pLink.id = 'header-parent-link-js';
-                        pLink.href = '<?= base_url("modules/inspection/session.php?id=") ?>' + s.parent_session_id;
-                        pLink.style.cssText = 'display:inline-flex;align-items:center;padding:2px 7px;border-radius:6px;font-size:9px;font-weight:600;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;margin-left:5px;flex-shrink:0;text-decoration:none;';
-                        pLink.textContent = '← Sesi Original #' + s.parent_session_id;
-                        titleEl.appendChild(pLink);
+                        reinspHtml += '<a href="<?= base_url("modules/inspection/session.php?id=") ?>' + s.parent_session_id + '" class="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-300 ml-2 flex-shrink-0 hover:bg-slate-200 transition-colors">' +
+                                      '← Sesi Original #' + s.parent_session_id +
+                                      '</a>';
                     }
+                    reinspWrapper.innerHTML = reinspHtml;
+                } else {
+                    reinspWrapper.innerHTML = '';
                 }
             }
 
@@ -2494,7 +3291,24 @@ function triggerModalValidation() {
     document.getElementById('modal-loading').classList.remove('hidden');
     document.getElementById('modal-error-box').classList.add('hidden');
 
-    var validateUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?part_code=' + encodeURIComponent(pCode) + '&lot_number=' + encodeURIComponent(lNum) + '&total_scanned_qty=' + totalScanned + '&kanban_item_id=' + selectedPlanningId;
+    var scannedRefList = [];
+    if (typeof scannedLabelsList !== 'undefined' && scannedLabelsList.length > 0) {
+        scannedLabelsList.forEach(function(l) {
+            if (l.Z5) scannedRefList.push(l.Z5);
+        });
+    }
+    var refVal = document.getElementById('scan-ref-number') ? document.getElementById('scan-ref-number').value.trim() : '';
+    if (refVal && scannedRefList.indexOf(refVal) === -1) {
+        scannedRefList.push(refVal);
+    }
+
+    var validateUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?part_code=' + encodeURIComponent(pCode) + 
+                      '&lot_number=' + encodeURIComponent(lNum) + 
+                      '&ref_number=' + encodeURIComponent(refVal) + 
+                      '&scanned_ref_numbers=' + encodeURIComponent(JSON.stringify(scannedRefList)) + 
+                      '&total_scanned_qty=' + totalScanned + 
+                      '&kanban_item_id=' + selectedPlanningId + 
+                      '&inspection_type=' + encodeURIComponent(selectedPlanningType);
 
     fetch(validateUrl)
         .then(function(r) { return r.json(); })
@@ -2509,8 +3323,38 @@ function triggerModalValidation() {
             // 1. Kasus PASSED: Auto-Bypass & Cegah Data Ganda
             if (data.already_safety_stock_passed) {
                 document.getElementById('modal-loading').classList.add('hidden');
+
+                if (selectedPlanningType === 'safety_stock') {
+                    // Alert khusus scan Safety Stock Gudang
+                    var refDisp = data.matched_ref_number ? (' (Ref Number: <b style="color: #1d4ed8; font-family: monospace;">' + escapeHtml(data.matched_ref_number) + '</b>)') : '';
+                    Swal.fire({
+                        title: 'Ref Number / Label Box Sudah Terdaftar',
+                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
+                              'Label Box' + refDisp + ' dengan Lot Number <b style="color: #1d4ed8; font-family: monospace;">' + escapeHtml(lNum) + '</b> (Part Code: <b>' + escapeHtml(pCode) + '</b>) ' +
+                              '<b>SUDAH TERDAFTAR & PASSED (Lolos)</b> di Safety Stock Gudang oleh QC <b>' + escapeHtml(data.inspector_name || 'Inspector QC') + '</b>.<br><br>' +
+                              '<div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 8px 12px; border-radius: 8px; color: #1e40af; font-weight: 600;">' +
+                              'Stok label box ini sudah tersimpan dalam persediaan Safety Stock Gudang.' +
+                              '</div>' +
+                              '</div>',
+                        icon: 'info',
+                        showCancelButton: true,
+                        confirmButtonColor: '#2563eb',
+                        cancelButtonColor: '#64748b',
+                        confirmButtonText: 'Lihat Detail Safety Stock',
+                        cancelButtonText: 'Monitoring Safety Stock'
+                    }).then(function(res) {
+                        if (res.isConfirmed) {
+                            window.location.href = '<?= base_url("modules/safety_stock/detail.php?id=") ?>' + (data.kanban_item_id || data.session_id);
+                        } else if (res.dismiss === Swal.DismissReason.cancel) {
+                            window.location.href = '<?= base_url("modules/safety_stock/index.php") ?>';
+                        }
+                    });
+                    return;
+                }
+
+                // Alert khusus inspeksi Kanban Customer (Auto-fulfillment Notification)
                 Swal.fire({
-                    title: '🎉 Selamat! Lolos Safety Stock',
+                    title: 'Selamat! Lolos Safety Stock',
                     html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
                           'Barang dengan Lot Number <b style="color: #1d4ed8; font-family: monospace;">' + escapeHtml(lNum) + '</b> (Part Code: <b>' + escapeHtml(pCode) + '</b>) ' +
                           '<b>SUDAH TERDAFTAR & PASSED (Lolos)</b> di Safety Stock oleh QC <b>' + escapeHtml(data.inspector_name || 'Inspector QC') + '</b>.<br><br>' +
@@ -2522,8 +3366,8 @@ function triggerModalValidation() {
                     showCancelButton: true,
                     confirmButtonColor: '#2563eb',
                     cancelButtonColor: '#64748b',
-                    confirmButtonText: '📊 Lihat Realisasi Pekerjaan QC (Monitoring)',
-                    cancelButtonText: '📦 Lihat Detail Safety Stock'
+                    confirmButtonText: 'Lihat Realisasi Pekerjaan QC (Monitoring)',
+                    cancelButtonText: 'Lihat Detail Safety Stock'
                 }).then(function(res) {
                     if (res.isConfirmed) {
                         window.location.href = '<?= base_url("modules/monitoring/index.php") ?>';
@@ -2574,13 +3418,25 @@ function executeCreateSession(data, pCode, lNum) {
 
     var totalScanned = 0;
     scannedLabelsList.forEach(function(l) { totalScanned += parseInt(l.Z3) || 0; });
-    if (totalScanned === 0) totalScanned = data.aql ? data.aql.total_qty : 500;
+    
+    var totalCheckedQty = 0;
+    availableSsLots.forEach(function(lot) {
+        if (selectedSsSessionIds.indexOf(parseInt(lot.session_id)) !== -1) {
+            totalCheckedQty += parseInt(lot.available_qty) || 0;
+        }
+    });
+    var usedSsQty = (isSafetyStockDeducted && selectedSsSessionIds.length > 0) ? Math.min(selectedPlanningQty, totalCheckedQty) : 0;
 
-    var targetKanban = selectedPlanningQty || totalScanned;
+    // Fix: Only apply fallback default scanned qty if NO safety stock was used AND no labels were scanned
+    if (totalScanned === 0 && usedSsQty === 0) {
+        totalScanned = data.aql ? data.aql.total_qty : 500;
+    }
+
+    var targetKanban = (selectedPlanningQty > 0) ? Math.max(0, selectedPlanningQty - usedSsQty) : totalScanned;
     var excessQty = Math.max(0, totalScanned - targetKanban);
 
-    // Fallback if scannedLabelsList empty
-    if (scannedLabelsList.length === 0) {
+    // Fallback if scannedLabelsList empty AND no safety stock was used
+    if (scannedLabelsList.length === 0 && usedSsQty === 0) {
         scannedLabelsList.push({
             Z1: pCode,
             Z2: lNum,
@@ -2599,10 +3455,12 @@ function executeCreateSession(data, pCode, lNum) {
     payload.append('kanban_item_id', data.kanban ? data.kanban.id : selectedPlanningId);
     payload.append('inspection_type', data.inspection_type || selectedPlanningType);
     payload.append('part_id', data.part ? data.part.id : 0);
-    payload.append('sample_size', data.aql ? data.aql.sample_size : 32);
+    payload.append('sample_size', data.aql ? data.aql.sample_size : 50);
     payload.append('reject_number', data.aql ? data.aql.reject_number : 1);
-    payload.append('total_scanned_qty', totalScanned);
+    payload.append('total_scanned_qty', totalScanned + usedSsQty);
     payload.append('excess_qty', excessQty);
+    payload.append('use_safety_stock_qty', usedSsQty);
+    payload.append('selected_ss_session_ids', JSON.stringify(selectedSsSessionIds));
     payload.append('scanned_labels', JSON.stringify(scannedLabelsList));
 
     fetch('<?= base_url("modules/inspection/create.php") ?>', {
@@ -3008,12 +3866,119 @@ function escapeHtml(text) {
 // ═══════════════════════════════════════════════════════════════════════════
 var currentNgLots = [];
 var currentSessionLots = [];
-var currentSessionPartCode = '';
+var currentSessionPartCode = '<?= $session ? htmlspecialchars($session['part_code']) : "" ?>';
 var reinspectApiUrl = '<?= base_url("modules/inspection/api/reinspect_lot.php") ?>';
 
 var batchSelectedStrategy = 'rescan'; // 'rescan' or 'replace'
 var batchSelectedSubAction = 'rescan_restart'; // 'rescan_restart', 'rescan_continue', 'replace_ng_only', 'replace_all_lots'
 var scannedBatchLabels = []; // Array of { z1, z2, z3, z5, raw }
+var currentBatchLotFilter = 'ng'; // 'ng' or 'all'
+
+/**
+ * Render Lot List in Modal (NG Lots vs All Session Lots)
+ */
+function renderBatchLotList(filterMode) {
+    if (filterMode) currentBatchLotFilter = filterMode;
+
+    var countNgBadge = document.getElementById('batch-modal-ng-count');
+    var countAllBadge = document.getElementById('batch-modal-all-count');
+    var listContainer = document.getElementById('batch-modal-lot-list');
+    var tabNgBtn = document.getElementById('btn-batch-tab-ng');
+    var tabAllBtn = document.getElementById('btn-batch-tab-all');
+
+    var actionableLots = (currentNgLots || []).filter(function(l) {
+        return l.lot_status === 'ng_found' || l.lot_status === 'ng_quarantine';
+    });
+
+    if (countNgBadge) countNgBadge.textContent = actionableLots.length;
+    if (countAllBadge) countAllBadge.textContent = (currentSessionLots || []).length;
+
+    if (tabNgBtn && tabAllBtn) {
+        if (currentBatchLotFilter === 'ng') {
+            tabNgBtn.style.backgroundColor = '#ffffff';
+            tabNgBtn.style.color = '#be123c';
+            tabNgBtn.style.boxShadow = '0 1px 3px rgba(0,0,0,0.1)';
+            tabAllBtn.style.backgroundColor = 'transparent';
+            tabAllBtn.style.color = '#64748b';
+            tabAllBtn.style.boxShadow = 'none';
+        } else {
+            tabAllBtn.style.backgroundColor = '#ffffff';
+            tabAllBtn.style.color = '#0284c7';
+            tabAllBtn.style.boxShadow = '0 1px 3px rgba(0,0,0,0.1)';
+            tabNgBtn.style.backgroundColor = 'transparent';
+            tabNgBtn.style.color = '#64748b';
+            tabNgBtn.style.boxShadow = 'none';
+        }
+    }
+
+    if (!listContainer) return;
+
+    var displayLots = (currentBatchLotFilter === 'ng') ? actionableLots : (currentSessionLots || []);
+
+    if (displayLots.length === 0) {
+        listContainer.innerHTML = (currentBatchLotFilter === 'ng')
+            ? '<p style="font-size:12px; color:#64748b; text-align:center; padding:12px 0;">Tidak ada lot NG dalam sesi ini.</p>'
+            : '<p style="font-size:12px; color:#64748b; text-align:center; padding:12px 0;">Tidak ada lot dalam sesi ini.</p>';
+        return;
+    }
+
+    var ngLotMap = {};
+    actionableLots.forEach(function(l) {
+        if (l.id) ngLotMap['id_' + l.id] = l;
+        if (l.session_lot_id) ngLotMap['id_' + l.session_lot_id] = l;
+        if (l.ref_number) ngLotMap['ref_' + l.ref_number] = l;
+    });
+
+    var html = '';
+    displayLots.forEach(function(lot) {
+        var lotNo = lot.lot_number || '-';
+        var refNo = lot.ref_number || '';
+        var qty = lot.qty || lot.total_qty || 0;
+
+        var ngData = null;
+        if (lot.id && ngLotMap['id_' + lot.id]) {
+            ngData = ngLotMap['id_' + lot.id];
+        } else if (lot.session_lot_id && ngLotMap['id_' + lot.session_lot_id]) {
+            ngData = ngLotMap['id_' + lot.session_lot_id];
+        } else if (refNo && ngLotMap['ref_' + refNo]) {
+            ngData = ngLotMap['ref_' + refNo];
+        }
+
+        var isNg = !!ngData || lot.lot_status === 'ng_found' || lot.lot_status === 'ng_quarantine';
+
+        var statusBadge = '';
+        var cardStyle = '';
+
+        if (isNg) {
+            cardStyle = 'background-color: #fff1f2; border: 1px solid #fecdd3;';
+            var defects = (ngData && ngData.ng_defects) ? ngData.ng_defects : (lot.ng_defects || []);
+            if (defects && defects.length > 0) {
+                statusBadge = defects.map(function(d) {
+                    return '<span style="display:inline-block; background-color:#ffe4e6; color:#9f1239; border:1px solid #fca5a5; border-radius:4px; padding:1px 5px; font-size:9px; font-weight:700; margin-right:4px;">' +
+                           escapeHtml(d.defect_name) + ' ×' + d.total_qty_ng + '</span>';
+                }).join('');
+            } else {
+                statusBadge = '<span style="font-size:9px; color:#e11d48; font-weight:700;">🔴 Lot NG</span>';
+            }
+        } else {
+            cardStyle = 'background-color: #ffffff; border: 1px solid #e2e8f0;';
+            statusBadge = '<span style="display:inline-block; background-color:#dcfce7; color:#15803d; border:1px solid #bbf7d0; border-radius:4px; padding:1px 6px; font-size:9px; font-weight:800;">✅ OK (Normal)</span>';
+        }
+
+        html += '<div style="' + cardStyle + ' border-radius: 8px; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">' +
+                    '<div>' +
+                        '<div style="font-weight: 800; color: #0f172a; display: flex; align-items: center; gap: 4px;">' +
+                            '<span>📦 ' + escapeHtml(lotNo) + '</span>' +
+                            (refNo ? '<span style="font-size: 10px; color: #64748b; font-family: monospace;">(' + escapeHtml(refNo) + ')</span>' : '') +
+                        '</div>' +
+                        '<div style="margin-top: 2px; display: flex; align-items: center; gap: 4px;">' + statusBadge + '</div>' +
+                    '</div>' +
+                    '<span style="font-size: 10px; font-weight: 800; color: #334155; background-color: #f1f5f9; border: 1px solid #cbd5e1; padding: 2px 8px; border-radius: 9999px;">' + qty + ' pcs</span>' +
+                '</div>';
+    });
+
+    listContainer.innerHTML = html;
+}
 
 /**
  * Buka Modal Batch Re-Inspeksi (#batch-reinspection-modal-overlay)
@@ -3022,41 +3987,8 @@ function openBatchReinspectionModal() {
     var modal = document.getElementById('batch-reinspection-modal-overlay');
     if (!modal) return;
 
-    // Populate NG Lots list
-    var countBadge = document.getElementById('batch-modal-ng-count');
-    var listContainer = document.getElementById('batch-modal-ng-list');
-    
-    var actionableLots = currentNgLots.filter(function(l) {
-        return l.lot_status === 'ng_found' || l.lot_status === 'ng_quarantine';
-    });
-
-    if (countBadge) countBadge.textContent = actionableLots.length + ' Lot Terdampak';
-
-    var html = '';
-    actionableLots.forEach(function(lot) {
-        var defectStr = '';
-        if (lot.ng_defects && lot.ng_defects.length > 0) {
-            defectStr = lot.ng_defects.map(function(d) {
-                return '<span class="inline-block bg-rose-100 text-rose-800 border border-rose-300 rounded px-1.5 py-0.5 text-[9px] font-bold mr-1">' +
-                       escapeHtml(d.defect_name) + ' ×' + d.total_qty_ng + '</span>';
-            }).join('');
-        } else {
-            defectStr = '<span class="text-[9px] text-slate-400">Cacat terdeteksi</span>';
-        }
-
-        html += '<div class="bg-white border border-rose-200 rounded-lg p-2 flex items-center justify-between text-xs shadow-2xs">' +
-                    '<div>' +
-                        '<div class="font-extrabold text-slate-900 flex items-center space-x-1">' +
-                            '<span>📦 ' + escapeHtml(lot.lot_number || '-') + '</span>' +
-                            (lot.ref_number ? '<span class="text-[10px] text-slate-500 font-mono">(' + escapeHtml(lot.ref_number) + ')</span>' : '') +
-                        '</div>' +
-                        '<div class="mt-0.5 flex items-center space-x-1">' + defectStr + '</div>' +
-                    '</div>' +
-                    '<span class="text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">' + lot.qty + ' pcs</span>' +
-                '</div>';
-    });
-
-    if (listContainer) listContainer.innerHTML = html || '<p class="text-xs text-slate-500 text-center py-2">Tidak ada lot NG.</p>';
+    // Render lot list (default 'ng' view)
+    renderBatchLotList('ng');
 
     // Reset State & Form Fields
     scannedBatchLabels = [];
@@ -3067,6 +3999,9 @@ function openBatchReinspectionModal() {
     selectSubAction('rescan_restart');
 
     document.getElementById('batch-reinsp-notes').value = '';
+    if (document.getElementById('batch-input-z1')) {
+        document.getElementById('batch-input-z1').value = currentSessionPartCode || '<?= $session ? htmlspecialchars($session['part_code']) : "" ?>';
+    }
 
     modal.classList.remove('hidden');
     modal.style.display = 'flex';
@@ -3203,12 +4138,16 @@ function selectSubAction(action, evt) {
         btnReplaceNg.style.color = '#ffffff';
         btnReplaceNg.style.borderColor = '#e11d48';
         btnReplaceNg.style.fontWeight = '700';
+        renderBatchLotList('ng');
     } else if (action === 'replace_all_lots' && btnReplaceAll) {
         btnReplaceAll.style.backgroundColor = '#e11d48';
         btnReplaceAll.style.color = '#ffffff';
         btnReplaceAll.style.borderColor = '#e11d48';
         btnReplaceAll.style.fontWeight = '700';
+        renderBatchLotList('all');
     }
+
+    renderBatchScannedTable();
 
     // Auto focus scan input when entering replace mode
     if (action.indexOf('replace') !== -1) {
@@ -3252,11 +4191,17 @@ function handleSingleBatchQrInput(inputEl, forceProcess) {
             return;
         }
 
+        if (!z5) {
+            Swal.fire({ icon: 'warning', title: 'Ref Number Wajib Diisi', text: 'Ref Number tidak terbaca dari barcode. Silakan isi field Ref Number secara manual sebelum menambah label.' });
+            if (inputEl) inputEl.value = '';
+            return;
+        }
+
         validateBatchLabelWithDid({
             z1: z1,
             z2: z2,
             z3: z3,
-            z5: z5 || ('REF-' + Date.now()),
+            z5: z5,
             raw: raw,
             inputEl: inputEl
         });
@@ -3281,11 +4226,16 @@ function addManualBatchLabel() {
         return;
     }
 
+    if (!z5) {
+        Swal.fire({ icon: 'warning', title: 'Ref Number Wajib Diisi', text: 'Silakan isi Ref Number terlebih dahulu. Ref Number harus diisi manual oleh user.' });
+        return;
+    }
+
     validateBatchLabelWithDid({
         z1: z1,
         z2: z2,
         z3: z3,
-        z5: z5 || ('REF-' + Date.now()),
+        z5: z5,
         raw: ''
     });
 }
@@ -3299,6 +4249,23 @@ function validateBatchLabelWithDid(item) {
 
     if (!pCode || !lNum) {
         Swal.fire('Error', 'Part Code dan Lot Number wajib diisi untuk verifikasi DID!', 'error');
+        return;
+    }
+
+    // 1. Validasi Part Code Match dengan Sesi Kanban saat ini
+    if (currentSessionPartCode && pCode.toUpperCase() !== currentSessionPartCode.toUpperCase()) {
+        Swal.fire({
+            icon: 'error',
+            title: '⚠️ PART CODE TIDAK COCOK!',
+            html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
+                  'Part Code pada label (<b style="color:#be123c;">"' + escapeHtml(pCode) + '"</b>) tidak cocok dengan Part Code Sesi Kanban ini (<b style="color:#0284c7;">"' + escapeHtml(currentSessionPartCode) + '"</b>)!<br><br>' +
+                  '<b style="color:#e11d48;">Pastikan Anda meng-scan/memasukkan label barang yang sesuai dengan Part Code Kanban ini!</b>' +
+                  '</div>'
+        });
+        if (item.inputEl) {
+            item.inputEl.value = '';
+            item.inputEl.focus();
+        }
         return;
     }
 
@@ -3344,8 +4311,8 @@ function validateBatchLabelWithDid(item) {
 
             if (item.inputEl) item.inputEl.value = '';
 
-            // Clear manual input fields
-            if (document.getElementById('batch-input-z1')) document.getElementById('batch-input-z1').value = '';
+            // Clear manual input fields (reset Part Code to current session Part Code)
+            if (document.getElementById('batch-input-z1')) document.getElementById('batch-input-z1').value = currentSessionPartCode || '<?= $session ? htmlspecialchars($session['part_code']) : "" ?>';
             if (document.getElementById('batch-input-z2')) document.getElementById('batch-input-z2').value = '';
             if (document.getElementById('batch-input-z3')) document.getElementById('batch-input-z3').value = '';
             if (document.getElementById('batch-input-z5')) document.getElementById('batch-input-z5').value = '';

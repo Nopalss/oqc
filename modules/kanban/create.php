@@ -14,7 +14,7 @@ if ($pdo) {
     try {
         $stmt = $pdo->query("SELECT id, part_code, part_name FROM master_parts ORDER BY part_code ASC");
         $master_parts = $stmt->fetchAll();
-        $stmtCust = $pdo->query("SELECT id, name FROM master_customers ORDER BY name ASC");
+        $stmtCust = $pdo->query("SELECT id, name FROM master_customers WHERE UPPER(name) NOT LIKE '%SAFETY STOCK%' AND UPPER(name) NOT LIKE '%INTERNAL STOCK%' ORDER BY name ASC");
         $master_customers = $stmtCust->fetchAll();
     } catch (PDOException $e) {
         $master_parts = [];
@@ -65,13 +65,11 @@ if ($pdo) {
 
                     <!-- Shared Metadata Fields Header -->
                     <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs flex-wrap gap-2">
+                        <input type="hidden" name="plan_type" value="kanban">
                         <div class="flex items-center space-x-3">
                             <div class="flex items-center space-x-1.5">
                                 <span class="font-bold text-slate-700">Tipe Planning:</span>
-                                <select name="plan_type" id="manual-plan-type" onchange="onPlanTypeChange(this.value)" class="form-input py-1 text-xs font-bold text-blue-800 bg-blue-50 border-blue-200">
-                                    <option value="kanban">🚚 Kanban (Pengiriman Customer)</option>
-                                    <option value="safety_stock">📦 Safety Stock (Restock Internal)</option>
-                                </select>
+                                <span class="px-2 py-1 rounded text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">🚚 Kanban (Pengiriman Customer)</span>
                             </div>
                             <div class="flex items-center space-x-1.5">
                                 <span class="font-bold text-slate-700">No. Dokumen Batch:</span>
@@ -346,9 +344,8 @@ if ($pdo) {
         tr.id = 'row-' + rowIndex;
         tr.className = 'hover:bg-slate-50/80 transition-colors';
 
-        var planTypeEl = document.getElementById('manual-plan-type');
-        var isSafetyStock = planTypeEl ? (planTypeEl.value === 'safety_stock') : false;
-        var displayStyle = isSafetyStock ? 'display: none;' : '';
+        var isSafetyStock = false;
+        var displayStyle = '';
 
         // Parts options
         var partOptions = '<option value="">-- Pilih Part --</option>';
@@ -359,17 +356,12 @@ if ($pdo) {
         partOptions += '<option value="custom">Input Custom Item Code</option>';
 
         // Customers options
-        var custOptions = '';
-        if (isSafetyStock) {
-            custOptions = '<option value="INTERNAL STOCK" selected>-- Belum Ada PT (Safety Stock) --</option>';
-        } else {
-            custOptions = '<option value="">-- Pilih Customer --</option>';
-            for (var k = 0; k < masterCustomersData.length; k++) {
-                var c = masterCustomersData[k];
-                custOptions += '<option value="' + escapeHtml(c.name) + '">' + escapeHtml(c.name) + '</option>';
-            }
-            custOptions += '<option value="custom">Input Custom PT</option>';
+        var custOptions = '<option value="">-- Pilih Customer --</option>';
+        for (var k = 0; k < masterCustomersData.length; k++) {
+            var c = masterCustomersData[k];
+            custOptions += '<option value="' + escapeHtml(c.name) + '">' + escapeHtml(c.name) + '</option>';
         }
+        custOptions += '<option value="custom">Input Custom PT</option>';
 
         // Default req date & time (now)
         var todayDate = new Date();

@@ -16,14 +16,14 @@ if ($batch_id && $pdo) {
         $batch = $stmtBatch->fetch();
 
         if ($batch) {
-            $stmtItems = $pdo->prepare("SELECT * FROM kanban_items WHERE batch_id = :batch_id ORDER BY id ASC");
+            $stmtItems = $pdo->prepare("SELECT * FROM kanban_items WHERE batch_id = :batch_id AND (plan_type IS NULL OR plan_type = 'kanban') AND (check_type IS NULL OR check_type != 'Safety Stock') AND (kanban_no IS NULL OR kanban_no NOT LIKE 'SS-%') ORDER BY id ASC");
             $stmtItems->execute([':batch_id' => $batch_id]);
             $items = $stmtItems->fetchAll();
 
             $stmtParts = $pdo->query("SELECT id, part_code, part_name FROM master_parts ORDER BY part_code ASC");
             $master_parts = $stmtParts->fetchAll();
 
-            $stmtCust = $pdo->query("SELECT id, name FROM master_customers ORDER BY name ASC");
+            $stmtCust = $pdo->query("SELECT id, name FROM master_customers WHERE UPPER(name) NOT LIKE '%SAFETY STOCK%' AND UPPER(name) NOT LIKE '%INTERNAL STOCK%' ORDER BY name ASC");
             $master_customers = $stmtCust->fetchAll();
         }
     } catch (PDOException $e) {

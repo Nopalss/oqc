@@ -44,142 +44,120 @@ $customersList = [];
 if ($pdo) {
     try {
         // Fetch Master Customers for dropdown filter
-        $stCust = $pdo->query("SELECT DISTINCT name FROM master_customers ORDER BY name ASC");
+        $stCust = $pdo->query("SELECT DISTINCT name FROM master_customers WHERE UPPER(name) NOT LIKE '%SAFETY STOCK%' AND UPPER(name) NOT LIKE '%INTERNAL STOCK%' ORDER BY name ASC");
         $customersList = $stCust->fetchAll(PDO::FETCH_COLUMN);
 
-        // Build WHERE clause strictly for Safety Stock / Internal Stock items
-        $where = ["(ki.plan_type = 'safety_stock' OR b.plan_type = 'safety_stock' OR ss.inspection_type = 'safety_stock' OR ki.kanban_no LIKE 'SS%' OR UPPER(ki.customer) LIKE '%SAFETY%' OR UPPER(ki.customer) LIKE '%INTERNAL%' OR UPPER(b.vendor) LIKE '%INTERNAL%' OR UPPER(b.vendor) LIKE '%SAFETY%')"];
+        // Build WHERE clause strictly for Safety Stock inspection sessions
+        $where = ["ss.inspection_type = 'safety_stock'"];
         $params = [];
 
         // Apply Date Range Filter if set
         if (!empty($startDate) && !empty($endDate)) {
-            $where[] = "DATE(COALESCE(ss.started_at, b.imported_at, ki.created_at)) BETWEEN :sd AND :ed";
+            $where[] = "DATE(COALESCE(ss.started_at, did.created_at)) BETWEEN :sd AND :ed";
             $params[':sd'] = $startDate;
             $params[':ed'] = $endDate;
         }
 
         if (!empty($search)) {
-            $where[] = "(ki.item_code LIKE :s1 OR ki.item_description LIKE :s2 OR ki.kanban_no LIKE :s3 OR did.lot_number LIKE :s4)";
+            $where[] = "(did.part_code LIKE :s1 OR did.part_name LIKE :s2 OR did.lot_number LIKE :s3 OR ki.item_code LIKE :s4 OR ki.item_description LIKE :s5)";
             $params[':s1'] = '%' . $search . '%';
             $params[':s2'] = '%' . $search . '%';
             $params[':s3'] = '%' . $search . '%';
             $params[':s4'] = '%' . $search . '%';
+            $params[':s5'] = '%' . $search . '%';
         }
 
         if (!empty($customer)) {
-            $where[] = "ki.customer = :customer";
+            $where[] = "(ki.customer = :customer OR UPPER(:cust_chk) = 'INTERNAL SAFETY STOCK')";
             $params[':customer'] = $customer;
+            $params[':cust_chk'] = $customer;
+        }
+
+        if (!empty($statusFilter)) {
+            $where[] = "ss.status = :status_filter";
+            $params[':status_filter'] = $statusFilter;
         }
 
         $whereStr = implode(" AND ", $where);
 
-        // Fetch All Matching Items for KPI Summary Calculation (STRICTLY HAVING session_count > 0)
-        $sumSql = "SELECT 
-                    ki.id AS item_id,
-                    ki.qty AS planned_qty,
-                    COUNT(ss.id) AS session_count,
-                    SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS count_rejected,
-                    SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) AS count_in_progress,
-                    SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed
-                   FROM kanban_items ki
-                   LEFT JOIN kanban_batches b ON ki.batch_id = b.id
-                   JOIN inspection_sessions ss ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
-                   LEFT JOIN daily_inspection_data did ON ss.did_id = did.id
-                   WHERE {$whereStr}
-                   GROUP BY ki.id, ki.qty
-                   HAVING session_count > 0";
-        $stSum = $pdo->prepare($sumSql);
-        $stSum->execute($params);
-        $allSumRows = $stSum->fetchAll(PDO::FETCH_ASSOC);
+        // Grouped SQL Query to fetch Safety Stock grouped by Part Code & Lot Number
+        $groupedSql = "SELECT 
+                        COALESCE(did.part_code, ki.item_code, '-') AS part_code,
+                        MIN(COALESCE(did.part_name, ki.item_description, 'Part Safety Stock')) AS part_name,
+                        COALESCE(did.lot_number, '-') AS lot_number,
+                        MIN(COALESCE(ki.customer, 'INTERNAL SAFETY STOCK')) AS customer,
+                        MIN(COALESCE(ki.str_loc, 'WH-SAFETY')) AS str_loc,
+                        MAX(ss.id) AS max_session_id,
+                        MAX(ss.started_at) AS last_started_at,
+                        CASE 
+                            WHEN SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) > 0 THEN 'in_progress'
+                            WHEN SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) > 0 THEN 'rejected'
+                            ELSE 'passed'
+                        END AS group_status,
+                        SUM(ss.total_scanned_qty) AS total_initial_qty,
+                        SUM(CASE WHEN ss.auto_fulfilled_by_session_id > 0 THEN ss.total_scanned_qty ELSE 0 END) AS total_used_qty,
+                        SUM(CASE WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' THEN ss.total_scanned_qty ELSE 0 END) AS available_qty,
+                        GROUP_CONCAT(DISTINCT COALESCE(u.name, did.pic, 'Inspector QC') SEPARATOR ', ') AS inspector_names
+                       FROM inspection_sessions ss
+                       LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                       LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+                       LEFT JOIN users u ON u.id = ss.inspector_id
+                       WHERE {$whereStr}
+                       GROUP BY COALESCE(did.part_code, ki.item_code, '-'), COALESCE(did.lot_number, '-')
+                       ORDER BY 
+                          CASE 
+                              WHEN SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) > 0 THEN 1
+                              WHEN SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) > 0 THEN 2
+                              ELSE 3 
+                          END ASC,
+                          MAX(ss.id) DESC";
 
-        $summary['total_plan'] = count($allSumRows);
-        foreach ($allSumRows as $sr) {
-            $summary['total_pcs'] += (int)$sr['planned_qty'];
-            if ($sr['count_rejected'] > 0) {
+        $stAll = $pdo->prepare($groupedSql);
+        $stAll->execute($params);
+        $allGroups = $stAll->fetchAll(PDO::FETCH_ASSOC);
+
+        // Fetch distinct Ref Numbers per Lot Group
+        $refMap = [];
+        $stmtRefs = $pdo->query("
+            SELECT 
+                UPPER(COALESCE(did.part_code, ki.item_code, '')) AS pcode,
+                UPPER(COALESCE(did.lot_number, '')) AS lotnum,
+                GROUP_CONCAT(DISTINCT isl.ref_number SEPARATOR ', ') AS ref_list,
+                COUNT(DISTINCT isl.ref_number) AS ref_count
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            WHERE ss.inspection_type = 'safety_stock' AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND isl.ref_number IS NOT NULL AND isl.ref_number != ''
+            GROUP BY UPPER(COALESCE(did.part_code, ki.item_code, '')), UPPER(COALESCE(did.lot_number, ''))
+        ");
+        if ($stmtRefs) {
+            while ($rRow = $stmtRefs->fetch(PDO::FETCH_ASSOC)) {
+                $key = $rRow['pcode'] . '___' . $rRow['lotnum'];
+                $refMap[$key] = $rRow;
+            }
+        }
+
+        // Compute Summary KPIs
+        $summary['total_plan'] = count($allGroups);
+        foreach ($allGroups as $g) {
+            $summary['total_pcs'] += (int)$g['total_initial_qty'];
+            if ($g['group_status'] === 'rejected') {
                 $summary['rejected']++;
-            } elseif ($sr['count_in_progress'] > 0) {
+            } elseif ($g['group_status'] === 'in_progress') {
                 $summary['in_progress']++;
-            } elseif ($sr['count_passed'] > 0) {
+            } elseif ($g['group_status'] === 'passed') {
                 $summary['passed']++;
             }
         }
 
-        // Apply Status Filter in HAVING clause (ALWAYS session_count > 0)
-        $havingStr = " HAVING session_count > 0 ";
-        if ($statusFilter === 'in_progress') {
-            $havingStr .= " AND count_in_progress > 0 AND count_rejected = 0 ";
-        } elseif ($statusFilter === 'passed') {
-            $havingStr .= " AND count_passed > 0 AND count_in_progress = 0 AND count_rejected = 0 ";
-        } elseif ($statusFilter === 'rejected') {
-            $havingStr .= " AND count_rejected > 0 ";
-        }
-
-        // Count Total Paginated Items
-        $countSql = "SELECT COUNT(*) FROM (
-                        SELECT ki.id,
-                               COUNT(ss.id) AS session_count,
-                               SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS count_rejected,
-                               SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) AS count_in_progress,
-                               SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed
-                        FROM kanban_items ki
-                        LEFT JOIN kanban_batches b ON ki.batch_id = b.id
-                        JOIN inspection_sessions ss ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
-                        LEFT JOIN daily_inspection_data did ON ss.did_id = did.id
-                        WHERE {$whereStr}
-                        GROUP BY ki.id
-                        {$havingStr}
-                     ) t";
-        $stCount = $pdo->prepare($countSql);
-        $stCount->execute($params);
-        $totalItems = (int)$stCount->fetchColumn();
-
+        // Pagination for Grouped Results
+        $totalItems = count($allGroups);
         $totalPages = max(1, ceil($totalItems / $limit));
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
 
-        // Main Paginated Query
-        $mainSql = "SELECT 
-                        ki.id AS item_id, ki.item_code, ki.item_description, ki.qty AS planned_qty, 
-                        ki.customer, ki.plan_type, ki.kanban_no, ki.req_date, ki.str_loc, ki.supply_area,
-                        COALESCE(b.document_number, 'DOC-SAFETY-STOCK') AS document_number, 
-                        COALESCE(b.vendor, 'Safety Stock Storage') AS vendor, 
-                        COALESCE(b.imported_at, ki.created_at) AS plan_date,
-                        COUNT(ss.id) AS session_count,
-                        MAX(ss.id) AS last_session_id,
-                        SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS count_rejected,
-                        SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) AS count_in_progress,
-                        SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed,
-                        MAX(ss.samples_checked) AS samples_checked,
-                        MAX(ss.sample_size) AS sample_size,
-                        MAX(ss.ng_count) AS ng_count,
-                        MIN(ss.started_at) AS first_started_at,
-                        MAX(ss.closed_at) AS last_closed_at,
-                        COALESCE(MAX(u.name), MAX(did.pic), '-') AS inspector_name,
-                        COALESCE(MAX(did.lot_number), '-') AS lot_number
-                    FROM kanban_items ki
-                    LEFT JOIN kanban_batches b ON ki.batch_id = b.id
-                    JOIN inspection_sessions ss ON (ss.kanban_item_id = ki.id OR ss.did_id = ki.id)
-                    LEFT JOIN users u ON ss.inspector_id = u.id
-                    LEFT JOIN daily_inspection_data did ON ss.did_id = did.id
-                    WHERE {$whereStr}
-                    GROUP BY ki.id, ki.item_code, ki.item_description, ki.qty, ki.customer, ki.plan_type, ki.kanban_no, ki.str_loc, ki.supply_area, ki.req_date, b.document_number, b.vendor, b.imported_at, ki.created_at
-                    {$havingStr}
-                    ORDER BY 
-                        CASE 
-                            WHEN SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) > 0 THEN 1
-                            WHEN SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) > 0 THEN 2
-                            ELSE 3 
-                        END ASC,
-                        ki.id DESC
-                    LIMIT :limit OFFSET :offset";
-        $stMain = $pdo->prepare($mainSql);
-        foreach ($params as $k => $v) {
-            $stMain->bindValue($k, $v);
-        }
-        $stMain->bindValue(':limit', $limit, PDO::PARAM_INT);
-        $stMain->bindValue(':offset', $offset, PDO::PARAM_INT);
-        $stMain->execute();
-        $items = $stMain->fetchAll(PDO::FETCH_ASSOC);
+        $items = array_slice($allGroups, $offset, $limit);
 
     } catch (PDOException $e) {
         set_flash('error', 'Gagal memuat data Safety Stock: ' . $e->getMessage());
@@ -197,7 +175,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
     <main class="flex-1 p-3 md:p-4 space-y-3 min-w-0 w-full overflow-x-hidden">
         
-        <?= get_flash() ?>
+        <?= render_flash() ?>
 
         <!-- 1. Header Banner Card -->
         <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 12px 16px; color: #ffffff; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
@@ -391,11 +369,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <thead style="background-color: #ffffff; border-bottom: 1px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase;">
                         <tr>
                             <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
-                            <th style="padding: 10px 14px; min-width: 180px;">Kode & Nama Part</th>
-                            <th style="padding: 10px 14px; min-width: 140px;">Lot Number</th>
-                            <th style="padding: 10px 14px; min-width: 140px;">Customer</th>
-                            <th style="padding: 10px 14px; text-align: center; width: 110px;">Qty Stock</th>
-                            <th style="padding: 10px 14px; width: 110px;">Lokasi Gudang</th>
+                            <th style="padding: 10px 14px; min-width: 170px;">Kode & Nama Part</th>
+                            <th style="padding: 10px 14px; min-width: 130px;">Lot Number</th>
+                            <th style="padding: 10px 14px; text-align: center; width: 100px;">Box</th>
+                            <th style="padding: 10px 14px; text-align: center; width: 120px;">Qty Stock</th>
                             <th style="padding: 10px 14px; width: 120px;">Status Inspeksi</th>
                             <th style="padding: 10px 14px; min-width: 130px;">Inspektur / PIC</th>
                             <th style="padding: 10px 14px; min-width: 130px;">Tgl Inspeksi</th>
@@ -405,7 +382,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <tbody>
                         <?php if (empty($items)): ?>
                             <tr>
-                                <td colspan="10" style="padding: 48px; text-align: center; color: #94a3b8;">
+                                <td colspan="9" style="padding: 48px; text-align: center; color: #94a3b8;">
                                     <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
                                         <svg style="width: 48px; height: 48px; color: #cbd5e1; margin-bottom: 8px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
@@ -421,19 +398,24 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <?php foreach ($items as $idx => $it): ?>
                                 <?php 
                                     $rowNum = $offset + $idx + 1;
-                                    $hasRejected  = ((int)$it['count_rejected'] > 0);
-                                    $hasInProg    = ((int)$it['count_in_progress'] > 0);
-                                    $hasPassed    = ((int)$it['count_passed'] > 0);
+                                    $sStatus = $it['group_status'] ?? 'passed';
 
-                                    if ($hasRejected) {
+                                    if ($sStatus === 'rejected') {
                                         $statusBadge = '<span style="background-color: #ffe4e6; color: #9f1239; border: 1px solid #fecdd3; padding: 2px 8px; border-radius: 9999px; font-weight: 700; font-size: 10px;">REJECTED</span>';
-                                    } elseif ($hasInProg) {
+                                    } elseif ($sStatus === 'in_progress') {
                                         $statusBadge = '<span style="background-color: #fffbe6; color: #92400e; border: 1px solid #ffe58f; padding: 2px 8px; border-radius: 9999px; font-weight: 700; font-size: 10px;">IN PROGRESS</span>';
-                                    } elseif ($hasPassed) {
-                                        $statusBadge = '<span style="background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; padding: 2px 8px; border-radius: 9999px; font-weight: 700; font-size: 10px;">PASSED</span>';
                                     } else {
                                         $statusBadge = '<span style="background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; padding: 2px 8px; border-radius: 9999px; font-weight: 700; font-size: 10px;">PASSED</span>';
                                     }
+
+                                    $totalInitialQty = (int)$it['total_initial_qty'];
+                                    $totalUsedQty    = (int)$it['total_used_qty'];
+                                    $availQty        = max(0, (int)$it['available_qty']);
+
+                                    // Total Box count for this Part + Lot Group
+                                    $mapKey = strtoupper($it['part_code']) . '___' . strtoupper($it['lot_number']);
+                                    $refInfo = $refMap[$mapKey] ?? null;
+                                    $boxCount = ($refInfo && !empty($refInfo['ref_count'])) ? (int)$refInfo['ref_count'] : 1;
                                 ?>
                                 <tr style="border-bottom: 1px solid #f1f5f9;">
                                     <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $rowNum ?></td>
@@ -441,10 +423,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <!-- Kode & Nama Part -->
                                     <td style="padding: 10px 14px;">
                                         <div style="font-weight: 800; color: #1d4ed8; font-family: monospace; font-size: 12px; margin-bottom: 2px;">
-                                            <?= htmlspecialchars($it['item_code']) ?>
+                                            <?= htmlspecialchars($it['part_code']) ?>
                                         </div>
-                                        <div style="font-weight: 700; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;" title="<?= htmlspecialchars($it['item_description']) ?>">
-                                            <?= htmlspecialchars($it['item_description']) ?>
+                                        <div style="font-weight: 700; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px;" title="<?= htmlspecialchars($it['part_name']) ?>">
+                                            <?= htmlspecialchars($it['part_name']) ?>
                                         </div>
                                     </td>
 
@@ -455,19 +437,21 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         </span>
                                     </td>
 
-                                    <!-- Customer -->
-                                    <td style="padding: 10px 14px; font-weight: 600; color: #334155;">
-                                        <?= htmlspecialchars($it['customer'] ?: '-') ?>
+                                    <!-- Total Box -->
+                                    <td style="padding: 10px 14px; text-align: center;">
+                                        <span style="font-weight: 800; color: #1e293b; background-color: #f1f5f9; padding: 3px 10px; border-radius: 9999px; border: 1px solid #cbd5e1; font-size: 11px; display: inline-block;">
+                                            <?= $boxCount ?> Box
+                                        </span>
                                     </td>
 
-                                    <!-- Qty Stock -->
-                                    <td style="padding: 10px 14px; text-align: center; font-family: monospace; font-weight: 900; color: #0f172a;">
-                                        <?= number_format($it['planned_qty']) ?> pcs
-                                    </td>
-
-                                    <!-- Lokasi Gudang -->
-                                    <td style="padding: 10px 14px; font-family: monospace; font-weight: 600; color: #475569;">
-                                        <?= htmlspecialchars($it['str_loc'] ?: 'WH-SAFETY') ?>
+                                    <!-- Qty Stock & Sisa Tersedia -->
+                                    <td style="padding: 10px 14px; text-align: center;">
+                                        <div style="font-family: monospace; font-weight: 900; color: #0f172a; font-size: 12px;">
+                                            <?= number_format($totalInitialQty) ?> pcs
+                                        </div>
+                                        <div style="font-size: 10px; font-weight: 700; color: #166534; margin-top: 2px;">
+                                            Sisa: <?= number_format($availQty) ?> pcs
+                                        </div>
                                     </td>
 
                                     <!-- Status Inspeksi -->
@@ -479,16 +463,16 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <td style="padding: 10px 14px; font-weight: 600; color: #334155;">
                                         <div style="display: flex; align-items: center; gap: 6px;">
                                             <span style="width: 20px; height: 20px; border-radius: 9999px; background-color: #dbeafe; color: #1d4ed8; font-weight: 800; font-size: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                                                <?= strtoupper(substr($it['inspector_name'] ?: 'Q', 0, 1)) ?>
+                                                <?= strtoupper(substr($it['inspector_names'] ?: 'Q', 0, 1)) ?>
                                             </span>
-                                            <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px;"><?= htmlspecialchars($it['inspector_name'] ?: '-') ?></span>
+                                            <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px;" title="<?= htmlspecialchars($it['inspector_names']) ?>"><?= htmlspecialchars($it['inspector_names'] ?: '-') ?></span>
                                         </div>
                                     </td>
 
                                     <!-- Tanggal Inspeksi -->
                                     <td style="padding: 10px 14px; color: #64748b; font-weight: 500; font-size: 11px;">
-                                        <?php if (!empty($it['first_started_at'])): ?>
-                                            <?= date('d M Y, H:i', strtotime($it['first_started_at'])) ?>
+                                        <?php if (!empty($it['last_started_at'])): ?>
+                                            <?= date('d M Y, H:i', strtotime($it['last_started_at'])) ?>
                                         <?php else: ?>
                                             <span style="color: #94a3b8;">-</span>
                                         <?php endif; ?>
@@ -496,9 +480,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     <!-- Aksi -->
                                     <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
-                                        <a href="<?= base_url('modules/safety_stock/detail.php?id=' . $it['item_id']) ?>" 
+                                        <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code']) . '&lot_number=' . urlencode($it['lot_number']) . '&id=' . $it['max_session_id']) ?>" 
                                            style="padding: 6px 12px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 8px; border: 1px solid #bfdbfe; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;" 
-                                           title="Lihat Detail Realisasi Safety Stock">
+                                           title="Lihat Detail & Pemakaian Kanban">
                                             <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>

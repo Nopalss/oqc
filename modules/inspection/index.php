@@ -26,12 +26,27 @@ if ($pdo) {
         $where = ["1=1"];
         $params = [];
 
+        // Exclude system-generated split safety stock leftover sessions (auto-split remnants)
+        $where[] = "NOT EXISTS (
+            SELECT 1 FROM inspection_session_lots isl_chk 
+            WHERE isl_chk.inspection_session_id = s.id 
+              AND isl_chk.remarks LIKE '%Sisa Split Safety Stock%'
+        )";
+
+        // Exclude old replaced sessions that have been superseded by a re-inspection session
+        $where[] = "NOT EXISTS (
+            SELECT 1 FROM inspection_sessions child 
+            WHERE child.parent_session_id = s.id
+        )";
+
         if ($search !== '') {
-            $where[] = "(did.part_code LIKE :s1 OR did.part_name LIKE :s2 OR did.lot_number LIKE :s3 OR k.customer LIKE :s4)";
+            $where[] = "(did.part_code LIKE :s1 OR did.part_name LIKE :s2 OR did.lot_number LIKE :s3 OR k.customer LIKE :s4 OR k.kanban_no LIKE :s5 OR mp.part_name LIKE :s6)";
             $params[':s1'] = '%' . $search . '%';
             $params[':s2'] = '%' . $search . '%';
             $params[':s3'] = '%' . $search . '%';
             $params[':s4'] = '%' . $search . '%';
+            $params[':s5'] = '%' . $search . '%';
+            $params[':s6'] = '%' . $search . '%';
         }
 
         if ($statusFilter !== 'all') {
@@ -56,6 +71,7 @@ if ($pdo) {
                      FROM inspection_sessions s
                      JOIN daily_inspection_data did ON did.id = s.did_id
                      LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+                     LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(did.part_code))
                      WHERE {$whereClause}";
         $stmtCount = $pdo->prepare($countSql);
         $stmtCount->execute($params);
@@ -65,13 +81,15 @@ if ($pdo) {
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
 
-        // Fetch Sessions List
+        // Fetch Sessions List with Master Parts Priority
         $sql = "SELECT s.*, 
-                       did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
-                       k.kanban_no, k.customer
+                       did.part_code, did.lot_number, did.cavity, did.pic as did_pic,
+                       k.kanban_no, k.customer,
+                       COALESCE(NULLIF(mp.part_name, ''), NULLIF(k.item_description, ''), did.part_name) AS display_part_name
                 FROM inspection_sessions s
                 JOIN daily_inspection_data did ON did.id = s.did_id
                 LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+                LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(did.part_code))
                 WHERE {$whereClause}
                 ORDER BY s.id DESC
                 LIMIT {$limit} OFFSET {$offset}";
@@ -112,7 +130,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
                             </svg>
                         </div>
-                        <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Cari Part Code, Lot No, Customer..." style="padding-left: 34px;" class="w-full pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all placeholder:text-slate-400">
+                        <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Cari No Kanban, Part Code, Customer..." style="padding-left: 34px;" class="w-full pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all placeholder:text-slate-400">
                     </div>
 
                     <!-- Status Select -->
@@ -194,8 +212,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <tr>
                             <th class="px-4 py-3">No</th>
                             <th class="px-4 py-3">Waktu Start</th>
+                            <th class="px-4 py-3">No Kanban</th>
                             <th class="px-4 py-3">Part Code & Nama</th>
-                            <th class="px-4 py-3">Lot Number</th>
                             <th class="px-4 py-3">Customer</th>
                             <th class="px-4 py-3 text-center">Progress Sample</th>
                             <th class="px-4 py-3 text-center">Total NG</th>
@@ -217,13 +235,12 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <td class="px-4 py-3 font-bold text-slate-800">
                                         <?= date('d M Y, H:i', strtotime($s['started_at'])) ?> WIB
                                     </td>
+                                    <td class="px-4 py-3 font-mono font-bold text-slate-800">
+                                        <?= htmlspecialchars($s['kanban_no'] ?? '-') ?>
+                                    </td>
                                     <td class="px-4 py-3">
                                         <span class="font-mono font-extrabold text-blue-700 block"><?= htmlspecialchars($s['part_code']) ?></span>
-                                        <span class="text-[11px] text-slate-500 font-medium"><?= htmlspecialchars($s['part_name']) ?></span>
-                                    </td>
-                                    <td class="px-4 py-3 font-mono font-bold text-slate-800">
-                                        <?= htmlspecialchars($s['lot_number']) ?>
-                                        <span class="text-[10px] text-slate-400 block font-sans">Cavity: <?= htmlspecialchars($s['cavity']) ?></span>
+                                        <span class="text-[11px] text-slate-500 font-medium"><?= htmlspecialchars($s['display_part_name'] ?? $s['part_name'] ?? '-') ?></span>
                                     </td>
                                     <td class="px-4 py-3 font-semibold text-slate-800">
                                         <?= htmlspecialchars($s['customer'] ?? 'PT. Astra Honda Motor') ?>

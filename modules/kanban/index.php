@@ -1,7 +1,7 @@
 <?php
 $breadcrumbCategory = "DATA REFERENSI";
-$pageTitle = "Planning Inspeksi (Kanban & Safety Stock)";
-$pageSubtitle = "Ringkasan jadwal planning inspeksi per tanggal";
+$pageTitle = "Daftar Planning Kanban";
+$pageSubtitle = "Ringkasan jadwal pengiriman Kanban per tanggal";
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
@@ -9,7 +9,6 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 $pdo = getDB();
 $days = [];
 $search    = sanitize($_GET['search'] ?? '');
-$planType  = sanitize($_GET['plan_type'] ?? '');
 $startDate = sanitize($_GET['start_date'] ?? '');
 $endDate   = sanitize($_GET['end_date'] ?? '');
 
@@ -37,18 +36,14 @@ if ($pdo) {
             $pdo->exec("UPDATE kanban_items SET batch_id = {$newBatchId} WHERE batch_id IS NULL OR batch_id = 0");
         }
 
-        // Build WHERE conditions (filter applies to batches, not grouped dates)
-        $whereClauses  = ['1=1'];
+        // Build WHERE conditions (Strictly Kanban batches only)
+        $whereClauses  = ["b.plan_type = 'kanban'"];
         $countParams   = [];
 
         if (!empty($search)) {
             $whereClauses[] = "(b.vendor LIKE :s1 OR b.document_number LIKE :s2)";
             $countParams[':s1'] = '%' . $search . '%';
             $countParams[':s2'] = '%' . $search . '%';
-        }
-        if (!empty($planType)) {
-            $whereClauses[] = "b.plan_type = :plan_type";
-            $countParams[':plan_type'] = $planType;
         }
         if (!empty($startDate)) {
             $whereClauses[] = "DATE(b.imported_at) >= :start_date";
@@ -73,18 +68,16 @@ if ($pdo) {
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
 
-        // Fetch grouped-by-date summary — LEFT JOIN kanban_items so COUNT/SUM work cleanly in GROUP BY
+        // Fetch grouped-by-date summary — LEFT JOIN kanban_items (strictly Kanban items only)
         $sql = "SELECT
-                    DATE(b.imported_at)                                           AS plan_date,
-                    COUNT(DISTINCT b.id)                                          AS batch_count,
-                    SUM(CASE WHEN b.plan_type = 'kanban'       THEN 1 ELSE 0 END) AS kanban_count,
-                    SUM(CASE WHEN b.plan_type = 'safety_stock' THEN 1 ELSE 0 END) AS safety_count,
-                    COUNT(ki.id)                                                  AS total_items,
-                    COALESCE(SUM(ki.qty), 0)                                      AS total_pcs,
-                    MIN(b.imported_at)                                            AS first_import,
-                    MAX(b.imported_at)                                            AS last_import
+                    DATE(b.imported_at) AS plan_date,
+                    COUNT(DISTINCT b.id) AS batch_count,
+                    COUNT(ki.id) AS total_items,
+                    COALESCE(SUM(ki.qty), 0) AS total_pcs,
+                    MIN(b.imported_at) AS first_import,
+                    MAX(b.imported_at) AS last_import
                 FROM kanban_batches b
-                LEFT JOIN kanban_items ki ON ki.batch_id = b.id
+                LEFT JOIN kanban_items ki ON (ki.batch_id = b.id AND (ki.plan_type IS NULL OR ki.plan_type = 'kanban') AND (ki.check_type IS NULL OR ki.check_type != 'Safety Stock') AND (ki.kanban_no IS NULL OR ki.kanban_no NOT LIKE 'SS-%'))
                 WHERE {$whereStr}
                 GROUP BY DATE(b.imported_at)
                 ORDER BY plan_date DESC
@@ -127,13 +120,6 @@ if ($pdo) {
                                placeholder="Cari Vendor / Nomor Dokumen..." class="form-input py-1 text-xs" style="padding-left: 30px; width: 100%;">
                     </div>
 
-                    <!-- Plan Type Selector -->
-                    <select name="plan_type" onchange="this.form.submit()" class="form-input py-1 text-xs font-semibold text-slate-700" style="width: 150px; flex-shrink: 0;">
-                        <option value="">Semua Planning</option>
-                        <option value="kanban"       <?= ($planType === 'kanban')       ? 'selected' : '' ?>>Kanban (Kirim)</option>
-                        <option value="safety_stock" <?= ($planType === 'safety_stock') ? 'selected' : '' ?>>Safety Stock</option>
-                    </select>
-
                     <!-- Date Range -->
                     <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
                         <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="form-input py-1 text-xs" style="width: 130px;">
@@ -150,7 +136,7 @@ if ($pdo) {
                     </select>
 
                     <button type="submit" class="btn-secondary py-1 px-2.5 text-xs" style="flex-shrink: 0;">Filter</button>
-                    <?php if (!empty($search) || !empty($planType) || !empty($startDate) || !empty($endDate) || $limit != 10): ?>
+                    <?php if (!empty($search) || !empty($startDate) || !empty($endDate) || $limit != 10): ?>
                         <a href="<?= base_url('modules/kanban/index.php') ?>" class="text-[11px] text-rose-600 font-semibold hover:underline" style="flex-shrink: 0;">Reset</a>
                     <?php endif; ?>
                 </form>
@@ -207,20 +193,9 @@ if ($pdo) {
 
                                     <!-- Tipe Planning Badges -->
                                     <td class="px-4 py-3">
-                                        <div class="flex flex-col gap-1">
-                                            <?php if ($d['kanban_count'] > 0): ?>
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200 w-fit">
-                                                    Kanban
-                                                    <span class="ml-1 bg-blue-200 text-blue-800 rounded px-1 text-[10px]"><?= (int)$d['kanban_count'] ?>x</span>
-                                                </span>
-                                            <?php endif; ?>
-                                            <?php if ($d['safety_count'] > 0): ?>
-                                                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-purple-100 text-purple-800 border border-purple-200 w-fit">
-                                                    Safety Stock
-                                                    <span class="ml-1 bg-purple-200 text-purple-800 rounded px-1 text-[10px]"><?= (int)$d['safety_count'] ?>x</span>
-                                                </span>
-                                            <?php endif; ?>
-                                        </div>
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200 w-fit">
+                                            Kanban (Kirim)
+                                        </span>
                                     </td>
 
                                     <!-- Jumlah Batch -->

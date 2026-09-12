@@ -221,7 +221,7 @@ try {
 
         // Check if session has excess_qty > 0 and create auto Safety Stock overflow
         try {
-            $stmtSessEx = $pdo->prepare("SELECT s.excess_qty, s.kanban_item_id, s.part_id, did.part_code, did.part_name, k.customer, b.id as batch_id
+            $stmtSessEx = $pdo->prepare("SELECT s.excess_qty, s.kanban_item_id, s.part_id, did.part_code, did.part_name, b.id as batch_id
                                          FROM inspection_sessions s
                                          JOIN daily_inspection_data did ON did.id = s.did_id
                                          LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -233,36 +233,81 @@ try {
             if ($sessEx && (int)$sessEx['excess_qty'] > 0) {
                 $excessQty = (int)$sessEx['excess_qty'];
                 
-                // Fetch last scanned lot number for this session
-                $stmtLastLot = $pdo->prepare("SELECT lot_number FROM inspection_session_lots WHERE inspection_session_id = :sid ORDER BY id DESC LIMIT 1");
+                // Fetch last scanned lot details for this session (lot_number, ref_number, scanned_qr_raw)
+                $stmtLastLot = $pdo->prepare("SELECT lot_number, ref_number, scanned_qr_raw FROM inspection_session_lots WHERE inspection_session_id = :sid ORDER BY id DESC LIMIT 1");
                 $stmtLastLot->execute([':sid' => $sessionId]);
-                $lastLot = $stmtLastLot->fetchColumn() ?: 'LOT-OVERFLOW';
+                $lastLotRow = $stmtLastLot->fetch(PDO::FETCH_ASSOC);
 
-                // Check if Safety Stock overflow item was already created for this session
+                $lastLotNumber = $lastLotRow['lot_number'] ?? 'LOT-OVERFLOW';
+                $lastRefNumber = $lastLotRow['ref_number'] ?? null;
+                $lastQrRaw     = $lastLotRow['scanned_qr_raw'] ?? null;
+
+                // Check if Safety Stock overflow item was already created for this session to prevent duplicate processing
                 $checkRef = "AUTO-SS-SESS-" . $sessionId;
                 $stmtChkSS = $pdo->prepare("SELECT id FROM kanban_items WHERE remark LIKE :chk LIMIT 1");
                 $stmtChkSS->execute([':chk' => '%' . $checkRef . '%']);
-                if (!$stmtChkSS->fetch()) {
-                    $batchId = $sessEx['batch_id'] ?: 1;
-                    $custName = $sessEx['customer'] ?: 'INTERNAL STOCK';
-                    $pCode = $sessEx['part_code'];
-                    $pName = $sessEx['part_name'];
+                $existingSSItem = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
 
+                if (!$existingSSItem) {
+                    $batchId = $sessEx['batch_id'] ?: 1;
+                    $pCode   = $sessEx['part_code'];
+                    $pName   = $sessEx['part_name'];
+                    $partId  = $sessEx['part_id'] ?: null;
+
+                    // 1. Create kanban_items entry for Safety Stock
                     $stmtInsSS = $pdo->prepare("INSERT INTO kanban_items 
-                        (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, remark, created_at) 
-                        VALUES (:bid, 'safety_stock', :kno, :code, :desc, :cust, NOW(), :qty, 'SS-LOC', 'OVERFLOW', :rem, NOW())");
+                        (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, check_type, remark, created_at) 
+                        VALUES (:bid, 'safety_stock', :kno, :code, :desc, 'INTERNAL SAFETY STOCK', NOW(), :qty, 'WH-SS-OVERFLOW', 'SAFETY STOCK WAREHOUSE', 'Safety Stock', :rem, NOW())");
                     $stmtInsSS->execute([
                         ':bid'  => $batchId,
-                        ':kno'  => 'SS-' . $lastLot,
+                        ':kno'  => 'SS-' . $lastLotNumber,
                         ':code' => $pCode,
                         ':desc' => $pName,
-                        ':cust' => $custName,
                         ':qty'  => $excessQty,
-                        ':rem'  => "Sisa kelebihan pengiriman Kanban (Auto Safety Stock from Session #{$sessionId}, Lot #{$lastLot}) [Ref: {$checkRef}]"
+                        ':rem'  => "Auto Safety Stock Sisa Excess Kanban (Sisa Qty: {$excessQty} pcs, Lot: {$lastLotNumber}" . ($lastRefNumber ? ", Ref No: {$lastRefNumber}" : "") . ") [Ref: {$checkRef}]"
+                    ]);
+                    $ssKanbanItemId = (int)$pdo->lastInsertId();
+
+                    // 2. Ensure DID record exists for Safety Stock
+                    $stmtChkDid = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE UPPER(part_code) = UPPER(:pcode) AND UPPER(lot_number) = UPPER(:lot) ORDER BY id DESC LIMIT 1");
+                    $stmtChkDid->execute([':pcode' => $pCode, ':lot' => $lastLotNumber]);
+                    $ssDidId = (int)$stmtChkDid->fetchColumn();
+
+                    if ($ssDidId === 0) {
+                        $stmtInsDid = $pdo->prepare("INSERT INTO daily_inspection_data (part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, created_at) VALUES (:pcode, :pname, :lot, '1', CURDATE(), 'OK', 'SAFETY_STOCK_OVERFLOW', NOW())");
+                        $stmtInsDid->execute([':pcode' => $pCode, ':pname' => $pName, ':lot' => $lastLotNumber]);
+                        $ssDidId = (int)$pdo->lastInsertId();
+                    }
+
+                    // 3. Auto-create PASSED inspection_sessions for Safety Stock
+                    $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
+                        (inspection_type, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
+                        VALUES ('safety_stock', :did, :kanban, :part, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
+                    $stmtInsSSSession->execute([
+                        ':did'    => $ssDidId,
+                        ':kanban' => $ssKanbanItemId,
+                        ':part'   => $partId,
+                        ':tqty'   => $excessQty
+                    ]);
+                    $ssSessionId = (int)$pdo->lastInsertId();
+
+                    // 4. Create inspection_session_lots entry for Safety Stock session
+                    $stmtInsSSLot = $pdo->prepare("INSERT INTO inspection_session_lots 
+                        (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, created_at) 
+                        VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', NOW())");
+                    $stmtInsSSLot->execute([
+                        ':sid' => $ssSessionId,
+                        ':ref' => $lastRefNumber,
+                        ':lot' => $lastLotNumber,
+                        ':qty' => $excessQty,
+                        ':raw' => $lastQrRaw,
+                        ':rem' => "Sisa Kelebihan Kanban dari Sesi #" . $sessionId
                     ]);
                 }
             }
-        } catch (Exception $eExSS) {}
+        } catch (Exception $eExSS) {
+            error_log("Error creating Safety Stock overflow: " . $eExSS->getMessage());
+        }
     }
 
     // 5. Update inspection_sessions

@@ -18,27 +18,33 @@ $daySummary = [
     'total_items'  => 0,
     'total_pcs'    => 0,
     'kanban_count' => 0,
-    'safety_count' => 0,
 ];
 
 if ($pdo) {
     try {
-        // Fetch all batches on this date, ordered by time ascending
+        // Fetch all Kanban batches on this date, ordered by time ascending
         $stmtBatches = $pdo->prepare(
             "SELECT * FROM kanban_batches
-             WHERE DATE(imported_at) = :date
+             WHERE DATE(imported_at) = :date AND plan_type = 'kanban'
              ORDER BY imported_at ASC"
         );
         $stmtBatches->execute([':date' => $dateParam]);
         $rawBatches = $stmtBatches->fetchAll(PDO::FETCH_ASSOC);
 
         foreach ($rawBatches as $b) {
-            // Fetch items for each batch
+            // Fetch items for each batch (strictly Kanban items only)
             $stmtItems = $pdo->prepare(
-                "SELECT * FROM kanban_items WHERE batch_id = :bid ORDER BY id ASC"
+                "SELECT * FROM kanban_items 
+                 WHERE batch_id = :bid 
+                   AND (plan_type IS NULL OR plan_type = 'kanban') 
+                   AND (check_type IS NULL OR check_type != 'Safety Stock') 
+                   AND (kanban_no IS NULL OR kanban_no NOT LIKE 'SS-%') 
+                 ORDER BY id ASC"
             );
             $stmtItems->execute([':bid' => $b['id']]);
             $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+
+            if (empty($items)) continue;
 
             $batchPcs = array_sum(array_column($items, 'qty'));
 
@@ -53,11 +59,7 @@ if ($pdo) {
             $daySummary['total_batch']++;
             $daySummary['total_items'] += count($items);
             $daySummary['total_pcs']   += $batchPcs;
-            if (($b['plan_type'] ?? 'kanban') === 'safety_stock') {
-                $daySummary['safety_count']++;
-            } else {
-                $daySummary['kanban_count']++;
-            }
+            $daySummary['kanban_count']++;
         }
 
     } catch (PDOException $e) {
@@ -66,13 +68,13 @@ if ($pdo) {
 }
 
 if (empty($batches)) {
-    set_flash('error', 'Tidak ada data Planning pada tanggal yang dipilih.');
+    set_flash('error', 'Tidak ada data Planning Kanban pada tanggal yang dipilih.');
     redirect('modules/kanban/index.php');
 }
 
 $breadcrumbCategory = "DATA REFERENSI";
-$pageTitle   = "Detail Planning — " . date('d F Y', strtotime($dateParam));
-$pageSubtitle = "Rincian semua batch planning inspeksi pada tanggal ini";
+$pageTitle   = "Detail Planning Kanban — " . date('d F Y', strtotime($dateParam));
+$pageSubtitle = "Rincian semua batch planning Kanban pada tanggal ini";
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
@@ -108,16 +110,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <span class="text-[11px] text-slate-500 font-medium">
                                 <span class="font-bold text-slate-700"><?= number_format($daySummary['total_pcs']) ?></span> pcs total
                             </span>
-                            <?php if ($daySummary['kanban_count'] > 0): ?>
-                                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
-                                    Kanban <?= (int)$daySummary['kanban_count'] ?>x
-                                </span>
-                            <?php endif; ?>
-                            <?php if ($daySummary['safety_count'] > 0): ?>
-                                <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-purple-100 text-purple-800 border border-purple-200">
-                                    Safety Stock <?= (int)$daySummary['safety_count'] ?>x
-                                </span>
-                            <?php endif; ?>
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+                                Kanban (Kirim)
+                            </span>
                         </div>
                     </div>
                 </div>

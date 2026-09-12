@@ -27,17 +27,21 @@ try {
     $stmt = $pdo->prepare("
         SELECT s.*,
                did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
-               k.kanban_no, k.item_code as kanban_item_code, k.item_description as kanban_item_desc, k.customer, k.req_date as kanban_req_date, k.eta as kanban_eta, k.str_loc as kanban_str_loc, k.supply_area as kanban_supply_area, k.check_type as kanban_check_type, k.remark as kanban_remark, k.qty as kanban_qty,
+               k.kanban_no, k.item_code as kanban_item_code, k.item_description as kanban_item_desc, k.customer, k.req_date as kanban_req_date, k.eta as kanban_eta, k.str_loc as kanban_str_loc, k.supply_area as kanban_supply_area, k.check_type as kanban_check_type, COALESCE(NULLIF(k.remark, ''), did.remark) as kanban_remark, k.qty as kanban_qty,
                b.document_number as doc_no, b.vendor as kanban_vendor, b.plan_type as batch_plan_type,
-               p.id as part_id, p.aql_level as part_aql_level, p.model as part_model, d.drawing_2d_path, d.drawing_3d_path
+               p.id as part_id, p.aql_level as part_aql_level, COALESCE(m.name, p.model) as part_model, d.drawing_2d_path, d.drawing_3d_path
         FROM inspection_sessions s
         JOIN daily_inspection_data did ON did.id = s.did_id
-        LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+        LEFT JOIN kanban_items k ON k.id = COALESCE(
+            s.kanban_item_id,
+            (SELECT ki.id FROM kanban_items ki WHERE UPPER(ki.item_code) = UPPER(did.part_code) ORDER BY ki.id DESC LIMIT 1)
+        )
         LEFT JOIN kanban_batches b ON b.id = k.batch_id
         LEFT JOIN master_parts p ON p.id = COALESCE(
             s.part_id,
             (SELECT mp.id FROM master_parts mp WHERE UPPER(mp.part_code) = UPPER(did.part_code) LIMIT 1)
         )
+        LEFT JOIN master_models m ON m.id = p.model_id
         LEFT JOIN master_drawings d ON d.part_id = p.id
         WHERE s.id = :id
     ");
@@ -49,8 +53,16 @@ try {
         exit;
     }
 
-    // AQL Standard Extra Lookup
-    $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 500));
+    // AQL Standard Extra Lookup based on Physical Scanned Qty
+    $ssQty = (int)($session['use_safety_stock_qty'] ?? 0);
+    $physQty = max(0, (int)($session['total_scanned_qty'] ?? 0) - $ssQty);
+    
+    if ($ssQty > 0 && ($session['inspection_type'] ?? 'kanban') === 'kanban') {
+        $qty = ($physQty > 0) ? $physQty : 1;
+    } else {
+        $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 500));
+    }
+
     $partAqlLvl = !empty($session['part_aql_level']) ? $session['part_aql_level'] : 'G-II';
     $stmtAql = $pdo->prepare("SELECT sample_code, sample_size, accept_number, reject_number FROM aql_standards WHERE inspection_level = :lvl AND :qty BETWEEN qty_min AND qty_max LIMIT 1");
     $stmtAql->execute([':lvl' => $partAqlLvl, ':qty' => $qty]);
@@ -62,7 +74,7 @@ try {
     }
     if ($aqlExtra) {
         $session['sample_code'] = $aqlExtra['sample_code'];
-        $session['sample_size'] = (int)$aqlExtra['sample_size'];
+        $session['sample_size'] = ($ssQty > 0 && $physQty == 0) ? 0 : (int)$aqlExtra['sample_size'];
         $session['accept_number'] = (int)$aqlExtra['accept_number'];
         $session['reject_number'] = (int)$aqlExtra['reject_number'];
     }
@@ -273,6 +285,18 @@ try {
             'part_id'             => $session['part_id'],
             'drawing_2d'          => $drawing2d,
             'drawing_3d'          => $drawing3d,
+            // Kanban detail fields (previously missing from JSON output!)
+            'kanban_item_code'    => $session['kanban_item_code'],
+            'kanban_item_desc'    => $session['kanban_item_desc'],
+            'kanban_vendor'       => $session['kanban_vendor'],
+            'kanban_eta'          => $session['kanban_eta'],
+            'kanban_req_date'     => $session['kanban_req_date'],
+            'kanban_str_loc'      => $session['kanban_str_loc'],
+            'kanban_supply_area'  => $session['kanban_supply_area'],
+            'kanban_check_type'   => $session['kanban_check_type'],
+            'kanban_remark'       => $session['kanban_remark'],
+            'part_model'          => $session['part_model'],
+            'part_aql_level'      => $session['part_aql_level'],
             // Re-inspection chain fields & round calculation
             'is_reinspection'     => (int)($session['is_reinspection'] ?? 0),
             'reinspection_type'   => $session['reinspection_type'] ?? null,

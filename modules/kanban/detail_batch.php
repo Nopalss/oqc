@@ -28,7 +28,7 @@ if ($pdo) {
         if ($batch) {
             $batch_id = (int)$batch['id'];
 
-            $sql = "SELECT * FROM kanban_items WHERE batch_id = :batch_id";
+            $sql = "SELECT * FROM kanban_items WHERE batch_id = :batch_id AND (plan_type IS NULL OR plan_type = 'kanban') AND (check_type IS NULL OR check_type != 'Safety Stock') AND (kanban_no IS NULL OR kanban_no NOT LIKE 'SS-%')";
             $params = [':batch_id' => $batch_id];
 
             if ($search !== '') {
