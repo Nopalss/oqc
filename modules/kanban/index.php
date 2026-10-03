@@ -6,9 +6,10 @@ $pageSubtitle = "Ringkasan jadwal pengiriman Kanban per tanggal";
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('kanban');
+
 $pdo = getDB();
 $days = [];
-$search    = sanitize($_GET['search'] ?? '');
 $startDate = sanitize($_GET['start_date'] ?? '');
 $endDate   = sanitize($_GET['end_date'] ?? '');
 
@@ -40,11 +41,6 @@ if ($pdo) {
         $whereClauses  = ["b.plan_type = 'kanban'"];
         $countParams   = [];
 
-        if (!empty($search)) {
-            $whereClauses[] = "(b.vendor LIKE :s1 OR b.document_number LIKE :s2)";
-            $countParams[':s1'] = '%' . $search . '%';
-            $countParams[':s2'] = '%' . $search . '%';
-        }
         if (!empty($startDate)) {
             $whereClauses[] = "DATE(b.imported_at) >= :start_date";
             $countParams[':start_date'] = $startDate;
@@ -104,22 +100,11 @@ if ($pdo) {
 
     <main class="flex-1 p-3 md:p-5 space-y-3">
         
-        <?= render_flash() ?>
-
-        <!-- Filter & Search Bar + Action Button (Strictly 1 Row) -->
+        <?= render_flash() ?>        <!-- Filter & Date Range Bar + Action Button (Strictly 1 Row) -->
         <div class="card p-3 overflow-x-auto">
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 850px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 700px;">
                 
                 <form action="" method="GET" style="display: flex; align-items: center; gap: 6px; flex: 1;">
-                    <!-- Search Input -->
-                    <div style="position: relative; width: 210px; flex-shrink: 0;">
-                        <svg style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: #94a3b8; pointer-events: none;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                        </svg>
-                        <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" 
-                               placeholder="Cari Vendor / Nomor Dokumen..." class="form-input py-1 text-xs" style="padding-left: 30px; width: 100%;">
-                    </div>
-
                     <!-- Date Range -->
                     <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
                         <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="form-input py-1 text-xs" style="width: 130px;">
@@ -136,7 +121,7 @@ if ($pdo) {
                     </select>
 
                     <button type="submit" class="btn-secondary py-1 px-2.5 text-xs" style="flex-shrink: 0;">Filter</button>
-                    <?php if (!empty($search) || !empty($startDate) || !empty($endDate) || $limit != 10): ?>
+                    <?php if (!empty($startDate) || !empty($endDate) || $limit != 10): ?>
                         <a href="<?= base_url('modules/kanban/index.php') ?>" class="text-[11px] text-rose-600 font-semibold hover:underline" style="flex-shrink: 0;">Reset</a>
                     <?php endif; ?>
                 </form>

@@ -10,10 +10,10 @@ function nav_active($keyword, $currentUri) {
 }
 ?>
 <!-- Sidebar Navigation (Matching Client Mockup Visuals & Collapsible) -->
-<aside id="sidebar" class="bg-slate-900 text-slate-200 flex flex-col border-r border-slate-800 shadow-xl">
+<aside id="sidebar" class="bg-slate-900 text-slate-200 flex flex-col border-r border-slate-800 shadow-xl h-screen max-h-screen overflow-hidden" style="height:100vh;max-height:100vh;overflow:hidden;">
     
     <!-- Sidebar Header / Logo -->
-    <div class="h-16 flex items-center justify-between px-4 border-b border-slate-800">
+    <div class="h-16 flex items-center justify-between px-4 border-b border-slate-800 flex-shrink-0" style="flex-shrink:0;">
         <a href="<?= base_url('modules/dashboard/index.php') ?>" class="flex items-center space-x-3 overflow-hidden">
             <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center font-extrabold text-white text-xs shadow-md flex-shrink-0">
                 ST
@@ -39,16 +39,17 @@ function nav_active($keyword, $currentUri) {
         </button>
     </div>
 
-    <!-- Navigation Links -->
-    <nav class="flex-1 px-3 py-4 space-y-4 overflow-y-auto custom-scrollbar text-xs">
+    <!-- Navigation Links (Scrollable Container) -->
+    <nav class="flex-1 min-h-0 px-3 py-4 space-y-4 overflow-y-auto overflow-x-hidden text-xs" style="flex:1 1 0%;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;">
         
-        <!-- Group 1: Data Referensi -->
-           <!-- Group 2: Operasional -->
+        <!-- Group 1: Operasional -->
+        <?php if (can_access('dashboard') || can_access('defect_analysis') || can_access('inspection') || can_access('safety_stock') || can_access('daily_report')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Operasional
             </div>
-   <a href="<?= base_url('modules/dashboard/index.php') ?>" 
+            <?php if (can_access('dashboard')): ?>
+            <a href="<?= base_url('modules/dashboard/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('dashboard', $currentUri) ?>"
                title="Dashboard Performance OQC">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -56,6 +57,21 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Dashboard Laporan</span>
             </a>
+            <?php endif; ?>
+
+            <?php if (can_access('defect_analysis')): ?>
+            <!-- Analisis Defect -->
+            <a href="<?= base_url('modules/defect_analysis/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('defect_analysis', $currentUri) ?>"
+               title="Analisis & Leaderboard Defect">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Analisis Defect</span>
+            </a>
+            <?php endif; ?>
+
+            <?php if (can_access('inspection')): ?>
             <!-- Scan Inspeksi -->
             <a href="<?= base_url('modules/inspection/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('inspection', $currentUri) ?>"
@@ -65,17 +81,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Scan Inspeksi</span>
             </a>
+            <?php endif; ?>
 
-            <!-- Monitoring Pekerjaan Supervisor -->
-            <a href="<?= base_url('modules/monitoring/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('monitoring', $currentUri) ?>"
-               title="Monitoring Realisasi Planning Harian">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                </svg>
-                <span class="sidebar-text truncate">Monitoring Pekerjaan</span>
-            </a>
-
+            <?php if (can_access('safety_stock')): ?>
             <!-- Safety Stock (Monitoring Stock Realisasi) -->
             <a href="<?= base_url('modules/safety_stock/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('safety_stock', $currentUri) ?>"
@@ -85,7 +93,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Safety Stock</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('daily_report')): ?>
             <!-- Laporan Inspeksi Harian -->
             <a href="<?= base_url('modules/daily_report/index.php') ?>"
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('daily_report', $currentUri) ?>"
@@ -95,26 +105,19 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Laporan Harian</span>
             </a>
-
-            <!-- Dashboard Laporan -->
-         
-
-            <!-- STI Survival (OQC Data) -->
-            <!-- <a href="<?= base_url('modules/performance_report/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('performance_report', $currentUri) ?>"
-               title="STI Survival & PPM Performance Report">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path>
-                </svg>
-                <span class="sidebar-text truncate">STI Survival (OQC Data)</span>
-            </a> -->
+            <?php endif; ?>
         </div>
+        <?php endif; ?>
+
+        <!-- Group 2: Data Referensi -->
+        <?php if (can_access('did') || can_access('kanban')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Data Referensi
             </div>
 
-            <!-- Upload DID (dulu Upload SPARQ) -->
+            <?php if (can_access('did')): ?>
+            <!-- Upload DID -->
             <a href="<?= base_url('modules/did/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('did', $currentUri) ?>"
                title="Upload DID (Status Cek Dimensi)">
@@ -123,7 +126,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Upload DID</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('kanban')): ?>
             <!-- Planning Inspeksi (Kanban & Safety Stock) -->
             <a href="<?= base_url('modules/kanban/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('kanban', $currentUri) ?>"
@@ -133,17 +138,18 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Planning Inspeksi</span>
             </a>
+            <?php endif; ?>
         </div>
+        <?php endif; ?>
 
-      
-
-
-        <!-- Group 3: Master Data (Tahap 2) -->
+        <!-- Group 3: Master Data -->
+        <?php if (can_access('master_parts') || can_access('master_models') || can_access('master_customers') || can_access('master_drawings') || can_access('master_defects')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Master Data
             </div>
 
+            <?php if (can_access('master_parts')): ?>
             <!-- Master Data Part -->
             <a href="<?= base_url('modules/master_parts/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('master_parts', $currentUri) ?>"
@@ -153,7 +159,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Master Data Part</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('master_models')): ?>
             <!-- Master Data Model -->
             <a href="<?= base_url('modules/master_models/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('master_models', $currentUri) ?>"
@@ -163,7 +171,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Master Data Model</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('master_customers')): ?>
             <!-- Master Data Customer -->
             <a href="<?= base_url('modules/master_customers/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('master_customers', $currentUri) ?>"
@@ -173,7 +183,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Master Data Customer</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('master_drawings')): ?>
             <!-- Master Data Drawing -->
             <a href="<?= base_url('modules/master_drawings/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('master_drawings', $currentUri) ?>"
@@ -183,7 +195,9 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Master Data Drawing</span>
             </a>
+            <?php endif; ?>
 
+            <?php if (can_access('master_defects')): ?>
             <!-- Master Jenis Defect -->
             <a href="<?= base_url('modules/master_defects/index.php') ?>" 
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('master_defects', $currentUri) ?>"
@@ -193,24 +207,42 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Master Jenis Defect</span>
             </a>
+            <?php endif; ?>
         </div>
+        <?php endif; ?>
 
         <!-- Group 4: Pengaturan -->
+        <?php if (can_access('users') || can_access('roles')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Pengaturan
             </div>
 
+            <?php if (can_access('users')): ?>
             <!-- User Management -->
             <a href="<?= base_url('modules/users/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('users', $currentUri) ?>"
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('users', $currentUri) ?>"
                title="User Management & Role Access (FR-8)">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>
                 </svg>
                 <span class="sidebar-text truncate">User Management</span>
             </a>
+            <?php endif; ?>
+
+            <?php if (can_access('roles')): ?>
+            <!-- Role Management -->
+            <a href="<?= base_url('modules/roles/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('roles', $currentUri) ?>"
+               title="Manajemen Role & Hak Akses">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Manajemen Role</span>
+            </a>
+            <?php endif; ?>
         </div>
+        <?php endif; ?>
 
     </nav>
 </aside>

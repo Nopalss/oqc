@@ -16,15 +16,34 @@ $itemCode = strtoupper(trim(sanitize($_POST['item_code'] ?? '')));
 $itemDesc = trim(sanitize($_POST['item_description'] ?? ''));
 $customer = trim(sanitize($_POST['customer'] ?? 'Surya Tech Customer'));
 $qty = filter_input(INPUT_POST, 'qty', FILTER_VALIDATE_INT) ?: 100;
-$reqDate = sanitize($_POST['req_date'] ?? date('Y-m-d H:i:s'));
-$eta = sanitize($_POST['eta'] ?? null);
-$strLoc = trim(sanitize($_POST['str_loc'] ?? ''));
+$reqDate = str_replace('T', ' ', sanitize($_POST['req_date'] ?? date('Y-m-d H:i:s')));
+if (strlen($reqDate) === 10) {
+    $reqDate .= ' 00:00:00';
+} elseif (strlen($reqDate) === 16) {
+    $reqDate .= ':00';
+}
+
+$eta = !empty($_POST['eta']) ? str_replace('T', ' ', sanitize($_POST['eta'])) : null;
+if ($eta && strlen($eta) === 10) {
+    $eta .= ' 00:00:00';
+} elseif ($eta && strlen($eta) === 16) {
+    $eta .= ':00';
+}
+
+$strLoc     = trim(sanitize($_POST['str_loc'] ?? ''));
 $supplyArea = trim(sanitize($_POST['supply_area'] ?? ''));
-$remark = trim(sanitize($_POST['remark'] ?? ''));
+$checkType  = trim(sanitize($_POST['check_type'] ?? ''));
+$remark     = trim(sanitize($_POST['remark'] ?? ''));
+
+$returnDate = trim(sanitize($_POST['return_date'] ?? ''));
+$targetRedirect = (!empty($returnDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $returnDate))
+    ? 'modules/kanban/daily_detail.php?date=' . urlencode($returnDate)
+    : 'modules/kanban/index.php';
 
 if (!$id || empty($kanbanNo) || empty($itemCode) || empty($itemDesc) || $qty <= 0) {
     set_flash('error', 'Semua kolom wajib (*) harus diisi dengan benar!');
-    redirect('modules/kanban/edit.php?id=' . $id);
+    $editUrl = 'modules/kanban/edit.php?id=' . $id . (!empty($returnDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $returnDate) ? '&return_date=' . urlencode($returnDate) : '');
+    redirect($editUrl);
 }
 
 $pdo = getDB();
@@ -41,6 +60,7 @@ if ($pdo) {
             eta = :eta,
             str_loc = :sloc,
             supply_area = :sarea,
+            check_type = :ctype,
             remark = :remark,
             updated_at = NOW()
             WHERE id = :id");
@@ -52,9 +72,10 @@ if ($pdo) {
             ':cust'  => $customer,
             ':rdate' => $reqDate,
             ':qty'   => $qty,
-            ':eta'   => !empty($eta) ? $eta : null,
+            ':eta'   => $eta,
             ':sloc'  => $strLoc,
             ':sarea' => $supplyArea,
+            ':ctype' => $checkType,
             ':remark'=> $remark,
             ':id'    => $id
         ]);
@@ -67,4 +88,4 @@ if ($pdo) {
     set_flash('error', 'Database tidak terhubung!');
 }
 
-redirect('modules/kanban/index.php');
+redirect($targetRedirect);

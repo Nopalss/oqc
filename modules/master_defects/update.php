@@ -8,6 +8,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $id = (int)($_POST['id'] ?? 0);
+$code = trim(sanitize($_POST['code'] ?? ''));
 $name = trim(sanitize($_POST['name'] ?? ''));
 $pdo = getDB();
 
@@ -39,8 +40,12 @@ try {
     }
 
     // Update defect record
-    $stmtUpd = $pdo->prepare("UPDATE defect_types SET name = :name WHERE id = :id");
-    $stmtUpd->execute([':name' => $name, ':id' => $id]);
+    $stmtUpd = $pdo->prepare("UPDATE defect_types SET code = :code, name = :name WHERE id = :id");
+    $stmtUpd->execute([
+        ':code' => (!empty($code) ? $code : null),
+        ':name' => $name,
+        ':id'   => $id,
+    ]);
 
     set_flash('success', 'Jenis Defect "' . htmlspecialchars($name) . '" berhasil diperbarui!');
     redirect('modules/master_defects/index.php');

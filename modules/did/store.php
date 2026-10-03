@@ -51,10 +51,12 @@ if ($entryType === 'manual') {
     }
 
     try {
+        $currentUserId = current_user()['id'];
+
         // Create Batch Header
-        $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_at) VALUES (:bname, :idate, 'manual', 0, NOW())");
-        $batchTitle = "Manual Entry DID (" . date('d M Y') . ")";
-        $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate]);
+        $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'manual', 0, :cby, NOW())");
+        $batchTitle = "Manual Entry DID (" . date('d M Y', strtotime($inspectingDate)) . ")";
+        $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate, ':cby' => $currentUserId]);
         $batchId = $pdo->lastInsertId();
 
         $successCount = 0;
@@ -73,14 +75,6 @@ if ($entryType === 'manual') {
             $remark = trim(sanitize($r['remark'] ?? ''));
 
             if (empty($partCode) || empty($lotNumber) || empty($partName)) {
-                $skipCount++;
-                continue;
-            }
-
-            // Check duplicate (Part Code + Lot Number)
-            $stmtDup = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE part_code = :pcode AND lot_number = :lot");
-            $stmtDup->execute([':pcode' => $partCode, ':lot' => $lotNumber]);
-            if ($stmtDup->fetch()) {
                 $skipCount++;
                 continue;
             }
@@ -177,9 +171,10 @@ if ($entryType === 'manual') {
         }
 
         // Create Batch Header
-        $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_at) VALUES (:bname, :idate, 'excel_import', 0, NOW())");
+        $currentUserId = current_user()['id'];
+        $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'excel_import', 0, :cby, NOW())");
         $batchTitle = "Import Excel: " . $fileName;
-        $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $firstDate]);
+        $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $firstDate, ':cby' => $currentUserId]);
         $batchId = $pdo->lastInsertId();
 
         $successCount = 0;
@@ -204,14 +199,6 @@ if ($entryType === 'manual') {
             $remark = trim(sanitize($data[7] ?? ''));
 
             if (empty($partCode) || empty($lotNumber)) {
-                continue;
-            }
-
-            // Check duplicate
-            $stmtDup = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE part_code = :pcode AND lot_number = :lot");
-            $stmtDup->execute([':pcode' => $partCode, ':lot' => $lotNumber]);
-            if ($stmtDup->fetch()) {
-                $skipCount++;
                 continue;
             }
 
@@ -303,9 +290,10 @@ if ($entryType === 'manual') {
 
         // Buat batch baru untuk tanggal ini
         try {
+            $currentUserId = current_user()['id'];
             $batchTitle = 'Import Excel DID (' . date('d M Y', strtotime($inspectingDate)) . ')';
-            $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_at) VALUES (:bname, :idate, 'excel_import', 0, NOW())");
-            $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate]);
+            $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'excel_import', 0, :cby, NOW())");
+            $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate, ':cby' => $currentUserId]);
             $batchId = $pdo->lastInsertId();
 
             $okCount  = 0;

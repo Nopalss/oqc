@@ -8,6 +8,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $pdo = getDB();
+$code = trim(sanitize($_POST['code'] ?? ''));
 $name = trim(sanitize($_POST['name'] ?? ''));
 
 if (empty($name)) {
@@ -30,8 +31,11 @@ try {
     }
 
     // Insert new defect type
-    $stmtIns = $pdo->prepare("INSERT INTO defect_types (name, created_at) VALUES (:name, NOW())");
-    $stmtIns->execute([':name' => $name]);
+    $stmtIns = $pdo->prepare("INSERT INTO defect_types (code, name, created_at) VALUES (:code, :name, NOW())");
+    $stmtIns->execute([
+        ':code' => (!empty($code) ? $code : null),
+        ':name' => $name,
+    ]);
 
     set_flash('success', 'Jenis Defect "' . htmlspecialchars($name) . '" berhasil ditambahkan!');
     redirect('modules/master_defects/index.php');

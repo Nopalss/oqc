@@ -78,7 +78,8 @@ if ($pdo) {
                     COUNT(ss.id) AS session_count,
                     SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS count_rejected,
                     SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) AS count_in_progress,
-                    SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed
+                    SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed,
+                    SUM(CASE WHEN ss.status = 'passed' THEN (ss.total_scanned_qty - COALESCE(ss.excess_qty, 0)) ELSE 0 END) AS total_passed_qty
                    FROM kanban_items ki
                    LEFT JOIN kanban_batches b ON ki.batch_id = b.id
                    LEFT JOIN inspection_sessions ss ON ss.kanban_item_id = ki.id
@@ -91,14 +92,16 @@ if ($pdo) {
         $summary['total_plan'] = count($allSumRows);
         foreach ($allSumRows as $sr) {
             $summary['total_pcs'] += (int)$sr['planned_qty'];
+            $pQty = (int)($sr['total_passed_qty'] ?? 0);
+            $tQty = (int)$sr['planned_qty'];
             if ($sr['session_count'] == 0) {
                 $summary['not_started']++;
             } elseif ($sr['count_rejected'] > 0) {
                 $summary['rejected']++;
-            } elseif ($sr['count_in_progress'] > 0) {
-                $summary['in_progress']++;
-            } elseif ($sr['count_passed'] > 0) {
+            } elseif ($pQty >= $tQty && $tQty > 0) {
                 $summary['passed']++;
+            } elseif ($pQty > 0 || $sr['count_in_progress'] > 0) {
+                $summary['in_progress']++;
             } else {
                 $summary['not_started']++;
             }
@@ -150,6 +153,7 @@ if ($pdo) {
                         SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS count_rejected,
                         SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) AS count_in_progress,
                         SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS count_passed,
+                        SUM(CASE WHEN ss.status = 'passed' THEN (ss.total_scanned_qty - COALESCE(ss.excess_qty, 0)) ELSE 0 END) AS total_passed_qty,
                         MAX(ss.samples_checked) AS samples_checked,
                         MAX(ss.sample_size) AS sample_size,
                         MAX(ss.ng_count) AS ng_count,
@@ -397,15 +401,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 $cRej       = (int)$it['count_rejected'];
                                 $cInProg    = (int)$it['count_in_progress'];
                                 $cPass      = (int)$it['count_passed'];
+                                $pQty       = (int)($it['total_passed_qty'] ?? 0);
+                                $tQty       = (int)$it['planned_qty'];
 
                                 if ($sessCount == 0) {
                                     $stType = 'not_started';
                                 } elseif ($cRej > 0) {
                                     $stType = 'rejected';
-                                } elseif ($cInProg > 0) {
-                                    $stType = 'in_progress';
-                                } elseif ($cPass > 0) {
+                                } elseif ($pQty >= $tQty && $tQty > 0) {
                                     $stType = 'passed';
+                                } elseif ($pQty > 0 || $cInProg > 0) {
+                                    $stType = 'in_progress';
                                 } else {
                                     $stType = 'not_started';
                                 }
@@ -438,6 +444,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <!-- Target Qty -->
                                     <td style="padding: 8px 12px; text-align: center; font-weight: 800; font-family: monospace; color: #0f172a; white-space: nowrap;">
                                         <?= number_format($it['planned_qty']) ?> <span style="font-size: 10px; font-weight: 400; color: #94a3b8;">pcs</span>
+                                        <?php if ($pQty > 0 && $pQty < $tQty): ?>
+                                            <span style="font-size: 10px; color: #d97706; font-weight: 700; display: block;">Lolos: <?= number_format($pQty) ?> pcs</span>
+                                        <?php endif; ?>
                                     </td>
 
                                     <!-- Tipe Plan -->
@@ -454,7 +463,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <?php if ($stType === 'passed'): ?>
                                             <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700;">
                                                 <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #059669; margin-right: 5px; display: inline-block;"></span>
-                                                PASSED
+                                                PASSED (TERPENUHI)
                                             </span>
                                         <?php elseif ($stType === 'rejected'): ?>
                                             <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #ffe4e6; color: #9f1239; border: 1px solid #fecdd3; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700;">
@@ -462,10 +471,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 REJECTED
                                             </span>
                                         <?php elseif ($stType === 'in_progress'): ?>
-                                            <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #fffbe6; color: #92400e; border: 1px solid #ffe58f; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700;">
-                                                <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #d97706; margin-right: 5px; display: inline-block;"></span>
-                                                IN PROGRESS
-                                            </span>
+                                            <?php if ($pQty > 0): ?>
+                                                <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 800;">
+                                                    <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #d97706; margin-right: 5px; display: inline-block;"></span>
+                                                    INSPEKSI PARSIAL
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #fffbe6; color: #92400e; border: 1px solid #ffe58f; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700;">
+                                                    <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #d97706; margin-right: 5px; display: inline-block;"></span>
+                                                    IN PROGRESS
+                                                </span>
+                                            <?php endif; ?>
                                         <?php else: ?>
                                             <span style="white-space: nowrap; display: inline-flex; align-items: center; background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 700;">
                                                 <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #94a3b8; margin-right: 5px; display: inline-block;"></span>

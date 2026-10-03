@@ -28,22 +28,31 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div class="card p-5 bg-white border border-slate-200/80 rounded-xl shadow-xs space-y-4">
             <div class="border-b border-slate-100 pb-3">
                 <h3 class="font-extrabold text-sm text-slate-900 flex items-center gap-2">
-                    <span class="w-6 h-6 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center text-xs border border-rose-100">⚠️</span>
+                    <span class="w-6 h-6 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center text-xs border border-rose-100 font-bold">!</span>
                     <span>Form Tambah Jenis Defect Baru</span>
                 </h3>
-                <p class="text-xs text-slate-500 mt-1">Masukkan nama jenis defect / cacat yang ingin ditambahkan ke sistem.</p>
+                <p class="text-xs text-slate-500 mt-1">Masukkan kode dan nama jenis defect / cacat yang ingin ditambahkan ke sistem.</p>
             </div>
 
             <form action="<?= base_url('modules/master_defects/store.php') ?>" method="POST" class="space-y-4 text-xs">
                 
                 <div>
+                    <label for="code" class="block font-bold text-slate-700 mb-1">
+                        Kode Defect <span class="text-slate-400 font-normal">(Opsional)</span>
+                    </label>
+                    <input type="text" id="code" name="code" autofocus
+                           placeholder="Contoh: DEF-001, DEF-002, ..."
+                           class="form-input w-full text-xs font-semibold py-2 px-3 border-slate-300 focus:border-blue-500 rounded-lg">
+                </div>
+
+                <div>
                     <label for="name" class="block font-bold text-slate-700 mb-1">
                         Nama Jenis Defect / Cacat <span class="text-rose-600">*</span>
                     </label>
-                    <input type="text" id="name" name="name" required autofocus
+                    <input type="text" id="name" name="name" required
                            placeholder="Contoh: Baret Halus / Scratch, Dimensional Out, Pin Bengkok, DLL..."
                            class="form-input w-full text-xs font-semibold py-2 px-3 border-slate-300 focus:border-blue-500 rounded-lg">
-                    <p class="text-[11px] text-slate-500 mt-1">Pastikan nama jenis defect unik dan jelas untuk dipilih inspector QC saat menemukan barang NG.</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Pastikan nama jenis defect jelas untuk dipilih inspector QC saat menemukan barang NG.</p>
                 </div>
 
                 <div class="flex items-center justify-end space-x-2 pt-3 border-t border-slate-100">

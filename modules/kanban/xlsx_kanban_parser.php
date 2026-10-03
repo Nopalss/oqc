@@ -66,16 +66,19 @@ function xlsx_parse_kanban($filepath) {
         $xmlSS = simplexml_load_string($ssXml);
         foreach ($xmlSS->si as $val) {
             if (isset($val->t)) {
-                $sharedStrings[] = (string)$val->t;
+                $rawText = (string)$val->t;
             } elseif (isset($val->r)) {
                 $t = '';
                 foreach ($val->r as $run) {
                     $t .= (string)$run->t;
                 }
-                $sharedStrings[] = $t;
+                $rawText = $t;
             } else {
-                $sharedStrings[] = '';
+                $rawText = '';
             }
+            // Clean non-breaking spaces (\xC2\xA0)
+            $cleanText = str_replace(["\xC2\xA0", "\xA0"], ' ', $rawText);
+            $sharedStrings[] = trim(preg_replace('/\s+/', ' ', $cleanText));
         }
     }
 
@@ -120,6 +123,51 @@ function xlsx_parse_kanban($filepath) {
         }
     }
 
+    // 3B. Extract Top Header Metadata (Vender & Print Date Time)
+    $extractedVendor = '';
+    $extractedPrintDt = null;
+
+    foreach ($rawMatrix as $rNum => $cells) {
+        if ($rNum > 6) break; // Headers are typically in rows 1-5
+
+        foreach ($cells as $colIdx => $val) {
+            $valLower = strtolower($val);
+            
+            // Look for "Vender:" or "Vendor:"
+            if (strpos($valLower, 'vender') !== false || strpos($valLower, 'vendor') !== false) {
+                // Check if value is in cell G (index 6) or nearby non-empty cell
+                if (!empty($cells[6])) {
+                    $extractedVendor = $cells[6];
+                } elseif (!empty($cells[$colIdx + 1])) {
+                    $extractedVendor = $cells[$colIdx + 1];
+                }
+            }
+
+            // Look for "Print Date time :" or "Print Date"
+            if (strpos($valLower, 'print date') !== false) {
+                // Check cells I (index 8) & J (index 9) or next cells
+                $datePart = $cells[8] ?? ($cells[$colIdx + 1] ?? '');
+                $timePart = $cells[9] ?? ($cells[$colIdx + 2] ?? '');
+                $combinedDt = trim($datePart . ' ' . $timePart);
+
+                if (!empty($combinedDt)) {
+                    $dtObj = DateTime::createFromFormat('Y/m/d H:i:s', $combinedDt);
+                    if (!$dtObj) {
+                        $dtObj = DateTime::createFromFormat('Y-m-d H:i:s', $combinedDt);
+                    }
+                    if (!$dtObj) {
+                        $ts = strtotime(str_replace('/', '-', $combinedDt));
+                        if ($ts !== false && $ts > 0) {
+                            $extractedPrintDt = date('Y-m-d H:i:s', $ts);
+                        }
+                    } else {
+                        $extractedPrintDt = $dtObj->format('Y-m-d H:i:s');
+                    }
+                }
+            }
+        }
+    }
+
     // 4. Smart Header Detection
     $headerRowIndex = null;
     $colMap = [
@@ -130,6 +178,7 @@ function xlsx_parse_kanban($filepath) {
         'qty'              => null,
         'eta'              => null,
         'str_loc'          => null,
+        'supply_area'      => null,
         'check_type'       => null,
         'remark'           => null,
     ];
@@ -154,6 +203,8 @@ function xlsx_parse_kanban($filepath) {
                     $colMap['eta'] = $colIdx;
                 } elseif ((strpos($vLower, 'str.loc') !== false || strpos($vLower, 'str loc') !== false || strpos($vLower, 'location') !== false) && $colMap['str_loc'] === null) {
                     $colMap['str_loc'] = $colIdx;
+                } elseif ((strpos($vLower, 'supply') !== false || strpos($vLower, 'area') !== false) && $colMap['supply_area'] === null) {
+                    $colMap['supply_area'] = $colIdx;
                 } elseif (($vLower === 'cek' || strpos($vLower, 'check') !== false) && $colMap['check_type'] === null) {
                     $colMap['check_type'] = $colIdx;
                 } elseif ((strpos($vLower, 'remark') !== false || strpos($vLower, 'catatan') !== false) && $colMap['remark'] === null) {
@@ -164,9 +215,9 @@ function xlsx_parse_kanban($filepath) {
         }
     }
 
-    // Fallback column positions if header not found
+    // Fallback column positions if header not found (0-based: A=0, B=1, C=2, D=3, E=4, F=5, G=6, H=7, I=8, J=9, K=10)
     if ($headerRowIndex === null) {
-        $headerRowIndex = 1;
+        $headerRowIndex = 5;
         $colMap = [
             'kanban_no'        => 1,
             'item_code'        => 2,
@@ -175,8 +226,9 @@ function xlsx_parse_kanban($filepath) {
             'qty'              => 5,
             'eta'              => 6,
             'str_loc'          => 7,
-            'check_type'       => 10,
-            'remark'           => 9
+            'supply_area'      => 8,
+            'remark'           => 9,
+            'check_type'       => 10
         ];
     }
 
@@ -196,14 +248,15 @@ function xlsx_parse_kanban($filepath) {
             continue;
         }
 
-        $itemCode = isset($colMap['item_code']) ? ($cells[$colMap['item_code']] ?? '') : '';
-        $itemDesc = isset($colMap['item_description']) ? ($cells[$colMap['item_description']] ?? '') : '';
-        $reqDate  = isset($colMap['req_date']) ? ($cells[$colMap['req_date']] ?? '') : '';
-        $qty      = isset($colMap['qty']) ? (int)($cells[$colMap['qty']] ?? 0) : 0;
-        $eta      = isset($colMap['eta']) ? ($cells[$colMap['eta']] ?? '') : '';
-        $strLoc   = isset($colMap['str_loc']) ? ($cells[$colMap['str_loc']] ?? '') : '';
-        $rawCheck = isset($colMap['check_type']) ? ($cells[$colMap['check_type']] ?? '') : '';
-        $remark   = isset($colMap['remark']) ? ($cells[$colMap['remark']] ?? '') : '';
+        $itemCode   = isset($colMap['item_code']) ? ($cells[$colMap['item_code']] ?? '') : '';
+        $itemDesc   = isset($colMap['item_description']) ? ($cells[$colMap['item_description']] ?? '') : '';
+        $reqDate    = isset($colMap['req_date']) ? ($cells[$colMap['req_date']] ?? '') : '';
+        $qty        = isset($colMap['qty']) ? (int)($cells[$colMap['qty']] ?? 0) : 0;
+        $eta        = isset($colMap['eta']) ? ($cells[$colMap['eta']] ?? '') : '';
+        $strLoc     = isset($colMap['str_loc']) ? ($cells[$colMap['str_loc']] ?? '') : '';
+        $supplyArea = isset($colMap['supply_area']) ? ($cells[$colMap['supply_area']] ?? '') : '';
+        $rawCheck   = isset($colMap['check_type']) ? ($cells[$colMap['check_type']] ?? '') : '';
+        $remark     = isset($colMap['remark']) ? ($cells[$colMap['remark']] ?? '') : '';
 
         // Clean check_type string (#N/A or empty -> '')
         $cleanCheck = trim($rawCheck);
@@ -211,6 +264,12 @@ function xlsx_parse_kanban($filepath) {
             $checkType = '';
         } else {
             $checkType = $cleanCheck;
+        }
+
+        // Clean supplyArea string (#N/A or empty -> '')
+        $cleanSupply = trim($supplyArea);
+        if ($cleanSupply === '#N/A' || $cleanSupply === 'N/A' || $cleanSupply === '#VALUE!' || $cleanSupply === '0') {
+            $cleanSupply = '';
         }
 
         // Format dates if Excel serial number or clean string
@@ -222,22 +281,25 @@ function xlsx_parse_kanban($filepath) {
             'kanban_no'        => strtoupper($kanbanNo),
             'item_code'        => strtoupper(trim($itemCode)),
             'item_description' => trim($itemDesc),
-            'req_date'         => $formattedReqDate ?: date('Y-m-d'),
+            'req_date'         => $formattedReqDate ?: date('Y-m-d H:i:s'),
             'qty'              => ($qty > 0) ? $qty : 1,
-            'eta'              => $formattedEta ?: date('Y-m-d'),
-            'str_loc'          => trim($strLoc) ?: 'WH-A01',
+            'eta'              => $formattedEta ?: date('Y-m-d H:i:s'),
+            'str_loc'          => trim($strLoc),
+            'supply_area'      => $cleanSupply,
             'check_type'       => $checkType,
             'remark'           => trim($remark)
         ];
     }
 
     return [
-        'success'      => true,
-        'sheet_name'   => $targetSheetName,
-        'sheets'       => array_column($sheets, 'name'),
-        'total_parsed' => count($parsedRows),
-        'total_skipped'=> $skippedCount,
-        'rows'         => $parsedRows
+        'success'        => true,
+        'sheet_name'     => $targetSheetName,
+        'sheets'         => array_column($sheets, 'name'),
+        'vendor'         => $extractedVendor ?: 'PT. SURYA TECHNOLOGY INDUSTRI',
+        'print_datetime' => $extractedPrintDt,
+        'total_parsed'   => count($parsedRows),
+        'total_skipped'  => $skippedCount,
+        'rows'           => $parsedRows
     ];
 }
 

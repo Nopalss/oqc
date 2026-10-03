@@ -7,6 +7,8 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('master_defects');
+
 $pdo = getDB();
 $defects = [];
 $search = sanitize($_GET['search'] ?? '');
@@ -26,7 +28,7 @@ if ($pdo) {
         $countParams = [];
 
         if (!empty($search)) {
-            $countSql .= " AND name LIKE :search";
+            $countSql .= " AND (name LIKE :search OR code LIKE :search)";
             $countParams[':search'] = '%' . $search . '%';
         }
 
@@ -42,11 +44,11 @@ if ($pdo) {
         $params = [];
 
         if (!empty($search)) {
-            $sql .= " AND name LIKE :search";
+            $sql .= " AND (name LIKE :search OR code LIKE :search)";
             $params[':search'] = '%' . $search . '%';
         }
 
-        $sql .= " ORDER BY name ASC LIMIT :limit OFFSET :offset";
+        $sql .= " ORDER BY id ASC LIMIT :limit OFFSET :offset";
 
         $stmt = $pdo->prepare($sql);
         foreach ($params as $k => $v) {
@@ -90,12 +92,21 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
             </div>
 
-            <a href="<?= base_url('modules/master_defects/create.php') ?>" class="btn-primary py-1.5 px-3 text-xs flex items-center font-extrabold shadow-xs">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-                </svg>
-                <span>Tambah Defect Baru</span>
-            </a>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <a href="<?= base_url('modules/master_defects/import.php') ?>" 
+                   style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; background: #059669; color: #ffffff; font-size: 12px; font-weight: 800; border-radius: 8px; text-decoration: none; box-shadow: 0 1px 2px rgba(5,150,105,0.3);">
+                    <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    <span>Import Excel / CSV</span>
+                </a>
+                <a href="<?= base_url('modules/master_defects/create.php') ?>" class="btn-primary py-1.5 px-3 text-xs flex items-center font-extrabold shadow-xs">
+                    <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                    </svg>
+                    <span>Tambah Defect Baru</span>
+                </a>
+            </div>
         </div>
 
         <!-- Action & Filter Bar -->
@@ -108,7 +119,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
                         </svg>
                         <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" 
-                               placeholder="Cari Nama Jenis Defect..." class="form-input py-1 text-xs" style="padding-left: 30px; width: 100%;">
+                               placeholder="Cari Kode atau Nama Defect..." class="form-input py-1 text-xs" style="padding-left: 30px; width: 100%;">
                     </div>
 
                     <select name="limit" onchange="this.form.submit()" class="form-input py-1 text-xs font-semibold text-slate-700" style="width: 90px;">
@@ -138,6 +149,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200/80 uppercase tracking-wider text-[10px]">
                         <tr>
                             <th class="px-4 py-3 text-center w-12">No</th>
+                            <th class="px-4 py-3 w-32">Kode Defect</th>
                             <th class="px-4 py-3">Nama Jenis Defect / Cacat</th>
                             <th class="px-4 py-3">Tanggal Dibuat</th>
                             <th class="px-4 py-3 text-right">Aksi</th>
@@ -146,19 +158,19 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <tbody class="divide-y divide-slate-100">
                         <?php if (empty($defects)): ?>
                             <tr>
-                                <td colspan="4" class="px-4 py-8 text-center text-slate-400 font-medium">
-                                    Belum ada data Jenis Defect. Silakan tambah data baru.
+                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 font-medium">
+                                    Belum ada data Jenis Defect. Silakan tambah data baru atau gunakan fitur Import Excel.
                                 </td>
                             </tr>
                         <?php else: ?>
                             <?php foreach ($defects as $index => $d): ?>
                                 <tr class="hover:bg-slate-50/80 transition-colors">
                                     <td class="px-4 py-3 text-center font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
-                                    <td class="px-4 py-3 font-bold text-slate-800 flex items-center gap-2">
-                                        <div class="w-7 h-7 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center font-bold text-xs flex-shrink-0 border border-rose-100">
-                                            ⚠️
-                                        </div>
-                                        <span><?= htmlspecialchars($d['name']) ?></span>
+                                    <td class="px-4 py-3 font-mono font-bold text-slate-700">
+                                        <?= !empty($d['code']) ? htmlspecialchars($d['code']) : '<span class="text-slate-300 font-normal">-</span>' ?>
+                                    </td>
+                                    <td class="px-4 py-3 font-bold text-slate-800">
+                                        <?= htmlspecialchars($d['name']) ?>
                                     </td>
                                     <td class="px-4 py-3 text-slate-500 text-[11px]">
                                         <?= !empty($d['created_at']) ? date('d M Y, H:i', strtotime($d['created_at'])) : '-' ?>

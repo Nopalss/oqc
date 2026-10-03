@@ -31,6 +31,19 @@ $initials = strtoupper(substr($cUser['name'], 0, 2));
     <!-- Right: User Avatar Pill & Logout Button -->
     <div class="flex items-center space-x-3">
         
+        <?php if ($cUser['role'] === 'qc_inspector'): ?>
+        <!-- Device Line Indicator Pill (Inspector Only) -->
+        <button id="btn-navbar-device-line" type="button" onclick="promptDeviceLine(true)" class="flex items-center space-x-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 rounded-full px-3 py-1 text-xs font-bold transition-all shadow-2xs cursor-pointer" title="Klik untuk mengubah Line kerja perangkat ini">
+            <svg class="w-3.5 h-3.5 text-indigo-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+            </svg>
+            <span class="hidden sm:inline text-[11px] text-indigo-600 font-semibold">Line:</span>
+            <span id="navbar-device-line-name" class="text-[11px] font-extrabold text-indigo-900">-</span>
+            <span class="text-[9px] text-indigo-500 font-normal underline ml-0.5">(ganti)</span>
+        </button>
+        <?php endif; ?>
+
         <!-- User Badge Pill -->
         <div class="flex items-center space-x-2 bg-slate-50 border border-slate-200/80 rounded-full px-3 py-1 shadow-2xs">
             <div class="w-6 h-6 rounded-full bg-blue-600 text-white font-extrabold flex items-center justify-center text-[10px] shadow-xs">

@@ -128,7 +128,7 @@ if ($pdo) {
                 $stmtLots->execute();
                 $sessionLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
 
-                // 3. Fetch Kanban Usage History with Session Details (Kanban Journey & Session Tracking)
+                // 3. Fetch Kanban Usage History — D1: exact match pada remarks (terstruktur), bukan fuzzy LIKE
                 $stmtKanban = $pdo->prepare("
                     SELECT 
                         s_kanban.id AS kanban_session_id,
@@ -139,8 +139,8 @@ if ($pdo) {
                         s_kanban.sample_size,
                         s_kanban.ng_count,
                         s_ss.id AS ss_session_id,
-                        COALESCE(isl_k.ref_number, (SELECT isl_ss.ref_number FROM inspection_session_lots isl_ss WHERE isl_ss.inspection_session_id = s_ss.id LIMIT 1), '-') AS ref_number,
-                        COALESCE(isl_k.qty, s_ss.total_scanned_qty, 0) AS used_qty,
+                        s_ss.total_scanned_qty AS used_qty,
+                        COALESCE(isl_k.ref_number, isl_ss.ref_number, '-') AS ref_number,
                         ki.kanban_no,
                         ki.customer,
                         COALESCE(u.name, 'Inspector QC') AS inspector_name
@@ -148,12 +148,56 @@ if ($pdo) {
                     JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
                     LEFT JOIN kanban_items ki ON ki.id = s_kanban.kanban_item_id
                     LEFT JOIN users u ON u.id = s_kanban.inspector_id
-                    LEFT JOIN inspection_session_lots isl_k ON (isl_k.inspection_session_id = s_kanban.id AND (isl_k.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%') OR isl_k.remarks LIKE CONCAT('%Session #', s_ss.id, '%') OR isl_k.remarks LIKE CONCAT('%', s_ss.id, '%')))
+                    LEFT JOIN inspection_session_lots isl_k ON (
+                        isl_k.inspection_session_id = s_kanban.id
+                        AND isl_k.remarks = CONCAT('Alokasi Safety Stock (Sesi #', s_ss.id, ')')
+                    )
+                    LEFT JOIN inspection_session_lots isl_ss ON (
+                        isl_ss.inspection_session_id = s_ss.id
+                        AND isl_ss.id = (SELECT MIN(x.id) FROM inspection_session_lots x WHERE x.inspection_session_id = s_ss.id)
+                    )
                     WHERE s_ss.id IN ({$inQueryInt}) AND s_ss.auto_fulfilled_by_session_id > 0
                     ORDER BY s_kanban.id DESC, s_ss.id ASC
                 ");
                 $stmtKanban->execute();
                 $kanbanUsage = $stmtKanban->fetchAll(PDO::FETCH_ASSOC);
+
+                // D2: Query Lineage View — trace seluruh split history dari SS lot yang sama
+                // Ambil semua SS session yang share did_id yang sama (satu Lot Number yang sama)
+                // Ini mencakup: original SS, semua split/sisa, dan status masing-masing
+                $ssDidIds = array_unique(array_filter(array_column($sessions, 'did_id')));
+                $lineageRows = [];
+                if (!empty($ssDidIds)) {
+                    $didPlaceholders = implode(',', array_fill(0, count($ssDidIds), '?'));
+                    $stmtLineage = $pdo->prepare("
+                        SELECT
+                            ss.id AS ss_id,
+                            ss.total_scanned_qty AS qty,
+                            ss.status,
+                            ss.auto_fulfilled_by_session_id AS fulfilled_by_kanban_session_id,
+                            ss.original_ss_session_id,
+                            ss.started_at,
+                            ss.closed_at,
+                            ks.id AS kanban_session_id,
+                            ki.kanban_no,
+                            ki.customer AS kanban_customer,
+                            COALESCE(isl.ref_number, '-') AS ref_number,
+                            COALESCE(u.name, 'Inspector QC') AS inspector_name
+                        FROM inspection_sessions ss
+                        LEFT JOIN inspection_sessions ks ON ks.id = ss.auto_fulfilled_by_session_id
+                        LEFT JOIN kanban_items ki ON ki.id = ks.kanban_item_id
+                        LEFT JOIN users u ON u.id = ks.inspector_id
+                        LEFT JOIN inspection_session_lots isl ON (
+                            isl.inspection_session_id = ss.id
+                            AND isl.id = (SELECT MIN(x.id) FROM inspection_session_lots x WHERE x.inspection_session_id = ss.id)
+                        )
+                        WHERE ss.did_id IN ($didPlaceholders)
+                          AND ss.inspection_type = 'safety_stock'
+                        ORDER BY ss.id ASC
+                    ");
+                    $stmtLineage->execute($ssDidIds);
+                    $lineageRows = $stmtLineage->fetchAll(PDO::FETCH_ASSOC);
+                }
 
                 // 4. Fetch Defect / NG Records
                 $stmtDef = $pdo->prepare("
@@ -684,6 +728,138 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </table>
                 </div>
             </div>
+        <?php endif; ?>
+
+        <!-- D3: LINEAGE & RIWAYAT PEMAKAIAN SS PER LOT -->
+        <?php if (!empty($lineageRows)): ?>
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.04); margin-top: 4px;">
+            <div style="padding: 12px 18px; background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <svg style="width:18px; height:18px; color:#60a5fa;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/>
+                    </svg>
+                    <span style="font-size: 13px; font-weight: 800; color: #f1f5f9; letter-spacing: 0.3px;">📦 Lineage & Riwayat Alokasi Stok Lot Ini</span>
+                </div>
+                <span style="font-size: 11px; color: #94a3b8; font-weight: 600;">Seluruh riwayat split &amp; pemakaian lot ini untuk Kanban</span>
+            </div>
+
+            <?php
+            // Hitung summary lineage
+            $lineageTotalQty   = 0;
+            $lineageUsedQty    = 0;
+            $lineageAvailQty   = 0;
+            $lineageKanbanSet  = [];
+            foreach ($lineageRows as $lr) {
+                $lineageTotalQty += (int)$lr['qty'];
+                if (!empty($lr['fulfilled_by_kanban_session_id'])) {
+                    $lineageUsedQty += (int)$lr['qty'];
+                    if (!empty($lr['kanban_no'])) {
+                        $lineageKanbanSet[$lr['kanban_session_id']] = $lr['kanban_no'];
+                    }
+                } else {
+                    $lineageAvailQty += (int)$lr['qty'];
+                }
+            }
+            $lineageKanbanCount = count($lineageKanbanSet);
+            ?>
+
+            <!-- Summary bar -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background-color: #e2e8f0;">
+                <div style="background-color: #f8fafc; padding: 12px 16px; text-align: center;">
+                    <div style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 4px;">Total Stok Lot Ini</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #0f172a; font-family: monospace;"><?= number_format($lineageTotalQty) ?> <span style="font-size: 11px; color: #64748b;">pcs</span></div>
+                </div>
+                <div style="background-color: #eff6ff; padding: 12px 16px; text-align: center;">
+                    <div style="font-size: 10px; font-weight: 800; color: #1d4ed8; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 4px;">Terpakai Kanban</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #1d4ed8; font-family: monospace;"><?= number_format($lineageUsedQty) ?> <span style="font-size: 11px; color: #3b82f6;">pcs</span></div>
+                </div>
+                <div style="background-color: #f0fdf4; padding: 12px 16px; text-align: center;">
+                    <div style="font-size: 10px; font-weight: 800; color: #15803d; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 4px;">Sisa Tersedia</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #15803d; font-family: monospace;"><?= number_format($lineageAvailQty) ?> <span style="font-size: 11px; color: #16a34a;">pcs</span></div>
+                </div>
+                <div style="background-color: #fdf4ff; padding: 12px 16px; text-align: center;">
+                    <div style="font-size: 10px; font-weight: 800; color: #7e22ce; letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 4px;">Total Kanban Dipenuhi</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #7e22ce; font-family: monospace;"><?= $lineageKanbanCount ?> <span style="font-size: 11px; color: #a855f7;">Kanban</span></div>
+                </div>
+            </div>
+
+            <!-- Timeline rows -->
+            <div style="padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;">
+                <?php foreach ($lineageRows as $lrIdx => $lr): ?>
+                <?php
+                    $isUsed      = !empty($lr['fulfilled_by_kanban_session_id']);
+                    $isOriginal  = empty($lr['original_ss_session_id']);
+                    $lrQty       = (int)$lr['qty'];
+                    $lrKanbanNo  = htmlspecialchars($lr['kanban_no'] ?? '-');
+                    $lrCustomer  = htmlspecialchars($lr['kanban_customer'] ?? '-');
+                    $lrRef       = htmlspecialchars($lr['ref_number'] ?? '-');
+                    $lrDate      = !empty($lr['closed_at']) ? date('d M Y, H:i', strtotime($lr['closed_at'])) : (!empty($lr['started_at']) ? date('d M Y', strtotime($lr['started_at'])) : '-');
+
+                    if ($isUsed) {
+                        $rowBg     = '#eff6ff';
+                        $rowBorder = '#bfdbfe';
+                        $dotColor  = '#2563eb';
+                        $dotLabel  = '→';
+                    } elseif ($lrIdx === 0 && $isOriginal) {
+                        $rowBg     = '#f0fdf4';
+                        $rowBorder = '#bbf7d0';
+                        $dotColor  = '#16a34a';
+                        $dotLabel  = '★';
+                    } else {
+                        $rowBg     = '#f8fafc';
+                        $rowBorder = '#e2e8f0';
+                        $dotColor  = '#64748b';
+                        $dotLabel  = '◈';
+                    }
+                ?>
+                <div style="display: flex; align-items: flex-start; gap: 12px;">
+                    <!-- Timeline dot -->
+                    <div style="width: 26px; height: 26px; border-radius: 9999px; background-color: <?= $dotColor ?>; color: #ffffff; font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px;"><?= $dotLabel ?></div>
+
+                    <!-- Row content -->
+                    <div style="flex: 1; background-color: <?= $rowBg ?>; border: 1px solid <?= $rowBorder ?>; border-radius: 10px; padding: 10px 14px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px;">
+                            <!-- Session ID badge -->
+                            <span style="background-color: #0f172a; color: #f1f5f9; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 6px; font-family: monospace;">Sesi #<?= (int)$lr['ss_id'] ?></span>
+
+                            <!-- Original / Split label -->
+                            <?php if ($isOriginal && $lrIdx === 0): ?>
+                                <span style="background-color: #dcfce7; color: #166534; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 9999px; border: 1px solid #bbf7d0;">SS ORIGINAL</span>
+                            <?php elseif (!$isOriginal): ?>
+                                <span style="background-color: #fef9c3; color: #713f12; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 9999px; border: 1px solid #fde68a;">SPLIT / SISA</span>
+                            <?php endif; ?>
+
+                            <!-- Qty -->
+                            <span style="font-size: 14px; font-weight: 900; color: #0f172a; font-family: monospace;"><?= number_format($lrQty) ?> pcs</span>
+
+                            <!-- Ref -->
+                            <?php if ($lrRef !== '-'): ?>
+                                <span style="font-size: 11px; color: #64748b; font-weight: 600;">Ref: <span style="font-family: monospace; color: #1d4ed8;"><?= $lrRef ?></span></span>
+                            <?php endif; ?>
+                        </div>
+
+                        <!-- Right side: Kanban info or Available -->
+                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            <?php if ($isUsed): ?>
+                                <div style="display: flex; align-items: center; gap: 6px; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 8px; padding: 4px 10px;">
+                                    <svg style="width:13px; height:13px; color:#1d4ed8;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                    </svg>
+                                    <div>
+                                        <div style="font-size: 10px; color: #1d4ed8; font-weight: 800;"><?= $lrKanbanNo ?></div>
+                                        <div style="font-size: 10px; color: #3b82f6;"><?= $lrCustomer ?></div>
+                                    </div>
+                                </div>
+                                <span style="font-size: 10px; color: #64748b;"><?= $lrDate ?></span>
+                            <?php else: ?>
+                                <span style="background-color: #dcfce7; color: #166534; font-size: 11px; font-weight: 800; padding: 4px 12px; border-radius: 8px; border: 1px solid #bbf7d0;">⬦ TERSEDIA DI WH</span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
         <?php endif; ?>
 
     </main>

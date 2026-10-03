@@ -6,54 +6,63 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('users');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/users/index.php');
 }
 
-$name = sanitize($_POST['name'] ?? '');
-$email = sanitize($_POST['email'] ?? '');
-$role = sanitize($_POST['role'] ?? 'Operator');
-$status = sanitize($_POST['status'] ?? 'Aktif');
+$name     = sanitize($_POST['name'] ?? '');
+$username = strtolower(trim(sanitize($_POST['username'] ?? '')));
+$password = $_POST['password'] ?? '';
+$role     = trim(sanitize($_POST['role'] ?? 'admin'));
+$status   = in_array($_POST['status'] ?? '', ['active', 'inactive']) ? $_POST['status'] : 'active';
 
-if (empty($name) || empty($email)) {
-    set_flash('error', 'Nama dan Email wajib diisi!');
+if (empty($name) || empty($username) || empty($password)) {
+    set_flash('danger', 'Nama, Username, dan Password wajib diisi!');
     redirect('modules/users/create.php');
 }
 
 $pdo = getDB();
 
-if ($pdo) {
-    try {
-        $stmt = $pdo->prepare("INSERT INTO users (name, email, role, status, created_at) VALUES (:name, :email, :role, :status, NOW())");
-        $stmt->execute([
-            ':name' => $name,
-            ':email' => $email,
-            ':role' => $role,
-            ':status' => $status
-        ]);
-        set_flash('success', 'User berhasil ditambahkan ke Database!');
-    } catch (PDOException $e) {
-        // Fallback store in session mock
-        storeInSessionMock($name, $email, $role, $status);
-    }
-} else {
-    storeInSessionMock($name, $email, $role, $status);
+if (!$pdo) {
+    set_flash('danger', 'Koneksi database tidak tersedia.');
+    redirect('modules/users/index.php');
 }
 
-function storeInSessionMock($name, $email, $role, $status) {
-    if (!isset($_SESSION['users_mock'])) {
-        $_SESSION['users_mock'] = [];
+try {
+    // Check if username already exists
+    $stmtCheck = $pdo->prepare("SELECT id FROM users WHERE username = :username LIMIT 1");
+    $stmtCheck->execute([':username' => $username]);
+    if ($stmtCheck->fetch()) {
+        set_flash('danger', "Username '{$username}' sudah terdaftar! Gunakan username lain.");
+        redirect('modules/users/create.php');
     }
-    $newId = count($_SESSION['users_mock']) > 0 ? max(array_keys($_SESSION['users_mock'])) + 1 : 1;
-    $_SESSION['users_mock'][$newId] = [
-        'id' => $newId,
-        'name' => $name,
-        'email' => $email,
-        'role' => $role,
-        'status' => $status,
-        'created_at' => date('Y-m-d H:i:s')
-    ];
-    set_flash('success', 'User berhasil ditambahkan!');
+
+    // Verify role exists in roles table
+    $stmtRole = $pdo->prepare("SELECT id FROM roles WHERE role_name = :role LIMIT 1");
+    $stmtRole->execute([':role' => $role]);
+    if (!$stmtRole->fetch()) {
+        $role = 'admin'; // fallback to admin if not found
+    }
+
+    $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+
+    $stmt = $pdo->prepare("
+        INSERT INTO users (name, username, password_hash, role, status, created_at, updated_at) 
+        VALUES (:name, :username, :password_hash, :role, :status, NOW(), NOW())
+    ");
+    $stmt->execute([
+        ':name'          => $name,
+        ':username'      => $username,
+        ':password_hash' => $passwordHash,
+        ':role'          => $role,
+        ':status'        => $status
+    ]);
+
+    set_flash('success', "User '{$name}' ({$username}) berhasil ditambahkan!");
+} catch (PDOException $e) {
+    set_flash('danger', 'Gagal menyimpan user: ' . $e->getMessage());
 }
 
 redirect('modules/users/index.php');

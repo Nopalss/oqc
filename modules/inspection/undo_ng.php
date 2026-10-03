@@ -128,7 +128,7 @@ try {
     $newSamplesChecked = (int)$stmtCntChecked->fetchColumn();
 
     // Count actual active (non-cancelled) NG samples
-    $stmtCntNg = $pdo->prepare("SELECT COUNT(DISTINCT n.inspection_sample_id) FROM inspection_ng_records n JOIN inspection_samples s ON s.id = n.inspection_sample_id WHERE s.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)");
+    $stmtCntNg = $pdo->prepare("SELECT COUNT(DISTINCT n.inspection_sample_id) FROM inspection_ng_records n WHERE n.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)");
     $stmtCntNg->execute([':sid' => $sessionId]);
     $newNgCount = (int)$stmtCntNg->fetchColumn();
 
@@ -188,10 +188,18 @@ try {
                                   JOIN inspection_samples s ON s.id = n.inspection_sample_id 
                                   JOIN defect_types d ON d.id = n.defect_type_id 
                                   LEFT JOIN inspection_session_lots sl ON sl.id = n.session_lot_id
-                                  WHERE s.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                                  WHERE n.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
                                   ORDER BY n.id DESC");
     $stmtNgList->execute([':sid' => $sessionId]);
     $ngRecords = $stmtNgList->fetchAll(PDO::FETCH_ASSOC);
+
+    // Auto-sync daily aggregate summary for dashboard
+    syncDailySummaryForSession($pdo, $sessionId);
+
+    // Auto-sync Kanban lifecycle status
+    if (!empty($session['kanban_item_id'])) {
+        syncKanbanStatus($pdo, $session['kanban_item_id']);
+    }
 
     if (ob_get_length()) ob_clean();
     echo json_encode([

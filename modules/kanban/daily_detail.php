@@ -168,7 +168,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <?php endif; ?>
 
                         <div>
-                            <div class="flex items-center gap-2">
+                            <div class="flex items-center gap-2 flex-wrap">
                                 <span class="font-mono font-extrabold text-slate-800 text-sm">
                                     <?= htmlspecialchars($b['document_number'] ?? 'DOC-MNL') ?>
                                 </span>
@@ -177,18 +177,30 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <?php else: ?>
                                     <span class="badge badge-secondary">Input Manual</span>
                                 <?php endif; ?>
+
+                                <?php if (!empty($b['vendor'])): ?>
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-white/90 text-slate-700 border border-slate-300 shadow-2xs">
+                                        🏢 Vender: <b class="font-mono ml-1 text-slate-900"><?= htmlspecialchars($b['vendor']) ?></b>
+                                    </span>
+                                <?php endif; ?>
+
+                                <?php if (!empty($b['print_datetime'])): ?>
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-white/90 text-slate-700 border border-slate-300 shadow-2xs">
+                                        🕒 Print Time: <b class="font-mono ml-1 text-slate-900"><?= date('Y-m-d H:i:s', strtotime($b['print_datetime'])) ?></b>
+                                    </span>
+                                <?php endif; ?>
                             </div>
-                            <div class="text-[11px] text-slate-500 font-medium mt-0.5">
-                                Input: <strong><?= date('H:i', strtotime($b['imported_at'])) ?> WIB</strong>
-                                &bull; <strong><?= (int)$entry['item_count'] ?></strong> Item
-                                &bull; <strong><?= number_format($entry['total_pcs']) ?></strong> pcs
+                            <div class="text-[11px] text-slate-500 font-medium mt-1 flex items-center gap-2 flex-wrap">
+                                <span>Input: <strong><?= date('H:i', strtotime($b['imported_at'])) ?> WIB</strong></span>
+                                <span>&bull; <strong><?= (int)$entry['item_count'] ?></strong> Item</span>
+                                <span>&bull; <strong><?= number_format($entry['total_pcs']) ?></strong> pcs</span>
                             </div>
                         </div>
                     </div>
 
                     <!-- Batch Actions -->
                     <div class="flex items-center gap-2">
-                        <a href="<?= base_url('modules/kanban/edit_batch.php?batch_id=' . $b['id']) ?>"
+                        <a href="<?= base_url('modules/kanban/edit_batch.php?batch_id=' . $b['id'] . '&return_date=' . urlencode($dateParam)) ?>"
                            class="btn-primary py-1 px-2.5 text-xs inline-flex items-center">
                             <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
@@ -196,7 +208,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             Edit Batch
                         </a>
                         <button type="button"
-                                onclick="confirmDelete('<?= base_url('modules/kanban/delete_batch.php?id=' . $b['id']) ?>', 'Dokumen <?= htmlspecialchars($b['document_number'] ?? '', ENT_QUOTES) ?>')"
+                                onclick="confirmDelete('<?= base_url('modules/kanban/delete_batch.php?id=' . $b['id'] . '&return_date=' . urlencode($dateParam)) ?>', 'Dokumen <?= htmlspecialchars($b['document_number'] ?? '', ENT_QUOTES) ?>')"
                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Batch Ini">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
@@ -220,13 +232,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <th class="px-4 py-2.5">Req Date</th>
                                 <th class="px-4 py-2.5">ETA</th>
                                 <th class="px-4 py-2.5">Storage Loc</th>
+                                <th class="px-4 py-2.5">Supply Area</th>
                                 <th class="px-4 py-2.5 text-right">Aksi</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
                             <?php if (empty($items)): ?>
                                 <tr>
-                                    <td colspan="10" class="px-4 py-5 text-center text-slate-400">
+                                    <td colspan="11" class="px-4 py-5 text-center text-slate-400">
                                         Tidak ada item pada batch ini.
                                     </td>
                                 </tr>
@@ -281,15 +294,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <td class="px-4 py-2.5 font-mono text-[11px]">
                                             <?= htmlspecialchars($row['str_loc'] ?? '-') ?>
                                         </td>
+                                        <td class="px-4 py-2.5 font-mono text-[11px] font-semibold text-slate-700">
+                                            <?= htmlspecialchars($row['supply_area'] ?? '-') ?>
+                                        </td>
                                         <td class="px-4 py-2.5 text-right space-x-1">
-                                            <a href="<?= base_url('modules/kanban/edit.php?id=' . $row['id']) ?>"
+                                            <a href="<?= base_url('modules/kanban/edit.php?id=' . $row['id'] . '&return_date=' . urlencode($dateParam)) ?>"
                                                class="btn-icon text-indigo-600 hover:bg-indigo-50" title="Edit Item">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
                                                 </svg>
                                             </a>
                                             <button type="button"
-                                                    onclick="confirmDelete('<?= base_url('modules/kanban/delete.php?id=' . $row['id']) ?>', 'Kanban <?= htmlspecialchars($row['kanban_no'] ?? '', ENT_QUOTES) ?>')"
+                                                    onclick="confirmDelete('<?= base_url('modules/kanban/delete.php?id=' . $row['id'] . '&return_date=' . urlencode($dateParam)) ?>', 'Kanban <?= htmlspecialchars($row['kanban_no'] ?? '', ENT_QUOTES) ?>')"
                                                     class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

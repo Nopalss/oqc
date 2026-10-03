@@ -7,10 +7,14 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+$returnDate = trim(sanitize($_GET['return_date'] ?? ''));
+$targetRedirect = (!empty($returnDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $returnDate))
+    ? 'modules/kanban/daily_detail.php?date=' . urlencode($returnDate)
+    : 'modules/kanban/index.php';
 
 if (!$id) {
     set_flash('error', 'ID Dokumen Batch tidak valid!');
-    redirect('modules/kanban/index.php');
+    redirect($targetRedirect);
 }
 
 $pdo = getDB();
@@ -41,4 +45,4 @@ if ($pdo) {
     set_flash('error', 'Database tidak terhubung!');
 }
 
-redirect('modules/kanban/index.php');
+redirect($targetRedirect);

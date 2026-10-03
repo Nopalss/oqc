@@ -8,11 +8,12 @@
     </div><!-- End of Main Content Container -->
 </div><!-- End of Layout Wrapper -->
 
-<!-- Offline Vendor Libraries & App Scripts -->
-<script src="<?= base_url('assets/js/vendor/jquery.min.js') ?>"></script>
-<script src="<?= base_url('assets/js/vendor/sweetalert2.all.min.js') ?>"></script>
-<script src="<?= base_url('assets/js/vendor/three.min.js') ?>"></script>
-<script src="<?= base_url('assets/js/app.js') ?>"></script>
+<!-- Real 3D CAD WebGL Engine Scripts (WebAssembly & Three.js) -->
+<script>window.APP_BASE_URL = "<?= base_url() ?>";</script>
+<script src="<?= base_url('assets/js/vendor/three.r128.min.js') ?>"></script>
+<script src="<?= base_url('assets/js/vendor/OrbitControls.js') ?>"></script>
+<script src="<?= base_url('assets/js/vendor/occt-import-js.js') ?>"></script>
+<script src="<?= base_url('assets/js/cad_viewer.js') ?>"></script>
 
 </body>
 </html>

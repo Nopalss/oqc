@@ -6,6 +6,8 @@ $pageSubtitle = "Kelola akun pengguna, hak akses role, dan status aktifasi pengg
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('users');
+
 $pdo = getDB();
 $users = [];
 $search = sanitize($_GET['search'] ?? '');

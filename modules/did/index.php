@@ -6,9 +6,10 @@ $pageSubtitle = "Daftar histori sesi pengunggahan & penginputan status pengeceka
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('did');
+
 $pdo = getDB();
 $batches = [];
-$search = sanitize($_GET['search'] ?? '');
 $startDate = sanitize($_GET['start_date'] ?? '');
 $endDate = sanitize($_GET['end_date'] ?? '');
 
@@ -30,8 +31,9 @@ if ($pdo) {
         $stmtUnbatched = $pdo->query("SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id IS NULL");
         $unbatchedCount = (int)$stmtUnbatched->fetchColumn();
         if ($unbatchedCount > 0) {
-            $pdo->exec("INSERT INTO did_batches (batch_name, import_method, total_items, created_at) 
-                        SELECT 'Legacy Import DID Batch', 'manual', COUNT(*), MIN(created_at) 
+            $cBy = current_user()['id'];
+            $pdo->exec("INSERT INTO did_batches (batch_name, import_method, total_items, created_by, created_at) 
+                        SELECT 'Legacy Import DID Batch', 'manual', COUNT(*), {$cBy}, MIN(created_at) 
                         FROM daily_inspection_data WHERE batch_id IS NULL");
             $newBatchId = $pdo->lastInsertId();
             $pdo->exec("UPDATE daily_inspection_data SET batch_id = {$newBatchId} WHERE batch_id IS NULL");
@@ -41,19 +43,16 @@ if ($pdo) {
         $countSql = "SELECT COUNT(*) FROM did_batches b WHERE 1=1";
         $countParams = [];
 
-        if (!empty($search)) {
-            $countSql .= " AND (b.batch_name LIKE :search)";
-            $countParams[':search'] = '%' . $search . '%';
-        }
-
-        if (!empty($startDate)) {
-            $countSql .= " AND DATE(b.created_at) >= :start_date";
+        if (!empty($startDate) && !empty($endDate)) {
+            $countSql .= " AND b.inspecting_date >= :start_date AND b.inspecting_date <= :end_date";
             $countParams[':start_date'] = $startDate;
-        }
-
-        if (!empty($endDate)) {
-            $countSql .= " AND DATE(b.created_at) <= :end_date";
-            $countParams[':end_date'] = $endDate;
+            $countParams[':end_date']   = $endDate;
+        } elseif (!empty($startDate)) {
+            $countSql .= " AND b.inspecting_date = :start_date";
+            $countParams[':start_date'] = $startDate;
+        } elseif (!empty($endDate)) {
+            $countSql .= " AND b.inspecting_date = :end_date";
+            $countParams[':end_date']   = $endDate;
         }
 
         $stmtCount = $pdo->prepare($countSql);
@@ -74,19 +73,16 @@ if ($pdo) {
                 WHERE 1=1";
         $params = [];
 
-        if (!empty($search)) {
-            $sql .= " AND (b.batch_name LIKE :search)";
-            $params[':search'] = '%' . $search . '%';
-        }
-
-        if (!empty($startDate)) {
-            $sql .= " AND DATE(b.created_at) >= :start_date";
+        if (!empty($startDate) && !empty($endDate)) {
+            $sql .= " AND b.inspecting_date >= :start_date AND b.inspecting_date <= :end_date";
             $params[':start_date'] = $startDate;
-        }
-
-        if (!empty($endDate)) {
-            $sql .= " AND DATE(b.created_at) <= :end_date";
-            $params[':end_date'] = $endDate;
+            $params[':end_date']   = $endDate;
+        } elseif (!empty($startDate)) {
+            $sql .= " AND b.inspecting_date = :start_date";
+            $params[':start_date'] = $startDate;
+        } elseif (!empty($endDate)) {
+            $sql .= " AND b.inspecting_date = :end_date";
+            $params[':end_date']   = $endDate;
         }
 
         $sql .= " ORDER BY b.id DESC LIMIT :limit OFFSET :offset";
@@ -119,15 +115,6 @@ if ($pdo) {
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 850px;">
                 
                 <form action="" method="GET" style="display: flex; align-items: center; gap: 6px; flex: 1;">
-                    <!-- Search Input -->
-                    <div style="position: relative; width: 220px; flex-shrink: 0;">
-                        <svg style="position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: #94a3b8; pointer-events: none;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                        </svg>
-                        <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" 
-                               placeholder="Cari Riwayat Batch..." class="form-input py-1 text-xs" style="padding-left: 30px; width: 100%;">
-                    </div>
-
                     <!-- Date Range -->
                     <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
                         <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="form-input py-1 text-xs" style="width: 125px;">
@@ -144,7 +131,7 @@ if ($pdo) {
                     </select>
 
                     <button type="submit" class="btn-secondary py-1 px-2.5 text-xs" style="flex-shrink: 0;">Filter</button>
-                    <?php if (!empty($search) || !empty($startDate) || !empty($endDate) || $limit != 10): ?>
+                    <?php if (!empty($startDate) || !empty($endDate) || $limit != 10): ?>
                         <a href="<?= base_url('modules/did/index.php') ?>" class="text-[11px] text-rose-600 font-semibold hover:underline" style="flex-shrink: 0;">Reset</a>
                     <?php endif; ?>
                 </form>
@@ -168,7 +155,7 @@ if ($pdo) {
                     <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200/80 uppercase tracking-wider text-[10px]">
                         <tr>
                             <th class="px-4 py-3">No</th>
-                            <th class="px-4 py-3">Tanggal Entry</th>
+                            <th class="px-4 py-3">Tanggal Inspeksi</th>
                             <th class="px-4 py-3">Nama Berkas / Referensi Sesi</th>
                             <th class="px-4 py-3">Total Lot Item</th>
                             <th class="px-4 py-3">Ringkasan Status Dimensi</th>
@@ -187,7 +174,7 @@ if ($pdo) {
                                 <tr class="hover:bg-slate-50/80 transition-colors">
                                     <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
                                     <td class="px-4 py-3 font-bold text-slate-800">
-                                        <?= date('d M Y', strtotime($b['created_at'])) ?>
+                                        <?= date('d M Y', strtotime(!empty($b['inspecting_date']) ? $b['inspecting_date'] : $b['created_at'])) ?>
                                     </td>
                                     <td class="px-4 py-3 font-medium text-slate-800">
                                         <?= htmlspecialchars($b['batch_name']) ?>

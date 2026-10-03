@@ -20,9 +20,14 @@ if ($id && $pdo) {
     }
 }
 
+$returnDate = isset($_GET['return_date']) ? trim($_GET['return_date']) : '';
+$backUrl = (!empty($returnDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $returnDate))
+    ? base_url('modules/kanban/daily_detail.php?date=' . urlencode($returnDate))
+    : base_url('modules/kanban/index.php');
+
 if (!$item) {
     set_flash('error', 'Data Kanban tidak ditemukan!');
-    redirect('modules/kanban/index.php');
+    redirect($backUrl);
 }
 ?>
 
@@ -38,7 +43,7 @@ if (!$item) {
         <div class="card p-3 md:p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <div style="display: flex; align-items: center; justify-content: space-between;">
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-1.5 px-3 text-xs">
+                    <a href="<?= $backUrl ?>" class="btn-secondary py-1.5 px-3 text-xs">
                         &larr; Batal & Kembali
                     </a>
                     <h2 class="text-sm font-bold text-slate-800">
@@ -52,6 +57,7 @@ if (!$item) {
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <form action="<?= base_url('modules/kanban/update.php') ?>" method="POST" class="space-y-4">
                 <input type="hidden" name="id" value="<?= $item['id'] ?>">
+                <input type="hidden" name="return_date" value="<?= htmlspecialchars($returnDate) ?>">
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     
@@ -109,6 +115,12 @@ if (!$item) {
                         <input type="text" name="supply_area" value="<?= htmlspecialchars($item['supply_area'] ?? '') ?>" class="form-input text-xs font-mono">
                     </div>
 
+                    <!-- Status Cek -->
+                    <div>
+                        <label class="form-label">Status Cek</label>
+                        <input type="text" name="check_type" value="<?= htmlspecialchars($item['check_type'] ?? '') ?>" placeholder="100% / -" class="form-input text-xs font-bold">
+                    </div>
+
                     <!-- Remark -->
                     <div class="md:col-span-2">
                         <label class="form-label">Catatan Tambahan (Remark)</label>
@@ -118,7 +130,7 @@ if (!$item) {
                 </div>
 
                 <div class="pt-3 border-t border-slate-100 flex justify-end space-x-2">
-                    <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-1.5 px-4 text-xs">Batal</a>
+                    <a href="<?= $backUrl ?>" class="btn-secondary py-1.5 px-4 text-xs">Batal</a>
                     <button type="submit" class="btn-primary py-1.5 px-4 text-xs">
                         Simpan Perubahan
                     </button>

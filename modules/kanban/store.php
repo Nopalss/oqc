@@ -29,7 +29,12 @@ if ($entryType === 'manual') {
     if (!in_array($planType, ['kanban', 'safety_stock'])) {
         $planType = 'kanban';
     }
-    $vendor    = trim(sanitize($_POST['vendor'] ?? 'PT. SURYA TECHNOLOGY INDUSTRI'));
+    $vendor       = trim(sanitize($_POST['vendor'] ?? 'PT. SURYA TECHNOLOGY INDUSTRI'));
+    $printDt      = !empty($_POST['print_datetime']) ? sanitize($_POST['print_datetime']) : null;
+    $importMethod = sanitize($_POST['import_method'] ?? 'manual');
+    if (!in_array($importMethod, ['manual', 'excel_import'])) {
+        $importMethod = 'manual';
+    }
     $docNumber = trim(sanitize($_POST['document_number'] ?? ($planType === 'safety_stock' ? 'STOCK-' : 'KANBAN-') . date('Ymd-His')));
 
     // Support JSON payload to bypass PHP max_input_vars limit for large excel imports
@@ -50,13 +55,53 @@ if ($entryType === 'manual') {
     }
 
     try {
-        // Create Batch Header
-        $stmtBatch = $pdo->prepare("INSERT INTO kanban_batches (plan_type, vendor, document_number, import_method, imported_at) VALUES (:ptype, :vendor, :doc, 'manual', NOW())");
-        $stmtBatch->execute([':ptype' => $planType, ':vendor' => $vendor ?: 'PT. SURYA TECHNOLOGY INDUSTRI', ':doc' => $docNumber]);
+        $currentUser = current_user();
+        $importedBy = !empty($currentUser['id']) ? (int)$currentUser['id'] : 1;
+
+        // Create Batch Header with imported_by, print_datetime, and import_method
+        $stmtBatch = $pdo->prepare("INSERT INTO kanban_batches (plan_type, vendor, document_number, print_datetime, import_method, imported_by, imported_at) VALUES (:ptype, :vendor, :doc, :print_dt, :import_method, :imported_by, NOW())");
+        $stmtBatch->execute([
+            ':ptype'         => $planType,
+            ':vendor'        => $vendor ?: 'PT. SURYA TECHNOLOGY INDUSTRI',
+            ':doc'           => $docNumber,
+            ':print_dt'      => $printDt,
+            ':import_method' => $importMethod,
+            ':imported_by'   => $importedBy
+        ]);
         $batchId = $pdo->lastInsertId();
 
+        // -----------------------------------------------------------------
+        // Fast Deduplication Fingerprint Cache (DB & Current Batch)
+        // -----------------------------------------------------------------
+        $kanbanNos = array_filter(array_unique(array_map(function($r) {
+            return strtoupper(trim(sanitize($r['kanban_no'] ?? '')));
+        }, $rows)));
+
+        $dbFingerprints = [];
+        if (!empty($kanbanNos)) {
+            $placeholders = implode(',', array_fill(0, count($kanbanNos), '?'));
+            $stmtFp = $pdo->prepare("SELECT kanban_no, item_code, req_date, qty, eta, str_loc, supply_area FROM kanban_items WHERE kanban_no IN ($placeholders)");
+            $stmtFp->execute(array_values($kanbanNos));
+            $existingRows = $stmtFp->fetchAll();
+
+            foreach ($existingRows as $exR) {
+                $exRDate = !empty($exR['req_date']) ? date('Y-m-d H:i:s', strtotime($exR['req_date'])) : '';
+                $exREta  = !empty($exR['eta']) ? date('Y-m-d H:i:s', strtotime($exR['eta'])) : '';
+                $fp = strtoupper(trim($exR['kanban_no'])) . '|' .
+                      strtoupper(trim($exR['item_code'])) . '|' .
+                      $exRDate . '|' .
+                      (int)$exR['qty'] . '|' .
+                      $exREta . '|' .
+                      strtoupper(trim($exR['str_loc'] ?? '')) . '|' .
+                      strtoupper(trim($exR['supply_area'] ?? ''));
+                $dbFingerprints[md5($fp)] = true;
+            }
+        }
+
+        $seenBatchFingerprints = [];
         $successCount = 0;
         $skipCount = 0;
+        $duplicateCount = 0;
 
         foreach ($rows as $r) {
             $kanbanNo   = strtoupper(trim(sanitize($r['kanban_no'] ?? '')));
@@ -106,10 +151,11 @@ if ($entryType === 'manual') {
                 $rowEta .= ':00';
             }
 
-            $qty       = (int)($r['qty'] ?? 500);
-            $strLoc    = trim(sanitize($r['str_loc'] ?? 'WH-A01'));
-            $checkType = trim(sanitize($r['check_type'] ?? ''));
-            $remark    = trim(sanitize($r['remark'] ?? ''));
+            $qty        = (int)($r['qty'] ?? 500);
+            $strLoc     = trim(sanitize($r['str_loc'] ?? ''));
+            $supplyArea = trim(sanitize($r['supply_area'] ?? ''));
+            $checkType  = trim(sanitize($r['check_type'] ?? ''));
+            $remark     = trim(sanitize($r['remark'] ?? ''));
 
             if ($planType === 'safety_stock') {
                 if (empty($itemCode) || empty($itemDesc) || $qty <= 0) {
@@ -122,6 +168,24 @@ if ($entryType === 'manual') {
                     continue;
                 }
             }
+
+            // Check 7 criteria duplicate match
+            $itemFingerprint = md5(
+                $kanbanNo . '|' .
+                $itemCode . '|' .
+                $rowReqDate . '|' .
+                $qty . '|' .
+                $rowEta . '|' .
+                strtoupper($strLoc) . '|' .
+                strtoupper($supplyArea)
+            );
+
+            if (isset($dbFingerprints[$itemFingerprint]) || isset($seenBatchFingerprints[$itemFingerprint])) {
+                $duplicateCount++;
+                continue; // Reject & skip duplicate row
+            }
+
+            $seenBatchFingerprints[$itemFingerprint] = true;
 
             // Auto-create Master Customer if custom customer given and not exists
             if (!empty($rowCustomer)) {
@@ -157,7 +221,7 @@ if ($entryType === 'manual') {
                 ':qty'      => $qty,
                 ':eta'      => $rowEta,
                 ':sloc'     => $strLoc,
-                ':sarea'    => 'LINE-01',
+                ':sarea'    => $supplyArea,
                 ':ctype'    => $checkType,
                 ':remark'   => $remark
             ]);
@@ -167,12 +231,23 @@ if ($entryType === 'manual') {
 
         if ($successCount > 0) {
             $msg = 'Berhasil menyimpan ' . $successCount . ' baris data Kanban baru.';
+            $details = [];
+            if ($duplicateCount > 0) {
+                $details[] = $duplicateCount . ' baris duplikat ditolak/dilewati';
+            }
             if ($skipCount > 0) {
-                $msg .= ' (' . $skipCount . ' baris invalid dilewati).';
+                $details[] = $skipCount . ' baris invalid dilewati';
+            }
+            if (!empty($details)) {
+                $msg .= ' (' . implode(', ', $details) . ').';
             }
             set_flash('success', $msg);
         } else {
-            set_flash('warning', 'Gagal menyimpan data Kanban! Seluruh baris tidak valid.');
+            if ($duplicateCount > 0) {
+                set_flash('warning', 'Tidak ada data baru yang disimpan. Seluruh ' . $duplicateCount . ' baris terdeteksi duplikat dan sudah ada sebelumnya!');
+            } else {
+                set_flash('warning', 'Gagal menyimpan data Kanban! Seluruh baris tidak valid.');
+            }
         }
     } catch (PDOException $e) {
         set_flash('error', 'Gagal menyimpan batch Kanban: ' . $e->getMessage());

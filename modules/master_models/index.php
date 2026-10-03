@@ -6,6 +6,8 @@ $pageSubtitle       = "Kelola master nama model produk (1 Model ➔ Banyak Part)
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_models');
+
 $pdo = getDB();
 
 $search = sanitize($_GET['search'] ?? '');

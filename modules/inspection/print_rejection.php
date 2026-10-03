@@ -6,14 +6,33 @@
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+require_once __DIR__ . '/../../config/qr_svg.php';
 session_write_close();
 
 $sessionId = (int)($_GET['session_id'] ?? $_GET['id'] ?? 0);
+$sessionLotId = (int)($_GET['session_lot_id'] ?? 0);
 $isAutoPrint = isset($_GET['autoprint']) && $_GET['autoprint'] == 1;
 
 $pdo = getDB();
 $session = null;
 $ngRecords = [];
+$targetLot = null;
+
+if ($sessionLotId > 0 && $pdo) {
+    try {
+        $stmtLot = $pdo->prepare("
+            SELECT isl.*, u_chief.name as chief_display_name
+            FROM inspection_session_lots isl
+            LEFT JOIN users u_chief ON u_chief.id = isl.chief_approved_by
+            WHERE isl.id = :lid
+        ");
+        $stmtLot->execute([':lid' => $sessionLotId]);
+        $targetLot = $stmtLot->fetch(PDO::FETCH_ASSOC);
+        if ($targetLot) {
+            $sessionId = (int)$targetLot['inspection_session_id'];
+        }
+    } catch (PDOException $e) {}
+}
 
 if ($sessionId > 0 && $pdo) {
     try {
@@ -21,7 +40,8 @@ if ($sessionId > 0 && $pdo) {
             SELECT s.*, 
                    did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
                    k.kanban_no, k.customer, k.qty as kanban_qty, b.document_number as doc_no,
-                   COALESCE(m.name, p.model) as model, u.name as inspector_name
+                   COALESCE(m.name, p.model) as model, u.name as inspector_name,
+                   u_chief.name as chief_display_name
             FROM inspection_sessions s
             JOIN daily_inspection_data did ON did.id = s.did_id
             LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -32,22 +52,45 @@ if ($sessionId > 0 && $pdo) {
             )
             LEFT JOIN master_models m ON m.id = p.model_id
             LEFT JOIN users u ON u.id = s.inspector_id
+            LEFT JOIN users u_chief ON u_chief.id = s.chief_approved_by
             WHERE s.id = :id
         ");
         $stmt->execute([':id' => $sessionId]);
         $session = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($session) {
-            $stmtNg = $pdo->prepare("
-                SELECT n.*, d.name as defect_name, sp.sample_number
-                FROM inspection_ng_records n
-                JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
-                JOIN defect_types d ON d.id = n.defect_type_id
-                WHERE sp.inspection_session_id = :sid
-                ORDER BY n.id ASC
-            ");
-            $stmtNg->execute([':sid' => $sessionId]);
-            $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
+            // Jika mencetak lembar rejection per-lot
+            if ($targetLot) {
+                $session['lot_number'] = $targetLot['lot_number'] . (!empty($targetLot['ref_number']) ? ' (Ref: ' . $targetLot['ref_number'] . ')' : '');
+                $session['sample_size'] = (int)$targetLot['sample_size'];
+                $session['total_scanned_qty'] = (int)$targetLot['qty'];
+                $session['ng_count'] = (int)$targetLot['ng_count'];
+                $session['reject_number'] = (int)($targetLot['reject_number'] ?? 1);
+
+                $stmtNg = $pdo->prepare("
+                    SELECT n.*, d.name as defect_name, COALESCE(sp.sample_number, 1) as sample_number
+                    FROM inspection_ng_records n
+                    LEFT JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+                    JOIN defect_types d ON d.id = n.defect_type_id
+                    WHERE n.session_lot_id = :lid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                    ORDER BY n.id ASC
+                ");
+                $stmtNg->execute([':lid' => $sessionLotId]);
+                $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
+            } else {
+                // Mode lama (per sesi)
+                $stmtNg = $pdo->prepare("
+                    SELECT n.*, d.name as defect_name, COALESCE(sp.sample_number, 1) as sample_number
+                    FROM inspection_ng_records n
+                    LEFT JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+                    JOIN defect_types d ON d.id = n.defect_type_id
+                    WHERE (n.inspection_session_id = :sid OR sp.inspection_session_id = :sid2)
+                      AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                    ORDER BY n.id ASC
+                ");
+                $stmtNg->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
+                $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
+            }
 
             // Log manual reprint if user clicked reprint
             if (!$isAutoPrint) {
@@ -70,6 +113,43 @@ foreach ($ngRecords as $rec) {
     $defectSummaryList[] = $rec['defect_name'];
 }
 $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($defectSummaryList)) : 'Visual / Dimension Defect';
+
+// Fetch list of active users for Chief selection modal
+$chiefUsersList = [];
+if ($pdo) {
+    try {
+        $stmtUsers = $pdo->query("SELECT id, name, username, role FROM users WHERE status = 'active' ORDER BY name ASC");
+        $chiefUsersList = $stmtUsers->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $eUsers) {}
+}
+
+// Inspector & Chief Approval Status Metadata
+$inspectorDisplayName = !empty($session['inspector_name']) ? $session['inspector_name'] : (!empty($session['did_pic']) ? $session['did_pic'] : 'QC Inspector');
+$partsInspector = preg_split('/\s+/', trim($inspectorDisplayName));
+$inspectorShortSign = !empty($partsInspector[0]) ? $partsInspector[0] : 'Inspector';
+
+// Chief Approval Status & Hybrid Stamp Metadata (Dedicated Chief Columns - Per Lot Priority)
+if ($targetLot) {
+    $isChiefApproved = (!empty($targetLot['is_chief_approved']) && (int)$targetLot['is_chief_approved'] === 1);
+    $chiefName = !empty($targetLot['chief_display_name']) ? $targetLot['chief_display_name'] : (!empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC');
+    $chiefApprovedAtRaw = $targetLot['chief_approved_at'] ?? null;
+} else {
+    $isChiefApproved = (!empty($session['is_chief_approved']) && (int)$session['is_chief_approved'] === 1);
+    $chiefName = !empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC';
+    $chiefApprovedAtRaw = $session['chief_approved_at'] ?? null;
+}
+$isApproved = $isChiefApproved;
+$partsChief = preg_split('/\s+/', trim($chiefName));
+$chiefShortSign = !empty($partsChief[0]) ? $partsChief[0] : 'Chief';
+$chiefAppDate = !empty($chiefApprovedAtRaw) ? date('d / m / Y', strtotime($chiefApprovedAtRaw)) : date('d / m / Y');
+$chiefAppTime = !empty($chiefApprovedAtRaw) ? date('H:i', strtotime($chiefApprovedAtRaw)) . ' WIB' : date('H:i') . ' WIB';
+
+// Generate Mini QR Codes (100% pure-PHP offline SVG with URL verification link)
+$inspectorQrUrl = base_url("modules/inspection/verify.php?id=" . $session['id'] . ($sessionLotId > 0 ? "&session_lot_id=" . $sessionLotId : "") . "&role=inspector");
+$inspectorQrSvg = generate_qr_svg($inspectorQrUrl, 38);
+
+$chiefQrUrl = base_url("modules/inspection/verify.php?id=" . $session['id'] . ($sessionLotId > 0 ? "&session_lot_id=" . $sessionLotId : "") . "&role=chief");
+$chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -120,6 +200,154 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
         }
         .btn-back { background: #e2e8f0; color: #1e293b; }
         .btn-print { background: #dc2626; color: #ffffff; }
+
+        /* Unified QC Digital Stamp & Mini QR Hybrid Styling */
+        .qc-stamp-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            height: 56px;
+            padding: 1px 2px;
+            box-sizing: border-box;
+            width: 100%;
+        }
+        .qc-qr-wrap {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 3px;
+            padding: 1px;
+            flex-shrink: 0;
+            width: 42px;
+            height: 42px;
+            box-sizing: border-box;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .qc-qr-wrap svg {
+            width: 38px;
+            height: 38px;
+            display: block;
+        }
+        .qc-digital-badge {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            border-radius: 4px;
+            line-height: 1.15;
+            padding: 2px 3px;
+            box-sizing: border-box;
+            flex: 1;
+            min-width: 0;
+            height: 52px;
+        }
+        /* Inspector Variant */
+        .qc-badge-inspector {
+            border: 1.5px solid #0f766e;
+            background-color: #f0fdf4;
+            color: #0f766e;
+            box-shadow: inset 0 0 0 1px #86efac;
+        }
+        .qc-badge-inspector .qc-badge-title {
+            color: #15803d;
+            border-bottom: 1px solid #86efac;
+        }
+        .qc-badge-inspector .qc-badge-meta {
+            color: #047857;
+        }
+
+        /* Chief Variant */
+        .qc-badge-chief {
+            border: 1.5px solid #1e40af;
+            background-color: #f0f7ff;
+            color: #1e40af;
+            box-shadow: inset 0 0 0 1px #93c5fd;
+        }
+        .qc-badge-chief .qc-badge-title {
+            color: #1e40af;
+            border-bottom: 1px solid #93c5fd;
+        }
+        .qc-badge-chief .qc-badge-meta {
+            color: #2563eb;
+        }
+
+        /* Common Badge Typography */
+        .qc-badge-title {
+            font-size: 7px;
+            font-weight: 900;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            padding-bottom: 1px;
+            margin-bottom: 1px;
+            width: 100%;
+            white-space: nowrap;
+        }
+        .qc-badge-sign-name {
+            font-size: 9.5px;
+            font-family: 'Segoe Script', 'Brush Script MT', 'Dancing Script', cursive, sans-serif;
+            font-weight: 700;
+            color: #0f172a;
+            transform: rotate(-2deg);
+            padding: 0 1px;
+            display: block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+            line-height: 1.2;
+        }
+        .qc-badge-meta {
+            font-size: 5.5px;
+            font-family: monospace;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            margin-top: 1px;
+            white-space: nowrap;
+        }
+        .btn-chief-acc {
+            background: #16a34a;
+            color: #ffffff;
+            transition: all 0.2s;
+            box-shadow: 0 1px 2px rgba(22, 163, 74, 0.3);
+        }
+        .btn-chief-acc:hover {
+            background: #15803d;
+        }
+        .btn-chief-unacc {
+            background: #fee2e2;
+            color: #b91c1c;
+            border: 1px solid #fca5a5;
+            padding: 5px 10px;
+            font-size: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            transition: all 0.15s;
+        }
+        .btn-chief-unacc:hover {
+            background: #fecaca;
+        }
+        .chief-status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 10px;
+            background: #dcfce7;
+            border: 1px solid #86efac;
+            color: #166534;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: bold;
+        }
 
         .sheet-container {
             width: 790px;
@@ -200,12 +428,33 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
         <a href="<?= base_url('modules/inspection/session.php?id=' . $session['id']) ?>" class="btn-action btn-back">
             &larr; Kembali ke Workbench Inspeksi
         </a>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <!-- Dual-Workflow Chief Approval Controls -->
+            <div id="chief-action-container" style="display: flex; align-items: center; gap: 6px;">
+                <?php if ($isApproved): ?>
+                    <div class="chief-status-pill" id="badge-chief-acc">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        <span>ACC Chief QC: <b id="bar-chief-name"><?= htmlspecialchars($chiefName) ?></b></span>
+                        <span style="font-size: 9.5px; opacity: 0.85;" id="bar-chief-time">(<?= !empty($chiefApprovedAtRaw) ? date('d/m/Y H:i', strtotime($chiefApprovedAtRaw)) : date('d/m/Y H:i') ?>)</span>
+                    </div>
+                    <button type="button" onclick="triggerChiefUnapprove()" class="btn-chief-unacc" id="btn-unapprove-chief" title="Batalkan ACC Chief jika ada perbaikan">
+                        Batal ACC
+                    </button>
+                <?php else: ?>
+                    <button type="button" onclick="triggerChiefApprove()" class="btn-action btn-chief-acc" id="btn-approve-chief">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        ACC sebagai Chief QC
+                    </button>
+                <?php endif; ?>
+            </div>
+
             <button onclick="downloadPDF(this)" class="btn-action" style="background: #0284c7; color: #ffffff;">
-                📥 Download PDF
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download PDF
             </button>
             <button onclick="printCleanPDF(this)" class="btn-action btn-print">
-                🖨️ Cetak PDF (Full A4)
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                Cetak PDF (Full A4)
             </button>
         </div>
     </div>
@@ -216,15 +465,15 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
         <!-- HEADER TABLE -->
         <table class="tbl-grid">
             <tr>
-                <td style="width: 35%; font-weight: bold; font-size: 13px; border-bottom: 2px solid #000;">
+                <td style="width: 28%; font-weight: 800; font-size: 10.5px; line-height: 1.25; border-bottom: 2px solid #000;">
                     PT. SURYA TECHNOLOGY INDUSTRI
-                    <div style="font-size: 10px; font-weight: bold; color: #333;">QUALITY CONTROL</div>
+                    <div style="font-size: 8.5px; font-weight: 700; color: #475569; letter-spacing: 0.04em; margin-top: 1px;">QUALITY CONTROL</div>
                 </td>
-                <td class="text-center" style="width: 30%; font-weight: 900; font-size: 14px; border-bottom: 2px solid #000;">
+                <td class="text-center" style="width: 42%; font-weight: 900; font-size: 17.5px; letter-spacing: 0.04em; line-height: 1.15; border-bottom: 2px solid #000;">
                     REJECT INFORMATION SHEET
                 </td>
-                <td style="width: 35%; font-size: 8.5px; border-bottom: 2px solid #000;">
-                    <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
+                <td style="width: 30%; font-size: 8.5px; border-bottom: 2px solid #000;">
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px 6px; justify-content: flex-end;">
                         <span><span class="checkbox-box"></span> CUSTOMER CLAIM</span>
                         <span><span class="checkbox-box checked"></span> OQC</span>
                         <span><span class="checkbox-box"></span> PQC</span>
@@ -474,8 +723,38 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
                 <td style="width: 25%;">LEADER / SPV</td>
             </tr>
             <tr style="height: 60px;" class="signature-row">
-                <td></td>
-                <td></td>
+                <td style="width: 16.6%; vertical-align: middle; padding: 1px;" id="cell-inspector-sign">
+                    <?php if (!empty($inspectorDisplayName)): ?>
+                        <div class="qc-stamp-container" id="inspector-stamp-box">
+                            <a href="<?= htmlspecialchars($inspectorQrUrl) ?>" target="_blank" class="qc-qr-wrap" title="Verifikasi Inspektor: <?= htmlspecialchars($inspectorQrUrl) ?>">
+                                <?= $inspectorQrSvg ?>
+                            </a>
+                            <div class="qc-digital-badge qc-badge-inspector">
+                                <div class="qc-badge-title">OQC INSPECTOR</div>
+                                <div class="qc-badge-sign-name"><?= htmlspecialchars($inspectorShortSign) ?></div>
+                                <div class="qc-badge-meta">VERIFIED DIGITAL</div>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <div id="inspector-empty-box" style="height: 56px;"></div>
+                    <?php endif; ?>
+                </td>
+                <td style="width: 16.7%; vertical-align: middle; padding: 1px;" id="cell-chief-sign">
+                    <?php if ($isApproved): ?>
+                        <div class="qc-stamp-container" id="chief-stamp-box">
+                            <a href="<?= htmlspecialchars($chiefQrUrl) ?>" target="_blank" class="qc-qr-wrap" title="Verifikasi Chief: <?= htmlspecialchars($chiefQrUrl) ?>">
+                                <?= $chiefQrSvg ?>
+                            </a>
+                            <div class="qc-digital-badge qc-badge-chief">
+                                <div class="qc-badge-title">OQC CHIEF ACC</div>
+                                <div class="qc-badge-sign-name"><?= htmlspecialchars($chiefShortSign) ?></div>
+                                <div class="qc-badge-meta">VERIFIED DIGITAL</div>
+                            </div>
+                        </div>
+                    <?php else: ?>
+                        <div id="chief-empty-box" style="height: 56px;"></div>
+                    <?php endif; ?>
+                </td>
                 <td></td>
                 <td></td>
                 <td></td>
@@ -483,7 +762,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             <!-- NAME ROW -->
             <tr style="font-size: 8px; text-align: left;" class="bg-gray">
                 <td>NAME : <span class="font-bold"><?= htmlspecialchars($session['inspector_name'] ?? $session['did_pic'] ?? '') ?></span></td>
-                <td>NAME :</td>
+                <td>NAME : <span class="font-bold" id="txt-chief-name"><?= $isApproved ? htmlspecialchars($chiefName) : '' ?></span></td>
                 <td>NAME :</td>
                 <td>NAME :</td>
                 <td>NAME :</td>
@@ -491,7 +770,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             <!-- DATE ROW -->
             <tr style="font-size: 8px; text-align: left;" class="bg-gray">
                 <td>DATE : <span class="font-bold"><?= date('d/m/Y', strtotime($session['started_at'])) ?></span></td>
-                <td>DATE : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/</td>
+                <td>DATE : <span class="font-bold" id="txt-chief-date"><?= $isApproved ? $chiefAppDate : '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/' ?></span></td>
                 <td>DATE : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/</td>
                 <td>DATE : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/</td>
                 <td>DATE : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/</td>
@@ -499,7 +778,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             <!-- TIME ROW -->
             <tr style="font-size: 8px; text-align: left;" class="bg-gray">
                 <td>TIME : <span class="font-bold"><?= date('H:i', strtotime($session['closed_at'] ?: $session['started_at'])) ?> WIB</span></td>
-                <td>TIME : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:</td>
+                <td>TIME : <span class="font-bold" id="txt-chief-time"><?= $isApproved ? $chiefAppTime : '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:' ?></span></td>
                 <td>TIME : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:</td>
                 <td>TIME : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:</td>
                 <td>TIME : &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:</td>
@@ -514,29 +793,183 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
 
     </div>
 
+    <!-- SweetAlert2 for Interactive Approval Modal -->
+    <script src="<?= base_url('assets/js/vendor/sweetalert2.all.min.js?v=' . time()) ?>"></script>
     <script src="<?= base_url('assets/js/vendor/html2pdf.bundle.min.js') ?>"></script>
     <script>
         var PDF_FILENAME = 'Rejection_Sheet_STQC-F-167_<?= htmlspecialchars($session['part_code']) ?>.pdf';
-
-        // ─────────────────────────────────────────────────────────────────
-        //  PENDEKATAN: Browser Native Print (bukan html2canvas)
-        //  html2canvas tidak support flexbox + table-layout:fixed dengan
-        //  benar, menyebabkan kolom kiri kepotong secara konsisten.
-        //
-        //  Solusi: inject @media print CSS dengan transform:scale() agar
-        //  konten mengisi penuh kertas A4. Browser render 100% akurat.
-        // ─────────────────────────────────────────────────────────────────
+        var CURRENT_SESSION_ID = <?= (int)$session['id'] ?>;
+        var CURRENT_SESSION_LOT_ID = <?= (int)$sessionLotId ?>;
+        var DEFAULT_CHIEF_NAME = '<?= addslashes($chiefName) ?>';
+        var CHIEF_USERS = <?= json_encode($chiefUsersList, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
         function setBtnLoading(btn, isLoading) {
             if (!btn) return;
             if (isLoading) {
                 btn.dataset.origText = btn.innerHTML;
-                btn.innerHTML = '⏳ Memproses...';
+                btn.innerHTML = 'Memproses...';
                 btn.disabled = true;
             } else {
                 btn.innerHTML = btn.dataset.origText || btn.innerHTML;
                 btn.disabled = false;
             }
+        }
+
+        /**
+         * Trigger Chief QC Approval via Modal (User Selection + Password Verification)
+         */
+        function triggerChiefApprove() {
+            var userOptionsHtml = '<option value="">-- Pilih Akun Chief QC --</option>';
+            if (CHIEF_USERS && CHIEF_USERS.length > 0) {
+                CHIEF_USERS.forEach(function(u) {
+                    var roleLabel = u.role ? (' (' + u.role.toUpperCase() + ')') : '';
+                    userOptionsHtml += '<option value="' + u.id + '">' + escapeHtml(u.name) + roleLabel + '</option>';
+                });
+            }
+
+            var capturedUserId = '';
+
+            Swal.fire({
+                title: 'Persetujuan (ACC) Chief QC',
+                html: '<div style="font-size: 13px; text-align: left; line-height: 1.5; color: #334155;">' +
+                      '<p style="margin-bottom: 12px;">Konfirmasi persetujuan lembar penolakan (Rejection Sheet) untuk Part <b style="color: #1d4ed8; font-family: monospace;"><?= htmlspecialchars($session['part_code']) ?></b> (Lot #<?= htmlspecialchars($session['lot_number']) ?>):</p>' +
+                      '<div style="margin-bottom: 10px;">' +
+                      '  <label style="font-size: 11px; font-weight: 700; color: #475569; display: block; margin-bottom: 4px;">Pilih Akun Chief QC:</label>' +
+                      '  <select id="swal-chief-user-id" style="width: 100%; box-sizing: border-box; font-size: 13px; font-weight: 600; padding: 8px 10px; border: 1.5px solid #cbd5e1; border-radius: 6px; background-color: #fff; outline: none;">' +
+                         userOptionsHtml +
+                      '  </select>' +
+                      '</div>' +
+                      '<p style="font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.4;">Pilih nama Chief QC yang bertugas untuk menerbitkan stempel resmi digital.</p>' +
+                      '</div>',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#16a34a',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Verifikasi & ACC',
+                cancelButtonText: 'Batal',
+                focusConfirm: false,
+                preConfirm: function() {
+                    var selectEl = document.getElementById('swal-chief-user-id');
+                    var userId = selectEl ? selectEl.value : '';
+
+                    if (!userId) {
+                        Swal.showValidationMessage('Silakan pilih akun Chief QC terlebih dahulu!');
+                        return false;
+                    }
+                    capturedUserId = userId;
+                    return { chief_user_id: userId };
+                }
+            }).then(function(result) {
+                if (!result || !result.isConfirmed) return;
+
+                var finalUserId = (result.value && result.value.chief_user_id) ? result.value.chief_user_id : capturedUserId;
+
+                if (!finalUserId) {
+                    Swal.fire({ icon: 'error', title: 'Data Kurang', text: 'Silakan pilih akun Chief QC terlebih dahulu!' });
+                    return;
+                }
+
+                Swal.fire({
+                    title: 'Menyimpan ACC...',
+                    allowOutsideClick: false,
+                    didOpen: function() { Swal.showLoading(); }
+                });
+
+                var payload = new FormData();
+                payload.append('session_id', CURRENT_SESSION_ID);
+                if (CURRENT_SESSION_LOT_ID > 0) {
+                    payload.append('session_lot_id', CURRENT_SESSION_LOT_ID);
+                }
+                payload.append('action', 'approve');
+                payload.append('chief_user_id', finalUserId);
+
+                fetch('<?= base_url("modules/inspection/api/chief_approve.php") ?>', {
+                    method: 'POST',
+                    body: payload
+                })
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (!data.success) {
+                        Swal.fire({ icon: 'error', title: 'Verifikasi Gagal', text: data.message || 'Terjadi kesalahan sistem' });
+                        return;
+                    }
+
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Disetujui Chief QC',
+                        text: 'ACC berhasil diverifikasi! Stempel digital & QR verifikasi telah diterbitkan.',
+                        timer: 1400,
+                        showConfirmButton: false
+                    }).then(function() {
+                        window.location.reload();
+                    });
+                })
+                .catch(function(err) {
+                    console.error(err);
+                    Swal.fire({ icon: 'error', title: 'Koneksi Error', text: 'Gagal menghubungi server' });
+                });
+            });
+        }
+
+        /**
+         * Rollback / Unapprove Chief QC
+         */
+        function triggerChiefUnapprove() {
+            Swal.fire({
+                title: 'Batalkan ACC Chief QC?',
+                text: 'Format cetak lembar penolakan akan dikembalikan ke tanda tangan basah manual (stempel & QR digital akan dihapus).',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#dc2626',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Ya, Batalkan ACC',
+                cancelButtonText: 'Batal'
+            }).then(function(res) {
+                if (!res.isConfirmed) return;
+
+                Swal.fire({
+                    title: 'Membatalkan...',
+                    allowOutsideClick: false,
+                    didOpen: function() { Swal.showLoading(); }
+                });
+
+                var payload = new FormData();
+                payload.append('session_id', CURRENT_SESSION_ID);
+                if (CURRENT_SESSION_LOT_ID > 0) {
+                    payload.append('session_lot_id', CURRENT_SESSION_LOT_ID);
+                }
+                payload.append('action', 'unapprove');
+
+                fetch('<?= base_url("modules/inspection/api/chief_approve.php") ?>', {
+                    method: 'POST',
+                    body: payload
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.success) {
+                        Swal.fire({ icon: 'error', title: 'Gagal', text: data.message });
+                        return;
+                    }
+
+                    Swal.fire({
+                        icon: 'info',
+                        title: 'ACC Dibatalkan',
+                        text: 'Format cetak kembali ke tanda tangan basah manual.',
+                        timer: 1400,
+                        showConfirmButton: false
+                    }).then(function() {
+                        window.location.reload();
+                    });
+                })
+                .catch(function() {
+                    Swal.fire({ icon: 'error', title: 'Koneksi Error', text: 'Gagal menghubungi server' });
+                });
+            });
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
         // Hitung skala yang dibutuhkan agar konten pas di A4 (Portrait)
@@ -546,7 +979,7 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             var contentW = el.scrollWidth  || el.offsetWidth;
             var contentH = el.scrollHeight || el.offsetHeight;
 
-            // A4 Portrait pada 96 dpi: 794px × 1123px  (210mm × 297mm)
+            // A4 Portrait pada 96 dpi: 794px x 1123px  (210mm x 297mm)
             var A4_W = 794, A4_H = 1123;
             var sx = (A4_W / contentW).toFixed(5);
             var sy = (A4_H / contentH).toFixed(5);
@@ -585,7 +1018,6 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
             var style = injectFullA4PrintCSS();
             setTimeout(function() {
                 window.print();
-                // Hapus style setelah dialog print ditutup
                 setTimeout(function() {
                     style.remove();
                     setBtnLoading(btn, false);
@@ -604,6 +1036,5 @@ $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($de
         });
         <?php endif; ?>
     </script>
-
 </body>
 </html>

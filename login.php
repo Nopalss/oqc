@@ -12,83 +12,74 @@ if (is_logged_in() && !isset($_GET['reauth'])) {
     redirect('index.php');
 }
 
+// ── CSRF Token ─────────────────────────────────────────────────────────────
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrfToken = $_SESSION['csrf_token'];
+
 $errorMsg = '';
-$prefillUser = 'admin';
 
 // Handle POST Login Submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = trim(sanitize($_POST['username'] ?? ''));
-    $password = trim($_POST['password'] ?? '');
 
-    if (empty($username) || empty($password)) {
-        $errorMsg = 'Username dan Password wajib diisi!';
+    // CSRF check
+    $submittedCsrf = $_POST['csrf_token'] ?? '';
+    if (!hash_equals($csrfToken, $submittedCsrf)) {
+        $errorMsg = 'Sesi tidak valid. Silakan muat ulang halaman dan coba lagi.';
     } else {
-        $pdo = getDB();
-        $userFound = null;
+        $username = trim(sanitize($_POST['username'] ?? ''));
+        $password = trim($_POST['password'] ?? '');
 
-        if ($pdo) {
-            try {
-                $stmt = $pdo->prepare("SELECT * FROM users WHERE (UPPER(username) = :uname1 OR UPPER(name) = :uname2) AND status = 'active' LIMIT 1");
-                $stmt->execute([':uname1' => strtoupper($username), ':uname2' => strtoupper($username)]);
-                $userFound = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (empty($username) || empty($password)) {
+            $errorMsg = 'Username dan Password wajib diisi!';
+        } else {
+            $pdo = getDB();
 
-                // If user found, verify password
-                if ($userFound) {
-                    $isValidPassword = password_verify($password, $userFound['password_hash']);
+            if (!$pdo) {
+                $errorMsg = 'Koneksi database gagal. Hubungi administrator sistem.';
+            } else {
+                try {
+                    $stmt = $pdo->prepare("SELECT * FROM users WHERE (UPPER(username) = :uname1 OR UPPER(name) = :uname2) AND status = 'active' LIMIT 1");
+                    $stmt->execute([':uname1' => strtoupper($username), ':uname2' => strtoupper($username)]);
+                    $userFound = $stmt->fetch(PDO::FETCH_ASSOC);
 
-                    // Fallback check for default password '12345'
-                    if (!$isValidPassword && $password === '12345') {
-                        $isValidPassword = true;
-                        // Auto-upgrade password hash in DB
-                        $newHash = password_hash('12345', PASSWORD_DEFAULT);
-                        $stmtUpd = $pdo->prepare("UPDATE users SET password_hash = :hash WHERE id = :uid");
-                        $stmtUpd->execute([':hash' => $newHash, ':uid' => $userFound['id']]);
-                    }
+                    if ($userFound && password_verify($password, $userFound['password_hash'])) {
+                        // ── Successful Login ───────────────────────────────────
+                        // Bersihkan sisa sesi login jika ada
+                        unset($_SESSION['login_attempts'], $_SESSION['login_locked_until']);
 
-                    if ($isValidPassword) {
+                        // Regenerate session ID to prevent session fixation
+                        session_regenerate_id(true);
+
+                        // Regenerate CSRF token
+                        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
                         $_SESSION['user_id']   = (int)$userFound['id'];
                         $_SESSION['user_name'] = $userFound['name'];
                         $_SESSION['username']  = $userFound['username'];
                         $_SESSION['user_role'] = $userFound['role'];
 
+                        // Load RBAC permissions into session
+                        load_user_permissions($pdo, $userFound['role']);
+
                         set_flash('success', 'Selamat datang kembali, ' . htmlspecialchars($userFound['name']) . '!');
                         redirect('index.php');
-                    } else {
-                        $errorMsg = 'Password yang Anda masukkan salah!';
-                    }
-                } else {
-                    // Fallback for admin mock fallback if DB empty
-                    if (strtolower($username) === 'admin' && $password === '12345') {
-                        $_SESSION['user_id']   = 1;
-                        $_SESSION['user_name'] = 'System Administrator';
-                        $_SESSION['username']  = 'admin';
-                        $_SESSION['user_role'] = 'admin';
 
-                        set_flash('success', 'Selamat datang kembali, System Administrator!');
-                        redirect('index.php');
                     } else {
-                        $errorMsg = 'Username tidak terdaftar atau akun tidak aktif!';
+                        // ── Failed Login ───────────────────────────────────────
+                        $errorMsg = 'Username atau password salah.';
                     }
+                } catch (PDOException $e) {
+                    $errorMsg = 'Gangguan server database. Hubungi administrator.';
+                    // Log internal: tidak expose pesan asli ke user
+                    error_log('[OQC Login] PDOException: ' . $e->getMessage());
                 }
-            } catch (PDOException $e) {
-                $errorMsg = 'Gangguan server database: ' . $e->getMessage();
-            }
-        } else {
-            // Offline fallback check
-            if (strtolower($username) === 'admin' && $password === '12345') {
-                $_SESSION['user_id']   = 1;
-                $_SESSION['user_name'] = 'System Administrator';
-                $_SESSION['username']  = 'admin';
-                $_SESSION['user_role'] = 'admin';
-
-                set_flash('success', 'Selamat datang kembali, System Administrator!');
-                redirect('index.php');
-            } else {
-                $errorMsg = 'Username atau Password tidak cocok!';
             }
         }
     }
 }
+
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -227,6 +218,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         <!-- Form -->
         <form action="<?= base_url('login.php') ?>" method="POST" class="space-y-4 text-xs">
+            <!-- CSRF Token -->
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken) ?>">
             
             <!-- Username Field -->
             <div>
@@ -236,7 +229,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"></path>
                         <circle cx="12" cy="7" r="4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></circle>
                     </svg>
-                    <input type="text" id="username" name="username" value="<?= htmlspecialchars($_POST['username'] ?? $prefillUser) ?>" placeholder="Masukkan username Anda..." class="form-input-login" style="padding-left: 40px;" required autofocus autocomplete="off">
+                    <input type="text" id="username" name="username" value="<?= htmlspecialchars($_POST['username'] ?? '') ?>" placeholder="Masukkan username Anda..." class="form-input-login" style="padding-left: 40px;" required autofocus autocomplete="username">
                 </div>
             </div>
 
@@ -285,12 +278,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <script>
-        function fillAdminCredentials() {
-            document.getElementById('username').value = 'admin';
-            document.getElementById('password').value = '12345';
-            document.getElementById('password').focus();
-        }
-
         function togglePasswordVisibility() {
             var passInput = document.getElementById('password');
             var eyeIcon = document.getElementById('eye-icon');

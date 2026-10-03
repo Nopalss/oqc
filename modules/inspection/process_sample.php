@@ -53,12 +53,27 @@ try {
         $startNum = (int)$session['samples_checked'] + 1;
 
         if ($startNum <= $maxSampleSize) {
-            $stmtInsSample = $pdo->prepare("INSERT INTO inspection_samples (inspection_session_id, sample_number, result, checked_at) VALUES (:sid, :snum, 'OK', NOW())");
+            $batchValues = [];
+            $batchParams = [];
+            $batchSize = 250;
+            $cnt = 0;
             for ($i = $startNum; $i <= $maxSampleSize; $i++) {
-                $stmtInsSample->execute([
-                    ':sid'  => $sessionId,
-                    ':snum' => $i
-                ]);
+                $batchValues[] = "(:sid_{$cnt}, :snum_{$cnt}, 'OK', NOW())";
+                $batchParams[":sid_{$cnt}"] = $sessionId;
+                $batchParams[":snum_{$cnt}"] = $i;
+                $cnt++;
+                if (count($batchValues) >= $batchSize) {
+                    $sqlBatch = "INSERT INTO inspection_samples (inspection_session_id, sample_number, result, checked_at) VALUES " . implode(',', $batchValues);
+                    $stmtBatch = $pdo->prepare($sqlBatch);
+                    $stmtBatch->execute($batchParams);
+                    $batchValues = [];
+                    $batchParams = [];
+                }
+            }
+            if (!empty($batchValues)) {
+                $sqlBatch = "INSERT INTO inspection_samples (inspection_session_id, sample_number, result, checked_at) VALUES " . implode(',', $batchValues);
+                $stmtBatch = $pdo->prepare($sqlBatch);
+                $stmtBatch->execute($batchParams);
             }
         }
 
@@ -81,6 +96,16 @@ try {
             ':sid'      => $sessionId
         ]);
 
+        // Auto-sync daily aggregate summary for dashboard
+        if ($newStatus !== 'in_progress') {
+            syncDailySummaryForSession($pdo, $sessionId);
+        }
+
+        // Auto-sync Kanban lifecycle status
+        if (!empty($session['kanban_item_id'])) {
+            syncKanbanStatus($pdo, $session['kanban_item_id']);
+        }
+
         // Fetch updated active (non-cancelled) NG records
         $stmtNgList = $pdo->prepare("SELECT n.*, d.name as defect_name, s.sample_number,
                                             COALESCE(n.ref_number, sl.ref_number) as ref_number,
@@ -89,7 +114,7 @@ try {
                                       JOIN inspection_samples s ON s.id = n.inspection_sample_id 
                                       JOIN defect_types d ON d.id = n.defect_type_id 
                                       LEFT JOIN inspection_session_lots sl ON sl.id = n.session_lot_id
-                                      WHERE s.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                                      WHERE n.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
                                       ORDER BY n.id DESC");
         $stmtNgList->execute([':sid' => $sessionId]);
         $ngRecords = $stmtNgList->fetchAll(PDO::FETCH_ASSOC);
@@ -167,10 +192,15 @@ try {
                 }
 
                 if ($defectTypeId > 0) {
-                    $stmtInsNg = $pdo->prepare("INSERT INTO inspection_ng_records (inspection_sample_id, session_lot_id, ref_number, lot_number, defect_type_id, qty_ng, remark, created_at) VALUES (:spid, :slid, :refn, :lotn, :dtid, :qty, :rem, NOW())");
+                    $partIdVal = !empty($session['part_id']) ? (int)$session['part_id'] : null;
+                    $stmtInsNg = $pdo->prepare("INSERT INTO inspection_ng_records 
+                        (inspection_sample_id, inspection_session_id, session_lot_id, part_id, ref_number, lot_number, defect_type_id, qty_ng, remark, created_at) 
+                        VALUES (:spid, :sid, :slid, :pid, :refn, :lotn, :dtid, :qty, :rem, NOW())");
                     $stmtInsNg->execute([
                         ':spid' => $sampleId,
+                        ':sid'  => $sessionId,
                         ':slid' => $sessionLotId,
+                        ':pid'  => $partIdVal,
                         ':refn' => $refNumber,
                         ':lotn' => $lotNumber,
                         ':dtid' => $defectTypeId,
@@ -195,7 +225,7 @@ try {
         $stmtInsPrint->execute([':sid' => $sessionId]);
 
         // Auto-tag: tandai semua lot yang memiliki NG records sebagai 'ng_found'
-        // Ini memungkinkan frontend menampilkan Panel Tindakan Lot NG secara langsung
+        // Menggunakan index idx_ngr_session_part tanpa join inspection_samples
         try {
             $pdo->prepare("
                 UPDATE inspection_session_lots isl
@@ -206,8 +236,7 @@ try {
                   AND EXISTS (
                       SELECT 1
                       FROM inspection_ng_records n
-                      JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
-                      WHERE sp.inspection_session_id = :sid2
+                      WHERE n.inspection_session_id = :sid2
                         AND n.session_lot_id = isl.id
                         AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
                   )
@@ -218,96 +247,6 @@ try {
     } elseif ($currentSampleNo >= $maxSampleSize) {
         $newStatus = 'passed';
         $closedAt = date('Y-m-d H:i:s');
-
-        // Check if session has excess_qty > 0 and create auto Safety Stock overflow
-        try {
-            $stmtSessEx = $pdo->prepare("SELECT s.excess_qty, s.kanban_item_id, s.part_id, did.part_code, did.part_name, b.id as batch_id
-                                         FROM inspection_sessions s
-                                         JOIN daily_inspection_data did ON did.id = s.did_id
-                                         LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
-                                         LEFT JOIN kanban_batches b ON b.id = k.batch_id
-                                         WHERE s.id = :sid LIMIT 1");
-            $stmtSessEx->execute([':sid' => $sessionId]);
-            $sessEx = $stmtSessEx->fetch(PDO::FETCH_ASSOC);
-
-            if ($sessEx && (int)$sessEx['excess_qty'] > 0) {
-                $excessQty = (int)$sessEx['excess_qty'];
-                
-                // Fetch last scanned lot details for this session (lot_number, ref_number, scanned_qr_raw)
-                $stmtLastLot = $pdo->prepare("SELECT lot_number, ref_number, scanned_qr_raw FROM inspection_session_lots WHERE inspection_session_id = :sid ORDER BY id DESC LIMIT 1");
-                $stmtLastLot->execute([':sid' => $sessionId]);
-                $lastLotRow = $stmtLastLot->fetch(PDO::FETCH_ASSOC);
-
-                $lastLotNumber = $lastLotRow['lot_number'] ?? 'LOT-OVERFLOW';
-                $lastRefNumber = $lastLotRow['ref_number'] ?? null;
-                $lastQrRaw     = $lastLotRow['scanned_qr_raw'] ?? null;
-
-                // Check if Safety Stock overflow item was already created for this session to prevent duplicate processing
-                $checkRef = "AUTO-SS-SESS-" . $sessionId;
-                $stmtChkSS = $pdo->prepare("SELECT id FROM kanban_items WHERE remark LIKE :chk LIMIT 1");
-                $stmtChkSS->execute([':chk' => '%' . $checkRef . '%']);
-                $existingSSItem = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
-
-                if (!$existingSSItem) {
-                    $batchId = $sessEx['batch_id'] ?: 1;
-                    $pCode   = $sessEx['part_code'];
-                    $pName   = $sessEx['part_name'];
-                    $partId  = $sessEx['part_id'] ?: null;
-
-                    // 1. Create kanban_items entry for Safety Stock
-                    $stmtInsSS = $pdo->prepare("INSERT INTO kanban_items 
-                        (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, check_type, remark, created_at) 
-                        VALUES (:bid, 'safety_stock', :kno, :code, :desc, 'INTERNAL SAFETY STOCK', NOW(), :qty, 'WH-SS-OVERFLOW', 'SAFETY STOCK WAREHOUSE', 'Safety Stock', :rem, NOW())");
-                    $stmtInsSS->execute([
-                        ':bid'  => $batchId,
-                        ':kno'  => 'SS-' . $lastLotNumber,
-                        ':code' => $pCode,
-                        ':desc' => $pName,
-                        ':qty'  => $excessQty,
-                        ':rem'  => "Auto Safety Stock Sisa Excess Kanban (Sisa Qty: {$excessQty} pcs, Lot: {$lastLotNumber}" . ($lastRefNumber ? ", Ref No: {$lastRefNumber}" : "") . ") [Ref: {$checkRef}]"
-                    ]);
-                    $ssKanbanItemId = (int)$pdo->lastInsertId();
-
-                    // 2. Ensure DID record exists for Safety Stock
-                    $stmtChkDid = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE UPPER(part_code) = UPPER(:pcode) AND UPPER(lot_number) = UPPER(:lot) ORDER BY id DESC LIMIT 1");
-                    $stmtChkDid->execute([':pcode' => $pCode, ':lot' => $lastLotNumber]);
-                    $ssDidId = (int)$stmtChkDid->fetchColumn();
-
-                    if ($ssDidId === 0) {
-                        $stmtInsDid = $pdo->prepare("INSERT INTO daily_inspection_data (part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, created_at) VALUES (:pcode, :pname, :lot, '1', CURDATE(), 'OK', 'SAFETY_STOCK_OVERFLOW', NOW())");
-                        $stmtInsDid->execute([':pcode' => $pCode, ':pname' => $pName, ':lot' => $lastLotNumber]);
-                        $ssDidId = (int)$pdo->lastInsertId();
-                    }
-
-                    // 3. Auto-create PASSED inspection_sessions for Safety Stock
-                    $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
-                        (inspection_type, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
-                        VALUES ('safety_stock', :did, :kanban, :part, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
-                    $stmtInsSSSession->execute([
-                        ':did'    => $ssDidId,
-                        ':kanban' => $ssKanbanItemId,
-                        ':part'   => $partId,
-                        ':tqty'   => $excessQty
-                    ]);
-                    $ssSessionId = (int)$pdo->lastInsertId();
-
-                    // 4. Create inspection_session_lots entry for Safety Stock session
-                    $stmtInsSSLot = $pdo->prepare("INSERT INTO inspection_session_lots 
-                        (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, created_at) 
-                        VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', NOW())");
-                    $stmtInsSSLot->execute([
-                        ':sid' => $ssSessionId,
-                        ':ref' => $lastRefNumber,
-                        ':lot' => $lastLotNumber,
-                        ':qty' => $excessQty,
-                        ':raw' => $lastQrRaw,
-                        ':rem' => "Sisa Kelebihan Kanban dari Sesi #" . $sessionId
-                    ]);
-                }
-            }
-        } catch (Exception $eExSS) {
-            error_log("Error creating Safety Stock overflow: " . $eExSS->getMessage());
-        }
     }
 
     // 5. Update inspection_sessions
@@ -325,6 +264,21 @@ try {
         ':sid'      => $sessionId
     ]);
 
+    // Auto-create Safety Stock if session passed with excess_qty > 0
+    if ($newStatus === 'passed' && function_exists('createAutoSafetyStockForSession')) {
+        createAutoSafetyStockForSession($pdo, $sessionId);
+    }
+
+    // Auto-sync daily aggregate summary for dashboard
+    if ($newStatus !== 'in_progress') {
+        syncDailySummaryForSession($pdo, $sessionId);
+    }
+
+    // Auto-sync Kanban lifecycle status
+    if (!empty($session['kanban_item_id'])) {
+        syncKanbanStatus($pdo, $session['kanban_item_id']);
+    }
+
     // Fetch updated active (non-cancelled) NG records list for real-time history widget
     $stmtNgList = $pdo->prepare("SELECT n.*, d.name as defect_name, s.sample_number,
                                         COALESCE(n.ref_number, sl.ref_number) as ref_number,
@@ -333,7 +287,7 @@ try {
                                   JOIN inspection_samples s ON s.id = n.inspection_sample_id 
                                   JOIN defect_types d ON d.id = n.defect_type_id 
                                   LEFT JOIN inspection_session_lots sl ON sl.id = n.session_lot_id
-                                  WHERE s.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                                  WHERE n.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
                                   ORDER BY n.id DESC");
     $stmtNgList->execute([':sid' => $sessionId]);
     $ngRecords = $stmtNgList->fetchAll(PDO::FETCH_ASSOC);

@@ -31,6 +31,11 @@ if ($batch_id && $pdo) {
     }
 }
 
+$returnDate = isset($_GET['return_date']) ? trim($_GET['return_date']) : '';
+$backUrl = (!empty($returnDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $returnDate))
+    ? base_url('modules/kanban/daily_detail.php?date=' . urlencode($returnDate))
+    : base_url('modules/kanban/detail_batch.php?batch_id=' . ($batch['id'] ?? 0));
+
 if (!$batch) {
     set_flash('error', 'Dokumen Batch Kanban tidak ditemukan!');
     redirect('modules/kanban/index.php');
@@ -56,7 +61,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div class="card p-3 md:p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <div style="display: flex; align-items: center; justify-content: space-between;">
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <a href="<?= base_url('modules/kanban/detail_batch.php?batch_id=' . $batch['id']) ?>" class="btn-secondary py-1.5 px-3 text-xs">
+                    <a href="<?= $backUrl ?>" class="btn-secondary py-1.5 px-3 text-xs">
                         &larr; Batal & Kembali
                     </a>
                     <h2 class="text-sm font-bold text-slate-800">
@@ -70,6 +75,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs space-y-4 max-w-full overflow-hidden">
             <form action="<?= base_url('modules/kanban/update_batch.php') ?>" method="POST" class="space-y-4 max-w-full overflow-hidden">
                 <input type="hidden" name="batch_id" value="<?= $batch['id'] ?>">
+                <input type="hidden" name="return_date" value="<?= htmlspecialchars($returnDate) ?>">
 
                 <!-- Shared Metadata Fields Header -->
                 <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
@@ -105,10 +111,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <th class="px-3 py-2.5" style="min-width: 190px;">Item Code</th>
                                 <th class="px-3 py-2.5" style="min-width: 220px;">Item Description</th>
                                 <th class="px-3 py-2.5" style="min-width: 240px;">Customer / Tujuan PT</th>
-                                <th class="px-3 py-2.5" style="min-width: 150px;">Req. Date</th>
-                                <th class="px-3 py-2.5" style="min-width: 150px;">ETA</th>
+                                <th class="px-3 py-2.5" style="min-width: 160px;">Req. Date</th>
+                                <th class="px-3 py-2.5" style="min-width: 160px;">ETA</th>
                                 <th class="px-3 py-2.5" style="min-width: 100px;">Qty</th>
                                 <th class="px-3 py-2.5" style="min-width: 120px;">Str. Loc</th>
+                                <th class="px-3 py-2.5" style="min-width: 120px;">Supply Area</th>
                                 <th class="px-3 py-2.5" style="min-width: 110px;">Status Cek</th>
                                 <th class="px-3 py-2.5" style="min-width: 230px;">Remark</th>
                                 <th class="px-3 py-2.5 text-center" style="width: 60px; min-width: 60px;">Hapus</th>
@@ -149,20 +156,23 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         </select>
                                         <input type="text" name="rows[<?= $idx + 1 ?>][customer_custom]" id="custom-cust-<?= $idx + 1 ?>" value="<?= (!$custMatched) ? htmlspecialchars($curCust) : '' ?>" placeholder="Nama PT Customer Baru" class="form-input py-1 text-xs font-semibold mt-1 <?= (!$custMatched && !empty($curCust)) ? '' : 'hidden' ?>">
                                     </td>
-                                    <td class="px-3 py-2.5" style="min-width: 150px;">
-                                        <input type="date" name="rows[<?= $idx + 1 ?>][req_date]" value="<?= date('Y-m-d', strtotime($item['req_date'] ?? date('Y-m-d'))) ?>" class="form-input py-1 text-xs font-semibold" required>
+                                    <td class="px-3 py-2.5" style="min-width: 160px;">
+                                        <input type="datetime-local" name="rows[<?= $idx + 1 ?>][req_date]" value="<?= !empty($item['req_date']) ? date('Y-m-d\TH:i', strtotime($item['req_date'])) : date('Y-m-d\TH:i') ?>" class="form-input py-1 text-xs font-semibold" required>
                                     </td>
-                                    <td class="px-3 py-2.5" style="min-width: 150px;">
-                                        <input type="date" name="rows[<?= $idx + 1 ?>][eta]" value="<?= date('Y-m-d', strtotime($item['eta'] ?? $item['req_date'] ?? date('Y-m-d'))) ?>" class="form-input py-1 text-xs font-semibold" required>
+                                    <td class="px-3 py-2.5" style="min-width: 160px;">
+                                        <input type="datetime-local" name="rows[<?= $idx + 1 ?>][eta]" value="<?= !empty($item['eta']) ? date('Y-m-d\TH:i', strtotime($item['eta'])) : (!empty($item['req_date']) ? date('Y-m-d\TH:i', strtotime($item['req_date'])) : date('Y-m-d\TH:i')) ?>" class="form-input py-1 text-xs font-semibold" required>
                                     </td>
                                     <td class="px-3 py-2.5" style="min-width: 100px;">
                                         <input type="number" name="rows[<?= $idx + 1 ?>][qty]" value="<?= htmlspecialchars($item['qty']) ?>" min="1" class="form-input py-1 text-xs font-bold text-center" required>
                                     </td>
                                     <td class="px-3 py-2.5" style="min-width: 120px;">
-                                        <input type="text" name="rows[<?= $idx + 1 ?>][str_loc]" value="<?= htmlspecialchars($item['str_loc'] ?? '') ?>" class="form-input py-1 text-xs font-mono">
+                                        <input type="text" name="rows[<?= $idx + 1 ?>][str_loc]" value="<?= htmlspecialchars($item['str_loc'] ?? '') ?>" placeholder="Str. Loc" class="form-input py-1 text-xs font-mono">
+                                    </td>
+                                    <td class="px-3 py-2.5" style="min-width: 120px;">
+                                        <input type="text" name="rows[<?= $idx + 1 ?>][supply_area]" value="<?= htmlspecialchars($item['supply_area'] ?? '') ?>" placeholder="Supply Area" class="form-input py-1 text-xs font-mono">
                                     </td>
                                     <td class="px-3 py-2.5" style="min-width: 110px;">
-                                        <input type="text" name="rows[<?= $idx + 1 ?>][check_type]" value="<?= htmlspecialchars($item['check_type'] ?? '') ?>"  class="form-input py-1 text-xs font-bold text-center">
+                                        <input type="text" name="rows[<?= $idx + 1 ?>][check_type]" value="<?= htmlspecialchars($item['check_type'] ?? '') ?>" placeholder="100% / -" class="form-input py-1 text-xs font-bold text-center">
                                     </td>
                                     <td class="px-3 py-2.5" style="min-width: 230px;">
                                         <textarea name="rows[<?= $idx + 1 ?>][remark]" rows="2" placeholder="Catatan" class="form-input py-1 text-xs resize-y" style="min-height: 52px;"><?= htmlspecialchars($item['remark'] ?? '') ?></textarea>
@@ -200,7 +210,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
 
                 <div class="pt-3 border-t border-slate-100 flex justify-end space-x-2">
-                    <a href="<?= base_url('modules/kanban/detail_batch.php?batch_id=' . $batch['id']) ?>" class="btn-secondary py-1.5 px-4 text-xs">Batal</a>
+                    <a href="<?= $backUrl ?>" class="btn-secondary py-1.5 px-4 text-xs">Batal</a>
                     <button type="submit" class="btn-primary py-1.5 px-4 text-xs font-bold">
                         Simpan Perubahan Sesi Batch
                     </button>
@@ -242,45 +252,50 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         }
         custOptions += '<option value="custom">Input Custom PT</option>';
 
-        var todayDate = new Date().toISOString().split('T')[0];
+        var todayDate = new Date();
+        todayDate.setMinutes(todayDate.getMinutes() - todayDate.getTimezoneOffset());
+        var todayDateTime = todayDate.toISOString().slice(0, 16);
 
         tr.innerHTML = `
             <input type="hidden" name="rows[${rowIndex}][item_id]" value="new">
             <td class="px-3 py-2.5 text-center font-bold text-slate-400 row-number">${tbody.children.length + 1}</td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 170px;">
                 <input type="text" name="rows[${rowIndex}][kanban_no]" placeholder="0004573892" class="form-input py-1 text-xs font-mono font-bold" required>
             </td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 190px;">
                 <input type="text" name="rows[${rowIndex}][item_code]" list="master-parts-list" oninput="onItemCodeInput(this, ${rowIndex})" placeholder="Ketik / Cari Item Code..." class="form-input py-1 text-xs font-mono font-bold" required autocomplete="off">
             </td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 220px;">
                 <input type="text" name="rows[${rowIndex}][item_description]" id="item-desc-${rowIndex}" placeholder="Item Description" class="form-input py-1 text-xs" required>
             </td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 240px;">
                 <select name="rows[${rowIndex}][customer_select]" id="cust-select-${rowIndex}" onchange="onCustomerSelectChange(this, ${rowIndex})" class="form-input py-1 text-xs font-semibold" required>
                     ${custOptions}
                 </select>
                 <input type="text" name="rows[${rowIndex}][customer_custom]" id="custom-cust-${rowIndex}" placeholder="Nama PT Customer Baru" class="form-input py-1 text-xs font-semibold mt-1 hidden">
             </td>
-            <td class="px-3 py-2.5">
-                <input type="date" name="rows[${rowIndex}][req_date]" value="${todayDate}" class="form-input py-1 text-xs font-semibold" required>
+            <td class="px-3 py-2.5" style="min-width: 160px;">
+                <input type="datetime-local" name="rows[${rowIndex}][req_date]" value="${todayDateTime}" class="form-input py-1 text-xs font-semibold" required>
             </td>
-            <td class="px-3 py-2.5">
-                <input type="date" name="rows[${rowIndex}][eta]" value="${todayDate}" class="form-input py-1 text-xs font-semibold" required>
+            <td class="px-3 py-2.5" style="min-width: 160px;">
+                <input type="datetime-local" name="rows[${rowIndex}][eta]" value="${todayDateTime}" class="form-input py-1 text-xs font-semibold" required>
             </td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 100px;">
                 <input type="number" name="rows[${rowIndex}][qty]" value="500" min="1" placeholder="Qty" class="form-input py-1 text-xs font-bold text-center" required>
             </td>
-            <td class="px-3 py-2.5">
-                <input type="text" name="rows[${rowIndex}][str_loc]" value="WH-A01" placeholder="WH-A01" class="form-input py-1 text-xs font-mono">
+            <td class="px-3 py-2.5" style="min-width: 120px;">
+                <input type="text" name="rows[${rowIndex}][str_loc]" value="" placeholder="Str. Loc" class="form-input py-1 text-xs font-mono">
             </td>
-            <td class="px-3 py-2.5">
-                <input type="text" name="rows[${rowIndex}][check_type]"  class="form-input py-1 text-xs font-bold text-center">
+            <td class="px-3 py-2.5" style="min-width: 120px;">
+                <input type="text" name="rows[${rowIndex}][supply_area]" value="" placeholder="Supply Area" class="form-input py-1 text-xs font-mono">
             </td>
-            <td class="px-3 py-2.5">
+            <td class="px-3 py-2.5" style="min-width: 110px;">
+                <input type="text" name="rows[${rowIndex}][check_type]" placeholder="100% / -" class="form-input py-1 text-xs font-bold text-center">
+            </td>
+            <td class="px-3 py-2.5" style="min-width: 230px;">
                 <textarea name="rows[${rowIndex}][remark]" rows="2" placeholder="Catatan" class="form-input py-1 text-xs resize-y"></textarea>
             </td>
-            <td class="px-3 py-2.5 text-center">
+            <td class="px-3 py-2.5 text-center" style="width: 60px; min-width: 60px;">
                 <button type="button" onclick="removeKanbanRow(${rowIndex})" class="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded" title="Hapus Baris">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

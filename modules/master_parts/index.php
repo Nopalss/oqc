@@ -6,6 +6,8 @@ $pageSubtitle = "Kelola data referensi Part Code dan Part Name yang digunakan pa
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_parts');
+
 $pdo = getDB();
 $parts = [];
 $search = sanitize($_GET['search'] ?? '');
@@ -133,9 +135,15 @@ if ($pdo) {
                     <?php endif; ?>
                 </form>
 
-                <!-- Create Button (Clean Icon + Text) -->
-                <div>
-                    <a href="<?= base_url('modules/master_parts/create.php') ?>" class="btn-primary py-1 px-3 text-xs">
+                <!-- Action Buttons: Import Excel/CSV & Create Part -->
+                <div class="flex items-center space-x-2">
+                    <a href="<?= base_url('modules/master_parts/import.php') ?>" class="btn-secondary py-1 px-3 text-xs flex items-center font-bold">
+                        <svg class="w-3.5 h-3.5 mr-1 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                        </svg>
+                        Import Excel / CSV
+                    </a>
+                    <a href="<?= base_url('modules/master_parts/create.php') ?>" class="btn-primary py-1 px-3 text-xs flex items-center">
                         <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                         </svg>

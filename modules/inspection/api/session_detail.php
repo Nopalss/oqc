@@ -8,6 +8,7 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
+require_once __DIR__ . '/../../../config/summary_helper.php';
 session_write_close();
 
 $pdo = getDB();
@@ -26,12 +27,15 @@ try {
     // Main session data
     $stmt = $pdo->prepare("
         SELECT s.*,
+               COALESCE(s.line_name, l.name, 'Line 1') as line_name,
                did.part_code, did.part_name, did.lot_number, did.cavity, did.pic as did_pic,
                k.kanban_no, k.item_code as kanban_item_code, k.item_description as kanban_item_desc, k.customer, k.req_date as kanban_req_date, k.eta as kanban_eta, k.str_loc as kanban_str_loc, k.supply_area as kanban_supply_area, k.check_type as kanban_check_type, COALESCE(NULLIF(k.remark, ''), did.remark) as kanban_remark, k.qty as kanban_qty,
                b.document_number as doc_no, b.vendor as kanban_vendor, b.plan_type as batch_plan_type,
-               p.id as part_id, p.aql_level as part_aql_level, COALESCE(m.name, p.model) as part_model, d.drawing_2d_path, d.drawing_3d_path
+               p.id as part_id, p.aql_level as part_aql_level, COALESCE(m.name, p.model) as part_model, d.drawing_2d_path, d.drawing_3d_path,
+               u_chief.name as chief_name
         FROM inspection_sessions s
         JOIN daily_inspection_data did ON did.id = s.did_id
+        LEFT JOIN `lines` l ON l.id = s.line_id
         LEFT JOIN kanban_items k ON k.id = COALESCE(
             s.kanban_item_id,
             (SELECT ki.id FROM kanban_items ki WHERE UPPER(ki.item_code) = UPPER(did.part_code) ORDER BY ki.id DESC LIMIT 1)
@@ -43,6 +47,7 @@ try {
         )
         LEFT JOIN master_models m ON m.id = p.model_id
         LEFT JOIN master_drawings d ON d.part_id = p.id
+        LEFT JOIN users u_chief ON u_chief.id = s.chief_approved_by
         WHERE s.id = :id
     ");
     $stmt->execute([':id' => $sessionId]);
@@ -60,7 +65,7 @@ try {
     if ($ssQty > 0 && ($session['inspection_type'] ?? 'kanban') === 'kanban') {
         $qty = ($physQty > 0) ? $physQty : 1;
     } else {
-        $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 500));
+        $qty = clean_qty($session['total_scanned_qty'] ?: ($session['kanban_qty'] ?? 0));
     }
 
     $partAqlLvl = !empty($session['part_aql_level']) ? $session['part_aql_level'] : 'G-II';
@@ -82,18 +87,31 @@ try {
 
     // Active (Non-cancelled) NG Records
     $stmtNg = $pdo->prepare("
-        SELECT n.*, dt.name as defect_name, sp.sample_number,
+        SELECT n.*, dt.name as defect_name, dt.code as defect_code, sp.sample_number,
                COALESCE(n.ref_number, sl.ref_number) as ref_number,
                COALESCE(n.lot_number, sl.lot_number) as lot_number
         FROM inspection_ng_records n
-        JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+        LEFT JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
         JOIN defect_types dt ON dt.id = n.defect_type_id
         LEFT JOIN inspection_session_lots sl ON sl.id = n.session_lot_id
-        WHERE sp.inspection_session_id = :sid AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
-        ORDER BY n.id DESC
+        WHERE (n.inspection_session_id = :sid OR sp.inspection_session_id = :sid2) 
+          AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+        ORDER BY n.session_lot_id ASC, COALESCE(n.unit_number, 1) ASC, n.id ASC
     ");
-    $stmtNg->execute([':sid' => $sessionId]);
+    $stmtNg->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
     $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
+
+    // Group NG records per session_lot_id
+    $ngRecordsByLot = [];
+    foreach ($ngRecords as $nr) {
+        $slotId = (int)($nr['session_lot_id'] ?? 0);
+        if ($slotId > 0) {
+            if (!isset($ngRecordsByLot[$slotId])) {
+                $ngRecordsByLot[$slotId] = [];
+            }
+            $ngRecordsByLot[$slotId][] = $nr;
+        }
+    }
 
     // Cancelled NG Records Audit Log
     $stmtCancNg = $pdo->prepare("
@@ -101,13 +119,14 @@ try {
                COALESCE(n.ref_number, sl.ref_number) as ref_number,
                COALESCE(n.lot_number, sl.lot_number) as lot_number
         FROM inspection_ng_records n
-        JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+        LEFT JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
         JOIN defect_types dt ON dt.id = n.defect_type_id
         LEFT JOIN inspection_session_lots sl ON sl.id = n.session_lot_id
-        WHERE sp.inspection_session_id = :sid AND n.is_cancelled = 1
+        WHERE (n.inspection_session_id = :sid OR sp.inspection_session_id = :sid2) 
+          AND n.is_cancelled = 1
         ORDER BY n.cancelled_at DESC, n.id DESC
     ");
-    $stmtCancNg->execute([':sid' => $sessionId]);
+    $stmtCancNg->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
     $cancelledNgRecords = $stmtCancNg->fetchAll(PDO::FETCH_ASSOC);
 
     // Previous sessions (same part code)
@@ -127,12 +146,59 @@ try {
     }
 
     // Defect types
-    $defectTypes = $pdo->query("SELECT id, name FROM defect_types ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+    $defectTypes = $pdo->query("SELECT id, code, name FROM defect_types ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
 
     // Scanned Session Lots / Labels
-    $stmtLots = $pdo->prepare("SELECT * FROM inspection_session_lots WHERE inspection_session_id = :sid ORDER BY id ASC");
+    $stmtLots = $pdo->prepare("
+        SELECT isl.*, u_chief.name as chief_name
+        FROM inspection_session_lots isl
+        LEFT JOIN users u_chief ON u_chief.id = isl.chief_approved_by
+        WHERE isl.inspection_session_id = :sid 
+        ORDER BY isl.id ASC
+    ");
     $stmtLots->execute([':sid' => $sessionId]);
     $sessionLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
+
+    // ── AUTO-CLOSE SAFETY NET ────────────────────────────────────────────────
+    // Jika sesi masih in_progress tapi SEMUA lotnya sudah 'skipped' atau 'passed'
+    // (tidak ada yang in_progress), auto-tutup sebagai passed.
+    // Ini menangani sesi yang terjebak karena bug create.php auto-pass (sudah diperbaiki).
+    if ($session['status'] === 'in_progress' && !empty($sessionLots)) {
+        $hasInProgressLot = false;
+        $hasRejectedLot   = false;
+        foreach ($sessionLots as $slChk) {
+            $lr = $slChk['lot_result'] ?? 'in_progress';
+            $ls = $slChk['lot_status'] ?? 'ok';
+            if ($lr === 'in_progress' && $ls !== 'replaced') {
+                $hasInProgressLot = true;
+                break;
+            }
+            if ($lr === 'rejected') {
+                $hasRejectedLot = true;
+            }
+        }
+        if (!$hasInProgressLot) {
+            $autoCloseStatus = $hasRejectedLot ? 'rejected' : 'passed';
+            try {
+                $pdo->prepare("
+                    UPDATE inspection_sessions
+                    SET status = :st, samples_checked = sample_size,
+                        closed_at = COALESCE(closed_at, NOW())
+                    WHERE id = :sid AND status = 'in_progress'
+                ")->execute([':st' => $autoCloseStatus, ':sid' => $sessionId]);
+                $session['status'] = $autoCloseStatus;
+
+                // Sync Kanban jika ada
+                if (!empty($session['kanban_item_id']) && function_exists('syncKanbanStatus')) {
+                    syncKanbanStatus($pdo, (int)$session['kanban_item_id']);
+                }
+                if (function_exists('syncDailySummaryForSession')) {
+                    syncDailySummaryForSession($pdo, $sessionId);
+                }
+            } catch (Exception $eAutoClose) { /* Kolom mungkin tidak ada di DB lama */ }
+        }
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     // Group and summarize scanned session lots per lot_number
     $lotSummary = [];
@@ -168,10 +234,11 @@ try {
                   WHERE sp.inspection_session_id = :sid2
                     AND n.session_lot_id = isl.id
                     AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                    AND (n.is_sorted IS NULL OR n.is_sorted = 0)
               )
         ")->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
 
-        // 2. Auto-revert: kembalikan ke 'ok' jika statusnya ng_found tapi SEMUA active NG records telah dibatalkan/dihapus
+        // 2. Auto-revert: kembalikan ke 'ok' jika statusnya ng_found tapi SEMUA active NG records telah dibatalkan/dihapus/disortir
         $pdo->prepare("
             UPDATE inspection_session_lots isl
             SET isl.lot_status = 'ok'
@@ -184,6 +251,7 @@ try {
                   WHERE sp.inspection_session_id = :sid2
                     AND n.session_lot_id = isl.id
                     AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                    AND (n.is_sorted IS NULL OR n.is_sorted = 0)
               )
         ")->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
     } catch (Exception $eTag) { /* kolom mungkin belum ada pada DB lama */ }
@@ -254,9 +322,78 @@ try {
     $stmtSubst->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
     $substLog = $stmtSubst->fetchAll(PDO::FETCH_ASSOC);
 
-    // Resolve drawing URLs
-    $drawing2d = $session['drawing_2d_path'] ? base_url($session['drawing_2d_path']) : null;
-    $drawing3d = $session['drawing_3d_path'] ? base_url($session['drawing_3d_path']) : null;
+    // Resolve drawing URLs from filesystem convention uploads/drawings/[Model]/[PartCode]_[PartName]/
+    $fsDrawings = get_part_drawing_assets($session['part_code'] ?? '', $session['part_model'] ?? '');
+    $drawing2d = $fsDrawings['drawing_2d_url'] ?? ($session['drawing_2d_path'] ? base_url($session['drawing_2d_path']) : null);
+    $drawing3d = $fsDrawings['drawing_3d_url'] ?? ($session['drawing_3d_path'] ? base_url($session['drawing_3d_path']) : null);
+
+
+    // Accumulated Kanban Qty across multiple sessions for the same kanban_item_id
+    $prevKanbanQty = 0;
+    $prevKanbanSessions = [];
+    if (!empty($session['kanban_item_id']) && ($session['inspection_type'] ?? 'kanban') === 'kanban') {
+        $stmtPrevKb = $pdo->prepare("
+            SELECT s.id, s.total_scanned_qty, s.excess_qty, s.status, s.started_at, s.closed_at,
+                   COALESCE(u.name, did.pic, 'QC Inspector') as inspector_name
+            FROM inspection_sessions s
+            LEFT JOIN users u ON u.id = s.inspector_id
+            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+            WHERE s.kanban_item_id = :kid
+              AND s.id != :curr_id
+              AND s.status IN ('passed', 'rejected')
+            ORDER BY s.id ASC
+        ");
+        $stmtPrevKb->execute([':kid' => $session['kanban_item_id'], ':curr_id' => $sessionId]);
+        $rawPrevSessions = $stmtPrevKb->fetchAll(PDO::FETCH_ASSOC);
+
+        if (!empty($rawPrevSessions)) {
+            $pSessIds = array_column($rawPrevSessions, 'id');
+            $inPSess = implode(',', array_map('intval', $pSessIds));
+            $stmtPLots = $pdo->query("SELECT inspection_session_id, qty, lot_result, lot_status FROM inspection_session_lots WHERE inspection_session_id IN ($inPSess)");
+            $lotsByPSess = [];
+            while ($plr = $stmtPLots->fetch(PDO::FETCH_ASSOC)) {
+                $lotsByPSess[(int)$plr['inspection_session_id']][] = $plr;
+            }
+
+            foreach ($rawPrevSessions as $pks) {
+                $pksId = (int)$pks['id'];
+                $pLots = $lotsByPSess[$pksId] ?? [];
+                $sessPassQty = 0;
+
+                if (!empty($pLots)) {
+                    foreach ($pLots as $pl) {
+                        if (($pl['lot_result'] ?? '') === 'passed' && ($pl['lot_status'] ?? '') !== 'replaced') {
+                            $sessPassQty += (int)($pl['qty'] ?? 0);
+                        }
+                    }
+                    $sessPassQty = max(0, $sessPassQty - (int)($pks['excess_qty'] ?? 0));
+                } elseif ($pks['status'] === 'passed') {
+                    $sessPassQty = max(0, (int)$pks['total_scanned_qty'] - (int)($pks['excess_qty'] ?? 0));
+                }
+
+                if ($sessPassQty > 0) {
+                    $pks['passed_qty'] = $sessPassQty;
+                    $pks['status_text'] = ($pks['status'] === 'passed') ? 'Lulus' : 'Parsial';
+                    $prevKanbanSessions[] = $pks;
+                    $prevKanbanQty += $sessPassQty;
+                }
+            }
+        }
+    }
+    $currScannedQty = (int)($session['total_scanned_qty'] ?? $session['sample_size']);
+    $currEffQty = max(0, $currScannedQty - (int)($session['excess_qty'] ?? 0));
+    $accumulatedKanbanQty = $currEffQty + $prevKanbanQty;
+    $kanbanTargetQty = (int)($session['kanban_qty'] ?? 0);
+    $kanbanFulfillmentStatus = 'none';
+    if ($kanbanTargetQty > 0 && ($session['inspection_type'] ?? 'kanban') === 'kanban') {
+        if ($accumulatedKanbanQty === $kanbanTargetQty) {
+            $kanbanFulfillmentStatus = 'complete'; // Pas Kanban
+        } elseif ($accumulatedKanbanQty > $kanbanTargetQty) {
+            $kanbanFulfillmentStatus = 'excess'; // Lebih
+        } else {
+            $kanbanFulfillmentStatus = 'partial'; // Belum lengkap / Sesi Lanjutan
+        }
+    }
 
     echo json_encode([
         'success' => true,
@@ -268,6 +405,7 @@ try {
             'sample_size'         => (int)$session['sample_size'],
             'total_scanned_qty'   => (int)($session['total_scanned_qty'] ?? $session['sample_size']),
             'excess_qty'          => (int)($session['excess_qty'] ?? 0),
+            'use_safety_stock_qty'=> (int)($session['use_safety_stock_qty'] ?? 0),
             'ng_count'            => (int)$session['ng_count'],
             'reject_number'       => (int)$session['reject_number'],
             'sample_code'         => $session['sample_code'] ?? 'J',
@@ -297,10 +435,21 @@ try {
             'kanban_remark'       => $session['kanban_remark'],
             'part_model'          => $session['part_model'],
             'part_aql_level'      => $session['part_aql_level'],
+            'flow_version'        => (int)($session['flow_version'] ?? 1),
+            // Chief QC Approval fields
+            'is_chief_approved'   => (int)($session['is_chief_approved'] ?? 0),
+            'chief_name'          => $session['chief_name'] ?? null,
+            'chief_approved_at'   => $session['chief_approved_at'] ?? null,
+            'chief_notes'         => $session['chief_notes'] ?? null,
             // Re-inspection chain fields & round calculation
             'is_reinspection'     => (int)($session['is_reinspection'] ?? 0),
             'reinspection_type'   => $session['reinspection_type'] ?? null,
             'parent_session_id'   => $session['parent_session_id'] ? (int)$session['parent_session_id'] : null,
+            'kanban_item_id'      => (int)($session['kanban_item_id'] ?? 0),
+            'prev_kanban_qty'     => $prevKanbanQty,
+            'accumulated_kanban_qty' => $accumulatedKanbanQty,
+            'kanban_fulfillment_status' => $kanbanFulfillmentStatus,
+            'prev_kanban_sessions' => $prevKanbanSessions,
             'reinspection_round'  => (function() use ($pdo, $session) {
                 if (empty($session['is_reinspection'])) return 0;
                 $currParent = (int)($session['parent_session_id'] ?? 0);
@@ -319,12 +468,18 @@ try {
                 return $depth;
             })(),
         ],
+        'flow_version'           => (int)($session['flow_version'] ?? 1),
         'session_lots'           => $sessionLots,
         'lot_summary'            => $lotSummaryList,
         'ng_records'             => $ngRecords,
+        'ng_records_by_lot'      => $ngRecordsByLot,
         'cancelled_ng_records'   => $cancelledNgRecords,
         'previous_sessions'      => $previousSessions,
         'defect_types'           => $defectTypes,
+        'prev_kanban_qty'        => $prevKanbanQty,
+        'accumulated_kanban_qty' => $accumulatedKanbanQty,
+        'kanban_fulfillment_status' => $kanbanFulfillmentStatus,
+        'prev_kanban_sessions'   => $prevKanbanSessions,
         // Re-inspection & substitution data
         'ng_lots'                => $ngLots,
         'reinspection_chain'     => $reinspChain,

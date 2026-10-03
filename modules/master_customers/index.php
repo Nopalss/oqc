@@ -6,6 +6,8 @@ $pageSubtitle = "Kelola data daftar pelanggan / perusahaan tujuan pengiriman unt
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_customers');
+
 $pdo = getDB();
 $customers = [];
 $search = sanitize($_GET['search'] ?? '');

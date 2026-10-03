@@ -205,17 +205,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <td class="px-4 py-3 text-slate-700 font-medium text-xs">
                                         <?= htmlspecialchars($row['remark'] ?? '-') ?>
                                     </td>
-                                    <td class="px-4 py-3 text-right space-x-1">
-                                        <!-- Edit Item -->
-                                        <a href="<?= base_url('modules/did/edit.php?id=' . $row['id']) ?>" 
-                                           class="btn-icon text-indigo-600 hover:bg-indigo-50" title="Edit Item">
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                                            </svg>
-                                        </a>
+                                    <td class="px-4 py-3 text-right">
                                         <!-- Delete Item -->
                                         <button type="button" 
-                                                onclick="confirmDelete('<?= base_url('modules/did/delete.php?id=' . $row['id']) ?>', 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?>')"
+                                                onclick="confirmDelete('<?= base_url('modules/did/delete.php?id=' . $row['id']) ?>', 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?> (Part Code: <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>)')"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item Ini">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

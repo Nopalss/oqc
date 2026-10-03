@@ -398,6 +398,14 @@ try {
 
     $pdo->commit();
 
+    // Auto-sync daily aggregate summary for original session
+    syncDailySummaryForSession($pdo, $originalSessionId);
+
+    // Auto-sync Kanban lifecycle status
+    if (!empty($origKanbanId)) {
+        syncKanbanStatus($pdo, $origKanbanId);
+    }
+
     $actionLabels = [
         'rescan_restart'  => 'Scan Ulang Kanban (Ulang dari Sample #1)',
         'rescan_continue' => 'Scan Ulang Kanban (Lanjut Sisa Sample)',

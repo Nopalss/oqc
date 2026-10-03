@@ -1,8 +1,11 @@
 <?php
 /**
- * Root Entry Point - Redirects to Dashboard Module
+ * Root Entry Point - Redirects to First Accessible Module for User
  */
 require_once __DIR__ . '/config/app.php';
 require_once __DIR__ . '/config/helper.php';
 
-redirect('modules/dashboard/index.php');
+require_login();
+
+$target = get_first_accessible_url() ?: 'modules/dashboard/index.php';
+redirect($target);
