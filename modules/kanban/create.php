@@ -6,6 +6,8 @@ $pageSubtitle = "Input beberapa baris data jadwal pengiriman Kanban sekaligus at
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('kanban');
+
 $pdo = getDB();
 $master_parts = [];
 $master_customers = [];
@@ -61,6 +63,7 @@ if ($pdo) {
             <!-- TAB 1: Multi-Row Dynamic Manual Form -->
             <div id="tab-content-manual" class="max-w-full overflow-hidden">
                 <form action="<?= base_url('modules/kanban/store.php') ?>" method="POST" class="space-y-4 max-w-full overflow-hidden">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="entry_type" value="manual">
                     <input type="hidden" name="import_method" value="manual">
 
@@ -76,6 +79,12 @@ if ($pdo) {
                                 <span class="font-bold text-slate-700">No. Dokumen Batch:</span>
                                 <input type="text" name="document_number" id="manual-doc-num" value="KANBAN-<?= date('Ymd-His') ?>" placeholder="No. Dokumen" class="form-input py-1 text-xs font-mono max-w-xs">
                             </div>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-1.5 px-3 text-xs">Batal</a>
+                            <button type="submit" class="btn-primary py-1.5 px-4 text-xs font-bold">
+                                Simpan Semua Data Kanban
+                            </button>
                         </div>
                     </div>
 
@@ -179,6 +188,7 @@ if ($pdo) {
                 <!-- Live Preview & Review Container (Hidden until file parsed) -->
                 <div id="excel-preview-container" class="hidden space-y-4 max-w-full overflow-hidden">
                     <form id="preview-kanban-form" action="<?= base_url('modules/kanban/store.php') ?>" method="POST" onsubmit="return prepareReviewFormSubmit(event)" class="space-y-4 max-w-full overflow-hidden">
+                        <?= csrf_field() ?>
                         <input type="hidden" name="entry_type" value="manual">
                         <input type="hidden" name="import_method" value="excel_import">
                         <input type="hidden" name="vendor" id="preview-vendor-input" value="PT. SURYA TECHNOLOGY INDUSTRI">
@@ -206,7 +216,7 @@ if ($pdo) {
                                 </div>
                             </div>
                             
-                            <!-- Status Statistics Pills -->
+                            <!-- Status Statistics Pills & Top Action Buttons -->
                             <div class="flex items-center justify-between flex-wrap gap-2 border-t border-blue-200/70 pt-2 text-xs">
                                 <div class="flex items-center space-x-2 flex-wrap gap-1.5 font-bold">
                                     <span class="text-slate-600 bg-white/80 px-2.5 py-1 rounded-lg border border-slate-200">
@@ -221,6 +231,12 @@ if ($pdo) {
                                     <span class="text-slate-400 font-normal text-[11px]">
                                         (<span id="preview-skipped-rows">0</span> baris header/kosong diabaikan)
                                     </span>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-1.5 px-3 text-xs">Batal</a>
+                                    <button type="submit" id="btn-submit-preview-top" class="btn-primary py-1.5 px-4 text-xs font-bold shadow-md shadow-blue-600/20">
+                                        ✓ Simpan Baris Baru ke Database
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -582,8 +598,8 @@ if ($pdo) {
     }
 
     function renderExcelPreviewTable(data) {
-        document.getElementById('preview-filename').textContent = data.filename || 'kanban.xlsx';
-        document.getElementById('preview-sheetname').textContent = 'Tab: ' + (data.sheet_name || 'kanban');
+        var sheetInfo = (data.processed_sheets && data.processed_sheets.length > 0) ? data.processed_sheets.length + ' Sheet (' + data.processed_sheets.join(', ') + ')' : (data.sheet_name || 'kanban');
+        document.getElementById('preview-sheetname').textContent = 'Tab Diproses: ' + sheetInfo;
         
         var vendorVal = data.vendor || '228746';
         var printDtVal = data.print_datetime || '';
@@ -606,15 +622,24 @@ if ($pdo) {
         document.getElementById('count-filter-dup').textContent = totalDup;
 
         var submitBtn = document.getElementById('btn-submit-preview');
-        if (totalNew > 0) {
-            submitBtn.disabled = false;
-            submitBtn.className = 'btn-primary py-1.5 px-5 text-xs font-bold shadow-md shadow-blue-600/20 cursor-pointer';
-            submitBtn.innerHTML = '✓ Simpan ' + totalNew + ' Baris Baru ke Database';
-        } else {
-            submitBtn.disabled = true;
-            submitBtn.className = 'py-1.5 px-5 text-xs font-bold rounded-lg bg-slate-300 text-slate-500 cursor-not-allowed';
-            submitBtn.innerHTML = '⚠️ Semua Baris Duplikat (0 Data Baru)';
-        }
+        var submitBtnTop = document.getElementById('btn-submit-preview-top');
+
+        var updateSubmitBtnState = function(btn) {
+            if (!btn) return;
+            if (totalNew > 0) {
+                btn.disabled = false;
+                btn.className = 'btn-primary py-1.5 px-5 text-xs font-bold shadow-md shadow-blue-600/20 cursor-pointer';
+                btn.innerHTML = '✓ Simpan ' + totalNew + ' Baris Baru ke Database';
+            } else {
+                btn.disabled = true;
+                btn.className = 'py-1.5 px-5 text-xs font-bold rounded-lg bg-slate-300 text-slate-500 cursor-not-allowed';
+                btn.innerHTML = '⚠️ Semua Baris Duplikat (0 Data Baru)';
+            }
+        };
+
+        updateSubmitBtnState(submitBtn);
+        updateSubmitBtnState(submitBtnTop);
+
 
         var tbody = document.getElementById('preview-kanban-rows-body');
         previewRowIndex = 0;
@@ -932,6 +957,13 @@ if ($pdo) {
         }
 
         document.getElementById('kanban_json_data').value = JSON.stringify(data);
+
+        // Strip name attributes from table inputs so browser does not flood $_POST and exceed max_input_vars limit (1000)
+        var previewInputs = tbody.querySelectorAll('input, select, textarea');
+        for (var k = 0; k < previewInputs.length; k++) {
+            previewInputs[k].removeAttribute('name');
+        }
+
         return true;
     }
 

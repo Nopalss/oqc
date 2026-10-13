@@ -9,10 +9,18 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 require_once __DIR__ . '/../../../config/summary_helper.php';
+
+// Production Security Guard: Require authenticated user
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
 session_write_close();
 
 $pdo = getDB();
 if (!$pdo) {
+    http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'DB connection failed']);
     exit;
 }
@@ -24,7 +32,7 @@ if (!$sessionId) {
 }
 
 try {
-    // Main session data
+    // Main session data - optimized index lookups
     $stmt = $pdo->prepare("
         SELECT s.*,
                COALESCE(s.line_name, l.name, 'Line 1') as line_name,
@@ -38,12 +46,12 @@ try {
         LEFT JOIN `lines` l ON l.id = s.line_id
         LEFT JOIN kanban_items k ON k.id = COALESCE(
             s.kanban_item_id,
-            (SELECT ki.id FROM kanban_items ki WHERE UPPER(ki.item_code) = UPPER(did.part_code) ORDER BY ki.id DESC LIMIT 1)
+            (SELECT ki.id FROM kanban_items ki WHERE ki.item_code = did.part_code ORDER BY ki.id DESC LIMIT 1)
         )
         LEFT JOIN kanban_batches b ON b.id = k.batch_id
         LEFT JOIN master_parts p ON p.id = COALESCE(
             s.part_id,
-            (SELECT mp.id FROM master_parts mp WHERE UPPER(mp.part_code) = UPPER(did.part_code) LIMIT 1)
+            (SELECT mp.id FROM master_parts mp WHERE mp.part_code = did.part_code LIMIT 1)
         )
         LEFT JOIN master_models m ON m.id = p.model_id
         LEFT JOIN master_drawings d ON d.part_id = p.id
@@ -137,7 +145,7 @@ try {
                    did.lot_number, did.cavity
             FROM inspection_sessions s
             JOIN daily_inspection_data did ON did.id = s.did_id
-            WHERE UPPER(did.part_code) = UPPER(:pcode) AND s.id != :curr_id
+            WHERE did.part_code = :pcode AND s.id != :curr_id
             ORDER BY s.id DESC
             LIMIT 5
         ");
@@ -158,6 +166,107 @@ try {
     ");
     $stmtLots->execute([':sid' => $sessionId]);
     $sessionLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
+
+    // Fetch previous rejection history per lot if available (Strict 3-Way match: part + lot + ref)
+    $sessionPartId = (int)($session['part_id'] ?? 0);
+
+    foreach ($sessionLots as &$slRef) {
+        $slRef['previous_ng_defects'] = [];
+        $slRef['prev_passed_session']  = null;
+        $curRef = strtoupper(trim($slRef['ref_number'] ?? ''));
+        $curLot = strtoupper(trim($slRef['lot_number'] ?? ''));
+
+        if (!empty($curRef) || !empty($curLot)) {
+            // 1. Fetch info riwayat NG terdahulu untuk lot spesifik ini
+            $whereRej = [
+                "s.id != :curr_sid",
+                "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR s.status = 'rejected')"
+            ];
+            $paramsRej = [':curr_sid' => $sessionId];
+
+            if ($curRef !== '' && $curLot !== '') {
+                $whereRej[] = "UPPER(TRIM(isl.ref_number)) = :ref";
+                $whereRej[] = "UPPER(TRIM(isl.lot_number)) = :lot";
+                $paramsRej[':ref'] = $curRef;
+                $paramsRej[':lot'] = $curLot;
+            } elseif ($curRef !== '') {
+                $whereRej[] = "UPPER(TRIM(isl.ref_number)) = :ref";
+                $paramsRej[':ref'] = $curRef;
+            } else {
+                $whereRej[] = "UPPER(TRIM(isl.lot_number)) = :lot";
+                $paramsRej[':lot'] = $curLot;
+            }
+
+            if ($sessionPartId > 0) {
+                $whereRej[] = "(s.part_id = :part_id OR s.part_id IS NULL)";
+                $paramsRej[':part_id'] = $sessionPartId;
+            }
+
+            $sqlRej = "
+                SELECT s.id AS prev_session_id, s.started_at AS prev_started_at, s.closed_at AS prev_closed_at, u.name AS prev_inspector_name, ki.kanban_no,
+                       r.qty_ng, r.remark, COALESCE(dt.name, r.remark, 'Defect') AS defect_name, dt.code AS defect_code
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                LEFT JOIN users u ON u.id = s.inspector_id
+                LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                LEFT JOIN inspection_ng_records r ON r.session_lot_id = isl.id AND (r.is_cancelled IS NULL OR r.is_cancelled = 0)
+                LEFT JOIN defect_types dt ON dt.id = r.defect_type_id
+                WHERE " . implode(' AND ', $whereRej) . "
+                ORDER BY s.id ASC, r.id ASC
+            ";
+            $stmtRejHistory = $pdo->prepare($sqlRej);
+            $stmtRejHistory->execute($paramsRej);
+            $prevRows = $stmtRejHistory->fetchAll(PDO::FETCH_ASSOC);
+            if (!empty($prevRows)) {
+                $slRef['was_rejected_before'] = true;
+                $slRef['previous_ng_defects'] = $prevRows;
+            }
+
+            // 2. Fetch info sesi yang PASSED sebelumnya untuk lot spesifik ini
+            $wherePass = [
+                "s.id != :curr_sid",
+                "(isl.lot_result = 'passed' OR s.status = 'passed')",
+                "(isl.lot_result != 'rejected' OR isl.lot_result IS NULL)"
+            ];
+            $paramsPass = [':curr_sid' => $sessionId];
+
+            if ($curRef !== '' && $curLot !== '') {
+                $wherePass[] = "UPPER(TRIM(isl.ref_number)) = :ref";
+                $wherePass[] = "UPPER(TRIM(isl.lot_number)) = :lot";
+                $paramsPass[':ref'] = $curRef;
+                $paramsPass[':lot'] = $curLot;
+            } elseif ($curRef !== '') {
+                $wherePass[] = "UPPER(TRIM(isl.ref_number)) = :ref";
+                $paramsPass[':ref'] = $curRef;
+            } else {
+                $wherePass[] = "UPPER(TRIM(isl.lot_number)) = :lot";
+                $paramsPass[':lot'] = $curLot;
+            }
+
+            if ($sessionPartId > 0) {
+                $wherePass[] = "(s.part_id = :part_id OR s.part_id IS NULL)";
+                $paramsPass[':part_id'] = $sessionPartId;
+            }
+
+            $sqlPass = "
+                SELECT s.id AS passed_session_id, s.started_at AS passed_started_at,
+               s.closed_at AS passed_closed_at, u.name AS passed_inspector_name
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                LEFT JOIN users u ON u.id = s.inspector_id
+                WHERE " . implode(' AND ', $wherePass) . "
+                ORDER BY s.id DESC
+                LIMIT 1
+            ";
+            $stmtPassedHistory = $pdo->prepare($sqlPass);
+            $stmtPassedHistory->execute($paramsPass);
+            $passedRow = $stmtPassedHistory->fetch(PDO::FETCH_ASSOC);
+            if ($passedRow) {
+                $slRef['prev_passed_session'] = $passedRow;
+            }
+        }
+    }
+    unset($slRef);
 
     // ── AUTO-CLOSE SAFETY NET ────────────────────────────────────────────────
     // Jika sesi masih in_progress tapi SEMUA lotnya sudah 'skipped' atau 'passed'

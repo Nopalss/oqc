@@ -14,6 +14,14 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/../../vendor/autoload.php';
 
+// Security Guard: Auth & RBAC access
+require_login();
+require_menu_access('defect_analysis');
+
+// Performance & Memory Safeguard for Large Dataset XLSX Generation
+@ini_set('memory_limit', '512M');
+@set_time_limit(180);
+
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Style\Fill;

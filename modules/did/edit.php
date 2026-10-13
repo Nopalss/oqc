@@ -6,6 +6,8 @@ $pageSubtitle = "Perbarui informasi status pengecekan dimensi lot produksi";
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('did');
+
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 $pdo = getDB();
 $did = null;
@@ -51,6 +53,7 @@ if (!$did) {
         <!-- Edit Form Card -->
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <form action="<?= base_url('modules/did/update.php') ?>" method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 <input type="hidden" name="id" value="<?= $did['id'] ?>">
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">

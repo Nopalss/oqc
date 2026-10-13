@@ -2000,6 +2000,7 @@ if ($pdo) {
             chartInstance.setActiveElements([]);
             chartInstance.update();
         }
+        hideDoughnutTooltip();
     }
 
     // ── STATE PRESERVATION ENGINE (No Selection Reset on Filter Change) ───────
@@ -2070,6 +2071,112 @@ if ($pdo) {
         if (ddContent)     ddContent.style.display     = 'none';
     }
 
+    // ── Universal Doughnut External Tooltip Handler ───────────────────────────
+    var windowMouseX = 0;
+    var windowMouseY = 0;
+    window.addEventListener('mousemove', function(e) {
+        windowMouseX = e.clientX;
+        windowMouseY = e.clientY;
+    }, { passive: true });
+
+    function hideDoughnutTooltip() {
+        var tooltipEl = document.getElementById('chartjs-doughnut-floating-tooltip');
+        if (tooltipEl) {
+            tooltipEl.style.opacity = '0';
+            tooltipEl.style.display = 'none';
+        }
+    }
+
+    function doughnutExternalTooltipHandler(context) {
+        var tooltipEl = document.getElementById('chartjs-doughnut-floating-tooltip');
+
+        if (!tooltipEl) {
+            tooltipEl = document.createElement('div');
+            tooltipEl.id = 'chartjs-doughnut-floating-tooltip';
+            tooltipEl.style.position = 'fixed';
+            tooltipEl.style.zIndex = '99999';
+            tooltipEl.style.pointerEvents = 'none';
+            tooltipEl.style.background = 'rgba(15, 23, 42, 0.94)';
+            tooltipEl.style.backdropFilter = 'blur(6px)';
+            tooltipEl.style.color = '#ffffff';
+            tooltipEl.style.borderRadius = '8px';
+            tooltipEl.style.padding = '7px 12px';
+            tooltipEl.style.fontSize = '11px';
+            tooltipEl.style.boxShadow = '0 10px 25px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2)';
+            tooltipEl.style.border = '1px solid rgba(255, 255, 255, 0.16)';
+            tooltipEl.style.transition = 'opacity 0.1s ease-out';
+            tooltipEl.style.transform = 'translate(-50%, -125%)';
+            tooltipEl.style.whiteSpace = 'nowrap';
+            document.body.appendChild(tooltipEl);
+        }
+
+        var tooltipModel = context.tooltip;
+        if (!tooltipModel || tooltipModel.opacity === 0) {
+            tooltipEl.style.opacity = '0';
+            tooltipEl.style.display = 'none';
+            return;
+        }
+
+        if (tooltipModel.body) {
+            var bodyLines = tooltipModel.body.map(function(b) { return b.lines; });
+            var colors = (tooltipModel.labelColors && tooltipModel.labelColors[0]) ? tooltipModel.labelColors[0] : null;
+            var bgColor = colors ? (colors.backgroundColor || '#2563eb') : '#2563eb';
+
+            var html = '';
+            bodyLines.forEach(function(body) {
+                var text = Array.isArray(body) ? body.join(' ') : String(body);
+                html += '<div style="display:flex;align-items:center;gap:7px;">' +
+                        '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + bgColor + ';box-shadow:0 0 0 1px rgba(255,255,255,0.3);flex-shrink:0;"></span>' +
+                        '<span style="font-weight:800;color:#f8fafc;letter-spacing:0.2px;">' + escapeHtml(text.trim()) + '</span>' +
+                        '</div>';
+            });
+            tooltipEl.innerHTML = html;
+        }
+
+        var canvas = context.chart.canvas;
+        var rect = canvas.getBoundingClientRect();
+
+        tooltipEl.style.display = 'block';
+        tooltipEl.style.opacity = '1';
+
+        var centerX = rect.left + rect.width / 2;
+        var centerY = rect.top + rect.height / 2;
+
+        // Prefer cursor position when cursor is inside the canvas area, pointing outward from center
+        if (windowMouseX > 0 && windowMouseX >= rect.left && windowMouseX <= rect.right && windowMouseY >= rect.top && windowMouseY <= rect.bottom) {
+            var dy = windowMouseY - centerY;
+            if (dy < 0) {
+                // Upper half: float upwards away from center
+                tooltipEl.style.transform = 'translate(-50%, -115%)';
+                tooltipEl.style.top = (windowMouseY - 8) + 'px';
+            } else {
+                // Lower half: float downwards away from center
+                tooltipEl.style.transform = 'translate(-50%, 18%)';
+                tooltipEl.style.top = (windowMouseY + 8) + 'px';
+            }
+            tooltipEl.style.left = windowMouseX + 'px';
+        } else {
+            var posX = rect.left + tooltipModel.caretX;
+            var posY = rect.top + tooltipModel.caretY;
+            var dx = posX - centerX;
+            var dy = posY - centerY;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 70) {
+                var angle = Math.atan2(dy, dx);
+                if (dist === 0) angle = -Math.PI / 2;
+                posX = centerX + Math.cos(angle) * 85;
+                posY = centerY + Math.sin(angle) * 85;
+            }
+            if (dy < 0) {
+                tooltipEl.style.transform = 'translate(-50%, -115%)';
+            } else {
+                tooltipEl.style.transform = 'translate(-50%, 18%)';
+            }
+            tooltipEl.style.left = posX + 'px';
+            tooltipEl.style.top = posY + 'px';
+        }
+    }
+
     // ── Panel 1: Load Defects ─────────────────────────────────────────────────
     function loadLevel1Defects(callback) {
         var url = buildApiUrl('get_defects');
@@ -2122,16 +2229,13 @@ if ($pdo) {
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
+                        enabled: false,
+                        external: doughnutExternalTooltipHandler,
                         callbacks: {
                             label: function(ctx) {
                                 var val = Number(ctx.raw || 0).toLocaleString();
                                 var pct = data.grandMetric > 0 ? Math.round((ctx.raw / data.grandMetric) * 1000) / 10 : 0;
-                                return ' ' + ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
+                                return ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
                             }
                         }
                     }
@@ -2162,6 +2266,7 @@ if ($pdo) {
 
         canvas.onmouseleave = function() {
             updateCenterStat('Defects', 'TOTAL DEFECT', data.grandMetric, data.unit, '#94a3b8');
+            hideDoughnutTooltip();
         };
     }
 
@@ -2313,16 +2418,13 @@ if ($pdo) {
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
+                        enabled: false,
+                        external: doughnutExternalTooltipHandler,
                         callbacks: {
                             label: function(ctx) {
                                 var val = Number(ctx.raw || 0).toLocaleString();
                                 var pct = data.grandMetric > 0 ? Math.round((ctx.raw / data.grandMetric) * 1000) / 10 : 0;
-                                return ' ' + ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
+                                return ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
                             }
                         }
                     }
@@ -2353,6 +2455,7 @@ if ($pdo) {
 
         canvas.onmouseleave = function() {
             updateCenterStat('Models', 'TOTAL MODEL', data.grandMetric, data.unit, '#94a3b8');
+            hideDoughnutTooltip();
         };
     }
 
@@ -2523,16 +2626,13 @@ if ($pdo) {
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
+                        enabled: false,
+                        external: doughnutExternalTooltipHandler,
                         callbacks: {
                             label: function(ctx) {
                                 var val = Number(ctx.raw || 0).toLocaleString();
                                 var pct = data.grandMetric > 0 ? Math.round((ctx.raw / data.grandMetric) * 1000) / 10 : 0;
-                                return ' ' + ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
+                                return (ctx.label || '') + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
                             }
                         }
                     }
@@ -2564,6 +2664,7 @@ if ($pdo) {
 
         canvas.onmouseleave = function() {
             updateCenterStat('Parts', 'TOTAL PART', data.grandMetric, data.unit, '#94a3b8');
+            hideDoughnutTooltip();
         };
     }
 
@@ -3043,16 +3144,13 @@ if ($pdo) {
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
+                        enabled: false,
+                        external: doughnutExternalTooltipHandler,
                         callbacks: {
                             label: function(ctx) {
                                 var val = Number(ctx.raw || 0).toLocaleString();
                                 var pct = data.grandMetric > 0 ? Math.round((ctx.raw / data.grandMetric) * 1000) / 10 : 0;
-                                return ' ' + ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
+                                return (ctx.label || '') + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
                             }
                         }
                     }
@@ -3084,6 +3182,7 @@ if ($pdo) {
 
         canvas.onmouseleave = function() {
             updateCenterStat('PartRank', 'TOTAL CACAT', data.grandMetric, data.unit, '#94a3b8');
+            hideDoughnutTooltip();
         };
     }
 
@@ -3466,16 +3565,13 @@ if ($pdo) {
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
+                        enabled: false,
+                        external: doughnutExternalTooltipHandler,
                         callbacks: {
                             label: function(ctx) {
                                 var val = Number(ctx.raw || 0).toLocaleString();
                                 var pct = data.grandMetric > 0 ? Math.round((ctx.raw / data.grandMetric) * 1000) / 10 : 0;
-                                return ' ' + ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
+                                return ctx.label + ': ' + val + ' ' + data.unit + ' (' + pct + '%)';
                             }
                         }
                     }
@@ -3506,6 +3602,7 @@ if ($pdo) {
 
         canvas.onmouseleave = function() {
             updateCenterStat('PartDefect', 'TOTAL DEFECT', data.grandMetric, data.unit, '#94a3b8');
+            hideDoughnutTooltip();
         };
     }
 

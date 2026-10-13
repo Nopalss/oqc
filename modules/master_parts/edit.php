@@ -6,6 +6,8 @@ $pageSubtitle = "Ubah data Part Code dan Part Name";
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_parts');
+
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 $pdo = getDB();
 $part = null;
@@ -46,6 +48,7 @@ if (!$part) {
 
         <div class="card">
             <form action="<?= base_url('modules/master_parts/update.php') ?>" method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 
                 <input type="hidden" name="id" value="<?= htmlspecialchars($part['id']) ?>">
 

@@ -8,12 +8,14 @@
     </div><!-- End of Main Content Container -->
 </div><!-- End of Layout Wrapper -->
 
-<!-- Real 3D CAD WebGL Engine Scripts (WebAssembly & Three.js) -->
 <script>window.APP_BASE_URL = "<?= base_url() ?>";</script>
-<script src="<?= base_url('assets/js/vendor/three.r128.min.js') ?>"></script>
-<script src="<?= base_url('assets/js/vendor/OrbitControls.js') ?>"></script>
-<script src="<?= base_url('assets/js/vendor/occt-import-js.js') ?>"></script>
-<script src="<?= base_url('assets/js/cad_viewer.js') ?>"></script>
+<?php if (!empty($loadCadViewer)): ?>
+<!-- Real 3D CAD WebGL Engine Scripts (WebAssembly & Three.js - Loaded conditionally) -->
+<script src="<?= base_url('assets/js/vendor/three.r128.min.js?v=' . filemtime(__DIR__ . '/../assets/js/vendor/three.r128.min.js')) ?>"></script>
+<script src="<?= base_url('assets/js/vendor/OrbitControls.js?v=' . filemtime(__DIR__ . '/../assets/js/vendor/OrbitControls.js')) ?>"></script>
+<script src="<?= base_url('assets/js/vendor/occt-import-js.js?v=' . filemtime(__DIR__ . '/../assets/js/vendor/occt-import-js.js')) ?>"></script>
+<script src="<?= base_url('assets/js/cad_viewer.js?v=' . filemtime(__DIR__ . '/../assets/js/cad_viewer.js')) ?>"></script>
+<?php endif; ?>
 
 </body>
 </html>

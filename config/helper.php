@@ -78,31 +78,45 @@ function set_flash($type, $message) {
         'type' => $type,
         'message' => $message
     ];
-    session_write_close();
 }
 
 /**
  * Retrieve & clear Session Flash Message
  */
 function get_flash() {
+    static $consumedFlash = null;
+    static $alreadyConsumed = false;
+
+    if ($alreadyConsumed) {
+        return $consumedFlash;
+    }
+
     if (session_status() === PHP_SESSION_NONE) {
         @session_start();
     }
-    $flash = null;
+
     if (isset($_SESSION['flash'])) {
-        $flash = $_SESSION['flash'];
+        $consumedFlash = $_SESSION['flash'];
         unset($_SESSION['flash']);
     }
-    session_write_close();
-    return $flash;
+
+    $alreadyConsumed = true;
+    return $consumedFlash;
 }
 
 /**
  * Render Flash Alert HTML badge
  */
 function render_flash() {
+    static $rendered = false;
+    if ($rendered) {
+        return '';
+    }
+
     $flash = get_flash();
     if (!$flash) return '';
+
+    $rendered = true;
 
     $type = $flash['type'];
     $msg = $flash['message'];
@@ -112,6 +126,7 @@ function render_flash() {
         'error'   => 'bg-rose-50 text-rose-800 border-rose-200',
         'warning' => 'bg-amber-50 text-amber-800 border-amber-200',
         'info'    => 'bg-sky-50 text-sky-800 border-sky-200',
+        'danger'  => 'bg-rose-50 text-rose-800 border-rose-200',
     ];
 
     $class = $colorClasses[$type] ?? $colorClasses['info'];
@@ -223,6 +238,52 @@ function render_pagination($currentPage, $totalPages, $totalItems, $perPage = 10
 }
 
 /**
+ * Generate or retrieve CSRF token from current session
+ */
+function generate_csrf_token() {
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+
+/**
+ * Render HTML hidden input containing CSRF token
+ */
+function csrf_field() {
+    return '<input type="hidden" name="csrf_token" value="' . htmlspecialchars(generate_csrf_token()) . '">';
+}
+
+/**
+ * Verify incoming CSRF token against session
+ */
+function verify_csrf_token($token = null) {
+    if (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+    $sessionToken = $_SESSION['csrf_token'] ?? '';
+    if (empty($sessionToken)) {
+        return false;
+    }
+    $incoming = $token ?? ($_POST['csrf_token'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? ''));
+    return hash_equals($sessionToken, (string)$incoming);
+}
+
+/**
+ * Enforce CSRF verification; redirect back with flash error if invalid
+ */
+function csrf_verify() {
+    if (!verify_csrf_token()) {
+        set_flash('error', 'Validasi keamanan (CSRF Token) gagal atau sesi Anda telah berakhir. Silakan muat ulang halaman.');
+        $back = $_SERVER['HTTP_REFERER'] ?? 'index.php';
+        redirect($back);
+    }
+}
+
+/**
  * Check if current user is logged in
  */
 function is_logged_in() {
@@ -246,10 +307,11 @@ function require_login() {
 function current_user() {
     // Return null-safe values — no default fallback to prevent ghost admin actions
     return [
-        'id'       => isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : 0,
-        'name'     => $_SESSION['user_name'] ?? '',
-        'username' => $_SESSION['username'] ?? '',
-        'role'     => $_SESSION['user_role'] ?? 'guest'
+        'id'      => isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : 0,
+        'name'    => $_SESSION['user_name'] ?? '',
+        'username'=> $_SESSION['username'] ?? '',
+        'role'    => $_SESSION['user_role'] ?? 'guest',
+        'role_id' => isset($_SESSION['user_role_id']) ? (int)$_SESSION['user_role_id'] : null,
     ];
 }
 
@@ -314,6 +376,13 @@ function can_access($menu_key) {
     }
 
     return in_array($menu_key, $permissions, true);
+}
+
+/**
+ * Check if the logged-in user has permission for a specific menu (Alias of can_access)
+ */
+function has_menu_access($menu_key) {
+    return can_access($menu_key);
 }
 
 /**
@@ -421,7 +490,7 @@ function syncKanbanStatus($pdo, $kanbanItemId) {
         $stmtS = $pdo->prepare("
             SELECT s.id, s.status, s.total_scanned_qty, s.excess_qty, s.is_reinspection, s.parent_session_id,
                    (SELECT COUNT(*) FROM inspection_session_lots isl WHERE isl.inspection_session_id = s.id) AS lot_count,
-                   (SELECT COALESCE(SUM(CASE WHEN isl.lot_result = 'passed' AND (isl.lot_status IS NULL OR isl.lot_status != 'replaced') THEN isl.qty ELSE 0 END), 0)
+                   (SELECT COALESCE(SUM(CASE WHEN isl.lot_result IN ('passed', 'skipped') AND (isl.lot_status IS NULL OR isl.lot_status != 'replaced') THEN isl.qty ELSE 0 END), 0)
                     FROM inspection_session_lots isl 
                     WHERE isl.inspection_session_id = s.id) AS lot_passed_qty,
                    (SELECT COUNT(*) FROM inspection_session_lots isl_r WHERE isl_r.inspection_session_id = s.id AND (isl_r.lot_result = 'rejected' OR isl_r.lot_status IN ('rejected', 'ng_found'))) AS lot_rejected_count
@@ -517,7 +586,15 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
                 $lastRefNumber = $lastLotRow['ref_number'] ?? null;
                 $lastQrRaw     = $lastLotRow['scanned_qr_raw'] ?? null;
 
-                $batchId = $sessEx['batch_id'] ?: 1;
+                $batchId = (int)($sessEx['batch_id'] ?? 0);
+                if ($batchId <= 0) {
+                    $batchId = (int)$pdo->query("SELECT id FROM kanban_batches WHERE plan_type = 'safety_stock' ORDER BY id ASC LIMIT 1")->fetchColumn();
+                }
+                if ($batchId <= 0) {
+                    $stmtInsBatch = $pdo->prepare("INSERT INTO kanban_batches (plan_type, vendor, document_number, import_method, imported_at) VALUES ('safety_stock', 'Safety Stock Storage', 'DOC-SAFETY-STOCK', 'manual', NOW())");
+                    $stmtInsBatch->execute();
+                    $batchId = (int)$pdo->lastInsertId();
+                }
                 $pCode   = $sessEx['part_code'];
                 $pName   = $sessEx['part_name'];
                 $partId  = $sessEx['part_id'] ?: null;
@@ -548,21 +625,25 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
                 }
 
                 // 3. Auto-create PASSED inspection_sessions for Safety Stock
+                $currUser = function_exists('current_user') ? current_user() : null;
+                $curUserId = (int)($currUser['id'] ?? ($_SESSION['user_id'] ?? 1));
+
                 $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
-                    (inspection_type, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
-                    VALUES ('safety_stock', :did, :kanban, :part, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
+                    (inspection_type, did_id, kanban_item_id, part_id, inspector_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
+                    VALUES ('safety_stock', :did, :kanban, :part, :insp, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
                 $stmtInsSSSession->execute([
                     ':did'    => $ssDidId,
                     ':kanban' => $ssKanbanItemId,
                     ':part'   => $partId,
+                    ':insp'   => $curUserId,
                     ':tqty'   => $excessQty
                 ]);
                 $ssSessionId = (int)$pdo->lastInsertId();
 
                 // 4. Create inspection_session_lots entry for Safety Stock session
                 $stmtInsSSLot = $pdo->prepare("INSERT INTO inspection_session_lots 
-                    (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, created_at) 
-                    VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', NOW())");
+                    (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, lot_result, closed_at, created_at) 
+                    VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', 'passed', NOW(), NOW())");
                 $stmtInsSSLot->execute([
                     ':sid' => $ssSessionId,
                     ':ref' => $lastRefNumber,
@@ -708,6 +789,38 @@ function get_part_drawing_assets($partCode, $modelName = '') {
     }
 
     return $result;
+}
+
+/**
+ * Helper to parse full QR code scan strings:
+ * Format: Z1<part_code>|Z2<lot>|Z3<qty>|Z4<line>|Z5<ref_no>
+ */
+if (!function_exists('parseQrScanString')) {
+    function parseQrScanString($raw) {
+        $res = [
+            'Z1' => '', // Part Code
+            'Z2' => '', // Lot Number
+            'Z3' => '', // Qty / Cavity
+            'Z4' => '', // Line
+            'Z5' => '', // Ref Number / DID Number
+            'is_qr' => false
+        ];
+        if (empty($raw)) return $res;
+        $raw = trim($raw);
+        if (strpos($raw, '|') !== false || strpos($raw, 'Z1') !== false || strpos($raw, 'Z2') !== false || strpos($raw, 'Z5') !== false) {
+            $res['is_qr'] = true;
+            $parts = explode('|', $raw);
+            foreach ($parts as $p) {
+                $p = trim($p);
+                if (strpos($p, 'Z1') === 0) $res['Z1'] = trim(substr($p, 2));
+                elseif (strpos($p, 'Z2') === 0) $res['Z2'] = trim(substr($p, 2));
+                elseif (strpos($p, 'Z3') === 0) $res['Z3'] = trim(substr($p, 2));
+                elseif (strpos($p, 'Z4') === 0) $res['Z4'] = trim(substr($p, 2));
+                elseif (strpos($p, 'Z5') === 0) $res['Z5'] = trim(substr($p, 2));
+            }
+        }
+        return $res;
+    }
 }
 
 // Include OQC Summary Aggregate Helper

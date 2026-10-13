@@ -8,8 +8,15 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/xlsx_parser.php';
 
+require_menu_access('did');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/did/index.php');
+}
+
+if (!verify_csrf_token()) {
+    set_flash('error', 'Sesi keamanan (CSRF Token) tidak valid atau telah kedaluwarsa. Silakan muat ulang halaman.');
+    redirect('modules/did/create.php');
 }
 
 $pdo = getDB();
@@ -51,6 +58,8 @@ if ($entryType === 'manual') {
     }
 
     try {
+        $pdo->beginTransaction();
+
         $currentUserId = current_user()['id'];
 
         // Create Batch Header
@@ -63,6 +72,18 @@ if ($entryType === 'manual') {
         $skipCount = 0;
         $okCount = 0;
         $ngCount = 0;
+
+        // Cache existing master parts into memory
+        $cachedParts = [];
+        $stmtAllParts = $pdo->query("SELECT UPPER(part_code) as pcode FROM master_parts");
+        while ($pRow = $stmtAllParts->fetch(PDO::FETCH_ASSOC)) {
+            $cachedParts[$pRow['pcode']] = true;
+        }
+
+        $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+        $stmtInsert = $pdo->prepare("INSERT INTO daily_inspection_data 
+            (batch_id, part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, remark, created_at) 
+            VALUES (:bid, :pcode, :pname, :lot, :cav, :idate, :status, :pic, :remark, NOW())");
 
         foreach ($rows as $r) {
             $selectCode = trim(sanitize($r['part_code_select'] ?? ''));
@@ -79,19 +100,13 @@ if ($entryType === 'manual') {
                 continue;
             }
 
-            // Auto-create Master Part if not exists
-            $stmtCheckMaster = $pdo->prepare("SELECT id FROM master_parts WHERE part_code = :pcode");
-            $stmtCheckMaster->execute([':pcode' => $partCode]);
-            if (!$stmtCheckMaster->fetch()) {
-                $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+            // Auto-create Master Part if not exists (using in-memory cache)
+            if (!isset($cachedParts[$partCode])) {
                 $stmtInsertMaster->execute([':pcode' => $partCode, ':pname' => $partName]);
+                $cachedParts[$partCode] = true;
             }
 
             // Insert into daily_inspection_data with batch_id
-            $stmtInsert = $pdo->prepare("INSERT INTO daily_inspection_data 
-                (batch_id, part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, remark, created_at) 
-                VALUES (:bid, :pcode, :pname, :lot, :cav, :idate, :status, :pic, :remark, NOW())");
-            
             $stmtInsert->execute([
                 ':bid'    => $batchId,
                 ':pcode'  => $partCode,
@@ -113,6 +128,7 @@ if ($entryType === 'manual') {
         $stmtUpdBatch->execute([':total' => $successCount, ':ok' => $okCount, ':ng' => $ngCount, ':bid' => $batchId]);
 
         if ($successCount > 0) {
+            $pdo->commit();
             $msg = 'Berhasil menyimpan ' . $successCount . ' baris data DID baru ke Riwayat Batch.';
             if ($skipCount > 0) {
                 $msg .= ' (' . $skipCount . ' baris duplikat/invalid dilewati).';
@@ -120,11 +136,14 @@ if ($entryType === 'manual') {
             set_flash('success', $msg);
         } else {
             // Delete empty batch
-            $pdo->exec("DELETE FROM did_batches WHERE id = {$batchId}");
+            $pdo->rollBack();
             set_flash('warning', 'Gagal menyimpan data DID! Seluruh baris duplikat atau tidak valid.');
         }
 
     } catch (PDOException $e) {
+        if ($pdo && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         set_flash('error', 'Gagal menyimpan batch DID: ' . $e->getMessage());
     }
 
@@ -244,7 +263,7 @@ if ($entryType === 'manual') {
 
 } else if ($entryType === 'xlsx') {
     // -------------------------------------------------------
-    // 3. MULTI-TAB EXCEL (.XLSX) IMPORT — 1 batch per tab/hari
+    // 3. MULTI-TAB EXCEL (.XLSX) IMPORT — High-Speed Upsert Logic
     // -------------------------------------------------------
     if (!isset($_FILES['xlsx_file']) || $_FILES['xlsx_file']['error'] !== UPLOAD_ERR_OK) {
         set_flash('error', 'Pilih file Excel (.xlsx) yang valid untuk diunggah!');
@@ -269,109 +288,154 @@ if ($entryType === 'manual') {
         redirect('modules/did/create.php');
     }
 
-    $batchesCreated = 0;
-    $batchesSkipped = 0;
-    $totalItemsOk   = 0;
-    $totalItemsNg   = 0;
-    $summaryLines   = [];
-    $skippedDates   = [];
+    // Pre-cache all master parts from DB: [UPPER(part_code)] => official_part_name
+    $cachedParts = [];
+    $stmtAllParts = $pdo->query("SELECT UPPER(part_code) as pcode, part_name FROM master_parts");
+    while ($pRow = $stmtAllParts->fetch(PDO::FETCH_ASSOC)) {
+        $cachedParts[$pRow['pcode']] = $pRow['part_name'];
+    }
 
-    foreach ($parsedData as $inspectingDate => $rows) {
-        // Cek apakah tanggal sudah punya batch
-        try {
-            $stmtChk = $pdo->prepare("SELECT id FROM did_batches WHERE inspecting_date = :d LIMIT 1");
-            $stmtChk->execute([':d' => $inspectingDate]);
-            if ($stmtChk->fetch()) {
-                $batchesSkipped++;
-                $skippedDates[] = date('d M Y', strtotime($inspectingDate));
-                continue;
+    $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pc, :pn, 'auto_generated', NOW())");
+
+    // Collect all dates from parsedData
+    $allDates = array_keys($parsedData);
+    if (empty($allDates)) {
+        set_flash('warning', 'Tidak ada data valid di dalam file Excel.');
+        redirect('modules/did/create.php');
+    }
+
+    // Pre-cache existing batches for these dates: [date] => batch_id
+    $existingBatches = [];
+    $inClause = implode(',', array_fill(0, count($allDates), '?'));
+    $stmtBatches = $pdo->prepare("SELECT id, inspecting_date FROM did_batches WHERE inspecting_date IN ($inClause)");
+    $stmtBatches->execute($allDates);
+    while ($bRow = $stmtBatches->fetch(PDO::FETCH_ASSOC)) {
+        $existingBatches[$bRow['inspecting_date']] = (int)$bRow['id'];
+    }
+
+    // Pre-cache existing daily_inspection_data records for these dates:
+    // Key: "date|UPPER(pcode)|UPPER(lot)" => id
+    $existingItems = [];
+    $stmtItems = $pdo->prepare("SELECT id, inspecting_date, UPPER(part_code) as pcode, UPPER(lot_number) as lot FROM daily_inspection_data WHERE inspecting_date IN ($inClause)");
+    $stmtItems->execute($allDates);
+    while ($iRow = $stmtItems->fetch(PDO::FETCH_ASSOC)) {
+        $key = $iRow['inspecting_date'] . '|' . $iRow['pcode'] . '|' . $iRow['lot'];
+        $existingItems[$key] = (int)$iRow['id'];
+    }
+
+    // Prepared statements for INSERT and UPDATE daily_inspection_data
+    $stmtInsertDID = $pdo->prepare("INSERT INTO daily_inspection_data
+        (batch_id, part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, remark, created_at)
+        VALUES (:bid, :pcode, :pname, :lot, :cav, :idate, :status, :pic, :remark, NOW())");
+
+    $stmtUpdateDID = $pdo->prepare("UPDATE daily_inspection_data SET
+        batch_id = :bid, part_name = :pname, cavity = :cav, status_inspect = :status, pic = :pic, remark = :remark, updated_at = NOW()
+        WHERE id = :id");
+
+    $stmtInsertBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'excel_import', 0, :cby, NOW())");
+
+    $stmtRecalcBatch = $pdo->prepare("UPDATE did_batches SET 
+        total_items = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid1),
+        ok_count = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid2 AND status_inspect = 'OK'),
+        ng_count = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid3 AND status_inspect = 'NG')
+        WHERE id = :bid4");
+
+    $currentUserId = current_user()['id'];
+    $totalInserted = 0;
+    $totalUpdated  = 0;
+    $summaryLines  = [];
+    $affectedBatches = [];
+
+    $pdo->beginTransaction();
+
+    try {
+        foreach ($parsedData as $inspectingDate => $rows) {
+            // Get or Create Batch ID
+            if (isset($existingBatches[$inspectingDate])) {
+                $batchId = $existingBatches[$inspectingDate];
+            } else {
+                $batchTitle = 'Import Excel DID (' . date('d M Y', strtotime($inspectingDate)) . ')';
+                $stmtInsertBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate, ':cby' => $currentUserId]);
+                $batchId = (int)$pdo->lastInsertId();
+                $existingBatches[$inspectingDate] = $batchId;
             }
-        } catch (PDOException $e) { /* lanjut */ }
+            $affectedBatches[$batchId] = true;
 
-        // Buat batch baru untuk tanggal ini
-        try {
-            $currentUserId = current_user()['id'];
-            $batchTitle = 'Import Excel DID (' . date('d M Y', strtotime($inspectingDate)) . ')';
-            $stmtBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'excel_import', 0, :cby, NOW())");
-            $stmtBatch->execute([':bname' => $batchTitle, ':idate' => $inspectingDate, ':cby' => $currentUserId]);
-            $batchId = $pdo->lastInsertId();
-
-            $okCount  = 0;
-            $ngCount  = 0;
-            $inserted = 0;
-
-            $stmtInsert = $pdo->prepare("INSERT INTO daily_inspection_data
-                (batch_id, part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, remark, created_at)
-                VALUES (:bid, :pcode, :pname, :lot, :cav, :idate, :status, :pic, :remark, NOW())");
+            $sheetInserted = 0;
+            $sheetUpdated  = 0;
 
             foreach ($rows as $r) {
-                $partCode = $r['part_code'];
-                $partName = $r['part_name'];
+                $partCode = strtoupper(trim($r['part_code']));
+                $lotNumber = strtoupper(trim($r['lot_number']));
                 if (empty($partCode)) continue;
 
-                try {
-                    // Auto-create master part if not exists
-                    $stmtChkMaster = $pdo->prepare("SELECT id FROM master_parts WHERE part_code = :pc");
-                    $stmtChkMaster->execute([':pc' => $partCode]);
-                    if (!$stmtChkMaster->fetch()) {
-                        $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pc, :pn, 'auto_generated', NOW())")
-                            ->execute([':pc' => $partCode, ':pn' => $partName]);
-                    }
+                // Sync Part Name with Master Part
+                if (isset($cachedParts[$partCode])) {
+                    $officialPartName = $cachedParts[$partCode];
+                } else {
+                    // Part code not in master, auto-register it using excel's part name
+                    $officialPartName = trim($r['part_name']) ?: $partCode;
+                    $stmtInsertMaster->execute([':pc' => $partCode, ':pn' => $officialPartName]);
+                    $cachedParts[$partCode] = $officialPartName;
+                }
 
-                    $stmtInsert->execute([
+                $key = $inspectingDate . '|' . $partCode . '|' . $lotNumber;
+
+                if (isset($existingItems[$key])) {
+                    // UPDATE existing item
+                    $didId = $existingItems[$key];
+                    $stmtUpdateDID->execute([
+                        ':bid'    => $batchId,
+                        ':pname'  => $officialPartName,
+                        ':cav'    => $r['cavity'] ?: '1',
+                        ':status' => $r['status_inspect'],
+                        ':pic'    => $r['pic'] ?: 'Import QC',
+                        ':remark' => $r['remark'],
+                        ':id'     => $didId
+                    ]);
+                    $sheetUpdated++;
+                } else {
+                    // INSERT new item
+                    $stmtInsertDID->execute([
                         ':bid'    => $batchId,
                         ':pcode'  => $partCode,
-                        ':pname'  => $partName,
-                        ':lot'    => $r['lot_number'],
-                        ':cav'    => $r['cavity'],
-                        ':idate'  => $r['inspecting_date'],
+                        ':pname'  => $officialPartName,
+                        ':lot'    => $lotNumber,
+                        ':cav'    => $r['cavity'] ?: '1',
+                        ':idate'  => $inspectingDate,
                         ':status' => $r['status_inspect'],
-                        ':pic'    => $r['pic'],
-                        ':remark' => $r['remark'],
+                        ':pic'    => $r['pic'] ?: 'Import QC',
+                        ':remark' => $r['remark']
                     ]);
-
-                    $inserted++;
-                    if ($r['status_inspect'] === 'OK') $okCount++; else $ngCount++;
-                } catch (PDOException $rowEx) {
-                    // Skip single problematic row, don't abort the entire batch
-                    continue;
+                    $newId = (int)$pdo->lastInsertId();
+                    $existingItems[$key] = $newId;
+                    $sheetInserted++;
                 }
             }
 
-            // Update batch stats
-            $pdo->prepare("UPDATE did_batches SET total_items = :t, ok_count = :ok, ng_count = :ng WHERE id = :bid")
-                ->execute([':t' => $inserted, ':ok' => $okCount, ':ng' => $ngCount, ':bid' => $batchId]);
+            $totalInserted += $sheetInserted;
+            $totalUpdated  += $sheetUpdated;
 
-            if ($inserted > 0) {
-                $batchesCreated++;
-                $totalItemsOk += $okCount;
-                $totalItemsNg += $ngCount;
-                $summaryLines[] = date('d M Y', strtotime($inspectingDate)) . ' → ' . $inserted . ' item (' . $okCount . ' OK' . ($ngCount > 0 ? ', ' . $ngCount . ' NG' : '') . ')';
-            } else {
-                // Delete empty batch header if no rows were inserted
-                $pdo->exec("DELETE FROM did_batches WHERE id = {$batchId}");
-            }
-
-        } catch (PDOException $e) {
-            // Batch creation failed
-            if (!empty($batchId)) {
-                try { $pdo->exec("DELETE FROM did_batches WHERE id = {$batchId} AND total_items = 0"); } catch (Exception $_) {}
-            }
+            $summaryLines[] = date('d M Y', strtotime($inspectingDate)) . ' → ' . ($sheetInserted + $sheetUpdated) . ' item (' . $sheetInserted . ' baru, ' . $sheetUpdated . ' di-update)';
         }
-    }
 
-    // Flash message ringkasan
-    if ($batchesCreated > 0) {
-        $msg = '✅ Import Excel berhasil! ' . $batchesCreated . ' batch baru dibuat:' . "\n" . implode("\n", $summaryLines);
-        if ($batchesSkipped > 0) {
-            $msg .= "\n⚠ " . $batchesSkipped . ' tab dilewati (tanggal sudah ada batch): ' . implode(', ', $skippedDates);
+        // Recalculate summary stats for all affected batches
+        foreach (array_keys($affectedBatches) as $bId) {
+            $stmtRecalcBatch->execute([':bid1' => $bId, ':bid2' => $bId, ':bid3' => $bId, ':bid4' => $bId]);
         }
+
+        $pdo->commit();
+
+        $msg = '✅ Import Excel Berhasil (Selesai diproses)!' . "\n" . implode("\n", $summaryLines);
         set_flash('success', $msg);
-    } else {
-        $msg = 'Semua tab dilewati — setiap tanggal sudah punya batch DID.';
-        if (!empty($skippedDates)) $msg .= ' (' . implode(', ', $skippedDates) . ')';
-        set_flash('warning', $msg);
+
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        set_flash('error', 'Gagal memproses import Excel: ' . $e->getMessage());
     }
 }
 
 redirect('modules/did/index.php');
+

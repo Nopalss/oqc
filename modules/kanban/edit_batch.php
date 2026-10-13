@@ -3,6 +3,8 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('kanban');
+
 $batch_id = filter_input(INPUT_GET, 'batch_id', FILTER_VALIDATE_INT);
 $pdo = getDB();
 $batch = null;
@@ -74,6 +76,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <!-- Multi-Row Dynamic Matrix Form for Batch Edit -->
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs space-y-4 max-w-full overflow-hidden">
             <form action="<?= base_url('modules/kanban/update_batch.php') ?>" method="POST" class="space-y-4 max-w-full overflow-hidden">
+                <?= csrf_field() ?>
                 <input type="hidden" name="batch_id" value="<?= $batch['id'] ?>">
                 <input type="hidden" name="return_date" value="<?= htmlspecialchars($returnDate) ?>">
 

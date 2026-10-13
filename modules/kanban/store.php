@@ -2,15 +2,19 @@
 /**
  * Action Handler: Store Kanban Schedule (FR-1)
  * Supports Multi-Row Manual Matrix Entry & CSV/Excel Batch Import
- * JSON payload supported to prevent PHP max_input_vars limit
+ * Secured with RBAC, CSRF, Atomic Single Transactions, and Memory-Cached Inserts
  */
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('kanban');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/kanban/index.php');
 }
+
+csrf_verify();
 
 $pdo = getDB();
 
@@ -55,6 +59,8 @@ if ($entryType === 'manual') {
     }
 
     try {
+        $pdo->beginTransaction();
+
         $currentUser = current_user();
         $importedBy = !empty($currentUser['id']) ? (int)$currentUser['id'] : 1;
 
@@ -98,6 +104,25 @@ if ($entryType === 'manual') {
             }
         }
 
+        // Preload master parts and customers caches in memory
+        $cachedParts = [];
+        $stmtAllParts = $pdo->query("SELECT UPPER(part_code) AS pcode FROM master_parts");
+        while ($pRow = $stmtAllParts->fetch(PDO::FETCH_ASSOC)) {
+            $cachedParts[$pRow['pcode']] = true;
+        }
+
+        $cachedCustomers = [];
+        $stmtAllCust = $pdo->query("SELECT UPPER(name) AS cname FROM master_customers");
+        while ($cRow = $stmtAllCust->fetch(PDO::FETCH_ASSOC)) {
+            $cachedCustomers[$cRow['cname']] = true;
+        }
+
+        $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+        $stmtInsertCust   = $pdo->prepare("INSERT INTO master_customers (name, created_at) VALUES (:cname, NOW())");
+        $stmtItem         = $pdo->prepare("INSERT INTO kanban_items 
+            (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, eta, str_loc, supply_area, check_type, remark, created_at) 
+            VALUES (:batch_id, :ptype, :kno, :icode, :idesc, :cust, :rdate, :qty, :eta, :sloc, :sarea, :ctype, :remark, NOW())");
+
         $seenBatchFingerprints = [];
         $successCount = 0;
         $skipCount = 0;
@@ -136,7 +161,7 @@ if ($entryType === 'manual') {
                 if (empty($rowCustomer)) $rowCustomer = 'PT. Indonesia Epson Industry';
             }
 
-            // Per-row Req Date & ETA (Supports full Date & Time YYYY-MM-DD HH:MM:SS)
+            // Per-row Req Date & ETA
             $rowReqDate = str_replace('T', ' ', sanitize($r['req_date'] ?? date('Y-m-d H:i:s')));
             if (strlen($rowReqDate) === 10) {
                 $rowReqDate .= ' 00:00:00';
@@ -187,29 +212,20 @@ if ($entryType === 'manual') {
 
             $seenBatchFingerprints[$itemFingerprint] = true;
 
-            // Auto-create Master Customer if custom customer given and not exists
-            if (!empty($rowCustomer)) {
-                $stmtChkCust = $pdo->prepare("SELECT id FROM master_customers WHERE name = :cname");
-                $stmtChkCust->execute([':cname' => $rowCustomer]);
-                if (!$stmtChkCust->fetch()) {
-                    $pdo->prepare("INSERT INTO master_customers (name, created_at) VALUES (:cname, NOW())")
-                        ->execute([':cname' => $rowCustomer]);
-                }
+            // Auto-create Master Customer if missing (cached)
+            $upperCust = strtoupper($rowCustomer);
+            if (!empty($rowCustomer) && !isset($cachedCustomers[$upperCust])) {
+                $stmtInsertCust->execute([':cname' => $rowCustomer]);
+                $cachedCustomers[$upperCust] = true;
             }
 
-            // Auto-create Master Part if not exists
-            $stmtCheckMaster = $pdo->prepare("SELECT id FROM master_parts WHERE part_code = :pcode");
-            $stmtCheckMaster->execute([':pcode' => $itemCode]);
-            if (!$stmtCheckMaster->fetch()) {
-                $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+            // Auto-create Master Part if not exists (cached)
+            if (!isset($cachedParts[$itemCode])) {
                 $stmtInsertMaster->execute([':pcode' => $itemCode, ':pname' => $itemDesc]);
+                $cachedParts[$itemCode] = true;
             }
 
             // Insert Kanban / Planning Item
-            $stmtItem = $pdo->prepare("INSERT INTO kanban_items 
-                (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, eta, str_loc, supply_area, check_type, remark, created_at) 
-                VALUES (:batch_id, :ptype, :kno, :icode, :idesc, :cust, :rdate, :qty, :eta, :sloc, :sarea, :ctype, :remark, NOW())");
-            
             $stmtItem->execute([
                 ':batch_id' => $batchId,
                 ':ptype'    => $planType,
@@ -230,6 +246,7 @@ if ($entryType === 'manual') {
         }
 
         if ($successCount > 0) {
+            $pdo->commit();
             $msg = 'Berhasil menyimpan ' . $successCount . ' baris data Kanban baru.';
             $details = [];
             if ($duplicateCount > 0) {
@@ -243,6 +260,7 @@ if ($entryType === 'manual') {
             }
             set_flash('success', $msg);
         } else {
+            $pdo->rollBack();
             if ($duplicateCount > 0) {
                 set_flash('warning', 'Tidak ada data baru yang disimpan. Seluruh ' . $duplicateCount . ' baris terdeteksi duplikat dan sudah ada sebelumnya!');
             } else {
@@ -250,6 +268,9 @@ if ($entryType === 'manual') {
             }
         }
     } catch (PDOException $e) {
+        if ($pdo && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         set_flash('error', 'Gagal menyimpan batch Kanban: ' . $e->getMessage());
     }
 
@@ -273,10 +294,24 @@ if ($entryType === 'manual') {
     }
 
     try {
+        $pdo->beginTransaction();
+
         // Create Batch Header
         $stmtBatch = $pdo->prepare("INSERT INTO kanban_batches (vendor, document_number, import_method, imported_at) VALUES (:vendor, :doc, 'excel_import', NOW())");
         $stmtBatch->execute([':vendor' => $vendor, ':doc' => $docNum]);
         $batchId = $pdo->lastInsertId();
+
+        // Preload caches
+        $cachedParts = [];
+        $stmtAllParts = $pdo->query("SELECT UPPER(part_code) AS pcode FROM master_parts");
+        while ($pRow = $stmtAllParts->fetch(PDO::FETCH_ASSOC)) {
+            $cachedParts[$pRow['pcode']] = true;
+        }
+
+        $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+        $stmtItem = $pdo->prepare("INSERT INTO kanban_items 
+            (batch_id, kanban_no, item_code, item_description, customer, req_date, qty, eta, str_loc, supply_area, check_type, remark, created_at) 
+            VALUES (:batch_id, :kno, :icode, :idesc, :cust, :rdate, :qty, :eta, :sloc, :sarea, :ctype, :remark, NOW())");
 
         $successCount = 0;
         $lineNum = 0;
@@ -304,19 +339,13 @@ if ($entryType === 'manual') {
                 continue;
             }
 
-            // Auto-create Master Part if not exists
-            $stmtCheckMaster = $pdo->prepare("SELECT id FROM master_parts WHERE part_code = :pcode");
-            $stmtCheckMaster->execute([':pcode' => $itemCode]);
-            if (!$stmtCheckMaster->fetch()) {
-                $stmtInsertMaster = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, source, created_at) VALUES (:pcode, :pname, 'auto_generated', NOW())");
+            // Auto-create Master Part if not exists (cached)
+            if (!isset($cachedParts[$itemCode])) {
                 $stmtInsertMaster->execute([':pcode' => $itemCode, ':pname' => $itemDesc ?: $itemCode]);
+                $cachedParts[$itemCode] = true;
             }
 
             // Insert Item
-            $stmtItem = $pdo->prepare("INSERT INTO kanban_items 
-                (batch_id, kanban_no, item_code, item_description, customer, req_date, qty, eta, str_loc, supply_area, check_type, remark, created_at) 
-                VALUES (:batch_id, :kno, :icode, :idesc, :cust, :rdate, :qty, :eta, :sloc, :sarea, :ctype, :remark, NOW())");
-            
             $stmtItem->execute([
                 ':batch_id' => $batchId,
                 ':kno'      => $kanbanNo,
@@ -337,8 +366,17 @@ if ($entryType === 'manual') {
 
         fclose($handle);
 
-        set_flash('success', 'Berhasil meng-import ' . $successCount . ' baris item Kanban ke Dokumen Batch "' . $docNum . '"!');
+        if ($successCount > 0) {
+            $pdo->commit();
+            set_flash('success', 'Berhasil meng-import ' . $successCount . ' baris item Kanban ke Dokumen Batch "' . $docNum . '"!');
+        } else {
+            $pdo->rollBack();
+            set_flash('warning', 'Tidak ada data valid yang dapat diimpor dari file.');
+        }
     } catch (PDOException $e) {
+        if ($pdo && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         set_flash('error', 'Gagal memproses batch import Kanban: ' . $e->getMessage());
     }
 }

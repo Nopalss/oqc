@@ -70,6 +70,7 @@ if ($pdo) {
     try {
         $where  = [
             "(ss.original_ss_session_id IS NULL OR ss.original_ss_session_id = 0)",
+            "(ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')",
             "(ki.remark IS NULL OR (ki.remark NOT LIKE '%AUTO-SS-SESS-%' AND ki.remark NOT LIKE '%Split%'))"
         ];
         $params = [];
@@ -124,7 +125,8 @@ if ($pdo) {
                         COUNT(id) AS lot_count, 
                         SUM(qty) AS lot_qty 
                     FROM inspection_session_lots 
-                    WHERE (remarks IS NULL OR (remarks NOT LIKE '%Sisa Split Safety Stock%' AND remarks NOT LIKE 'Sisa Kelebihan Kanban%' AND remarks NOT LIKE 'Alokasi Safety Stock%'))
+                    WHERE (ref_number IS NULL OR (ref_number != 'DIRECT-PASS' AND ref_number NOT LIKE '%DIRECT-PASS%'))
+                      AND (remarks IS NULL OR (remarks NOT LIKE '%Direct Close%' AND remarks NOT LIKE '%Sisa Split Safety Stock%' AND remarks NOT LIKE 'Sisa Kelebihan Kanban%'))
                     GROUP BY inspection_session_id
                 ) lot_stats ON lot_stats.inspection_session_id = ss.id
                 LEFT JOIN (

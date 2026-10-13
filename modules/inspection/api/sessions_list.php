@@ -9,8 +9,17 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 
+// Production Security Guard: Require authenticated user
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+session_write_close();
+
 $pdo = getDB();
 if (!$pdo) {
+    http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'DB connection failed']);
     exit;
 }

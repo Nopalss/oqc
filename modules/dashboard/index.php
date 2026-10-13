@@ -39,8 +39,12 @@ $_metaCacheKey = 'oqc_dash_meta_' . date('YmdH');
 if (!isset($_SESSION[$_metaCacheKey]) && $pdo) {
     $_cache = [];
     try {
-        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC");
+        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(summary_date) AS y FROM oqc_daily_summary ORDER BY y ASC");
         $_cache['years'] = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        if (empty($_cache['years'])) {
+            $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC LIMIT 20");
+            $_cache['years'] = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        }
     } catch (Exception $e) { $_cache['years'] = []; }
     try {
         $stmtCust = $pdo->query("SELECT DISTINCT name FROM master_customers UNION SELECT DISTINCT customer FROM kanban_items WHERE customer IS NOT NULL AND customer != '' ORDER BY name ASC");
@@ -159,9 +163,9 @@ $PALETTE        = ($selectedResult === 'passed') ? $PASS_PALETTE : $STD_PALETTE;
 
 if ($pdo) {
     try {
-        // Auto-heal / self-backfill if summary is empty
-        $chkSum = (int)$pdo->query("SELECT COUNT(*) FROM oqc_daily_summary")->fetchColumn();
-        if ($chkSum === 0) {
+        // Auto-heal / self-backfill if summary is empty (instant O(1) existence check)
+        $hasSummary = (bool)$pdo->query("SELECT 1 FROM oqc_daily_summary LIMIT 1")->fetchColumn();
+        if (!$hasSummary) {
             backfillAllDailySummaries($pdo);
         }
 
@@ -849,6 +853,40 @@ if ($pdo) {
     } catch (PDOException $e) {}
 }
 
+// ── Compute initial version fingerprint for live sync ──────────────────────
+$initialDashboardVersion = '';
+if ($pdo) {
+    try {
+        $stmtSumV = $pdo->prepare("SELECT 
+            COALESCE(MAX(id), 0) AS max_sum_id,
+            COALESCE(MAX(updated_at), '1970-01-01') AS last_sum_update,
+            COUNT(id) AS sum_count
+        FROM oqc_daily_summary
+        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}");
+        $stmtSumV->execute($p);
+        $rSumV = $stmtSumV->fetch(PDO::FETCH_ASSOC);
+
+        $stmtSessV = $pdo->prepare("SELECT 
+            COALESCE(MAX(id), 0) AS max_sess_id,
+            COUNT(id) AS sess_count
+        FROM inspection_sessions
+        WHERE started_at >= :sd AND started_at < :ed_next");
+        $stmtSessV->execute([':sd' => $startDate, ':ed_next' => $edNext]);
+        $rSessV = $stmtSessV->fetch(PDO::FETCH_ASSOC);
+
+        $initialDashboardVersion = md5(implode('|', [
+            $rSumV['max_sum_id'] ?? 0,
+            $rSumV['last_sum_update'] ?? '',
+            $rSumV['sum_count'] ?? 0,
+            $rSessV['max_sess_id'] ?? 0,
+            $rSessV['sess_count'] ?? 0,
+            $startDate,
+            $endDate,
+            $selectedCustomer
+        ]));
+    } catch (Exception $eV) {}
+}
+
 $jsLabels       = json_encode($trendLabels);
 $jsTrendPPM     = json_encode($trendPPM);
 $jsTrendNG      = json_encode($trendNG);
@@ -892,6 +930,17 @@ $unitText       = $selectedUnit === 'lot' ? 'Lot' : 'Pcs';
 $isPassedMode   = ($selectedResult === 'passed');
 $lineColor      = $isPassedMode ? '#059669' : '#2563eb';
 $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)';
+
+// Compute initial dashboard version fingerprint for realtime sync & caching
+$initialDashboardVersion = md5(implode('|', [
+    $rowKpi['total_lots'] ?? 0,
+    $rowKpi['total_sample_size'] ?? 0,
+    $rowKpi['total_ng_samples'] ?? 0,
+    $startDate,
+    $endDate,
+    $selectedCustomer,
+    date('YmdH')
+]));
 ?>
 
 <div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col transition-all duration-300 min-h-screen bg-slate-100">
@@ -1053,8 +1102,17 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                     </div>
                 </div>
 
-                <!-- Action Buttons: Print Report & Export Excel -->
-                <div style="display:flex;align-items:center;gap:8px;">
+                <!-- Action Buttons: Live Sync Widget, Print Report & Export Excel -->
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <!-- Sync Button (Direct Refresh from Server) -->
+                    <button type="button" id="btnLiveSyncManual" onclick="manualSyncNow()" 
+                            style="border:1px solid #cbd5e1;background:#ffffff;cursor:pointer;padding:5px 12px;border-radius:8px;color:#1e293b;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,0.04);transition:all 0.15s;" 
+                            onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#ffffff'" 
+                            title="Ambil &amp; Sinkronkan Data Terbaru Langsung dari Server">
+                        <svg id="iconLiveSyncSpin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                        <span>Sync</span>
+                    </button>
+
                     <!-- Print Report Action Button -->
                     <button type="button" onclick="printDashboardReport()" 
                             style="display:inline-flex;align-items:center;gap:6px;padding:5px 14px;background:#2563eb;color:#ffffff;font-size:11px;font-weight:800;border-radius:8px;border:none;cursor:pointer;box-shadow:0 1px 3px rgba(37,99,235,0.3);transition:all 0.2s;"
@@ -1153,11 +1211,11 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
             $sampleBasisLabel = ($selectedSampleBasis === 'session') ? ' (Basis Sesi)' : ' (Basis Lot)';
             $sampleBasisSub = ($selectedSampleBasis === 'session') ? 'Sampel kanban dicek' : 'Sample fisik dicek';
             $kpis = [
-                ['key'=>'sample_inspected','label'=>$isLotUnit ? 'Total Lot Inspected' : ('Total Sample Inspected' . $sampleBasisLabel),'val'=>number_format($kpi['total_inspected'] ?? 0),'unit'=>$isLotUnit ? 'lot' : 'pcs','sub'=>$isLotUnit ? 'Total box/lot discan' : $sampleBasisSub,'icon'=>'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z','iconColor'=>'#2563eb','bg'=>'#eff6ff'],
-                ['key'=>'total_ng','label'=>$isLotUnit ? 'Total Lot Reject' : 'Total NG Pcs','val'=>number_format($kpi['total_ng'] ?? 0),'unit'=>$isLotUnit ? 'lot' : 'pcs','sub'=>$isLotUnit ? 'Box ditemukan defect' : 'Fisik sampel cacat','icon'=>'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z','iconColor'=>'#dc2626','bg'=>'#fff1f2','valColor'=>'#dc2626'],
-                ['key'=>'defect_rate','label'=>$isLotUnit ? 'Lot Reject Rate (%)' : 'Defect Rate (<span id="kpiMetricScaleLabel">PPM</span>)','val'=>$isLotUnit ? (number_format($kpi['pct_rate'] ?? 0, 2) . ' <span style="font-size:12px;font-weight:700;">%</span>') : ('<span id="kpiMetricRateVal">'.number_format($kpi['ppm_rate'] ?? 0, 1).'</span>'),'unit'=>'','sub'=>$isLotUnit ? 'Persentase penolakan lot' : 'Rasio defect sampling','icon'=>'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6','iconColor'=>$ngRateColor,'bg'=>$ngRateBg,'valColor'=>$ngRateColor],
-                ['key'=>'total_lot','label'=>'Total LOT','val'=>number_format($kpi['total_lot'] ?? 0),'unit'=>'lot','sub'=>'Label / box discan','icon'=>'M4 6h16M4 10h16M4 14h16M4 18h16','iconColor'=>'#0284c7','bg'=>'#f0f9ff'],
-                ['key'=>$isPassedMode ? 'passed_lot' : 'ng_lot','label'=>$isPassedMode ? 'Total Passed Lot' : 'Total NG Lot','val'=>number_format($isPassedMode ? ($kpi['pass_count'] ?? 0) : ($kpi['rejected_count'] ?? 0)),'unit'=>'lot','sub'=>$isPassedMode ? 'Lot berstatus lulus' : 'Label lot NG','icon'=>$isPassedMode ? 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' : 'M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636','iconColor'=>$isPassedMode ? '#059669' : '#e11d48','bg'=>$isPassedMode ? '#f0fdf4' : '#ffe4e6','valColor'=>$isPassedMode ? '#059669' : '#e11d48'],
+                ['key'=>'sample_inspected','dom_id'=>'kpi-val-sample_inspected','label'=>$isLotUnit ? 'Total Lot Inspected' : ('Total Sample Inspected' . $sampleBasisLabel),'val'=>number_format($kpi['total_inspected'] ?? 0),'unit'=>$isLotUnit ? 'lot' : 'pcs','sub'=>$isLotUnit ? 'Total box/lot discan' : $sampleBasisSub,'icon'=>'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z','iconColor'=>'#2563eb','bg'=>'#eff6ff'],
+                ['key'=>'total_ng','dom_id'=>'kpi-val-total_ng','label'=>$isLotUnit ? 'Total Lot Reject' : 'Total NG Pcs','val'=>number_format($kpi['total_ng'] ?? 0),'unit'=>$isLotUnit ? 'lot' : 'pcs','sub'=>$isLotUnit ? 'Box ditemukan defect' : 'Fisik sampel cacat','icon'=>'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z','iconColor'=>'#dc2626','bg'=>'#fff1f2','valColor'=>'#dc2626'],
+                ['key'=>'defect_rate','dom_id'=>'kpi-val-defect_rate','label'=>$isLotUnit ? 'Lot Reject Rate (%)' : 'Defect Rate (<span id="kpiMetricScaleLabel">PPM</span>)','val'=>$isLotUnit ? (number_format($kpi['pct_rate'] ?? 0, 2) . ' <span style="font-size:12px;font-weight:700;">%</span>') : ('<span id="kpiMetricRateVal">'.number_format($kpi['ppm_rate'] ?? 0, 1).'</span>'),'unit'=>'','sub'=>$isLotUnit ? 'Persentase penolakan lot' : 'Rasio defect sampling','icon'=>'M13 7h8m0 0v8m0-8l-8 8-4-4-6 6','iconColor'=>$ngRateColor,'bg'=>$ngRateBg,'valColor'=>$ngRateColor],
+                ['key'=>'total_lot','dom_id'=>'kpi-val-total_lot','label'=>'Total LOT','val'=>number_format($kpi['total_lot'] ?? 0),'unit'=>'lot','sub'=>'Label / box discan','icon'=>'M4 6h16M4 10h16M4 14h16M4 18h16','iconColor'=>'#0284c7','bg'=>'#f0f9ff'],
+                ['key'=>$isPassedMode ? 'passed_lot' : 'ng_lot','dom_id'=>'kpi-val-pass_reject_lot','label'=>$isPassedMode ? 'Total Passed Lot' : 'Total NG Lot','val'=>number_format($isPassedMode ? ($kpi['pass_count'] ?? 0) : ($kpi['rejected_count'] ?? 0)),'unit'=>'lot','sub'=>$isPassedMode ? 'Lot berstatus lulus' : 'Label lot NG','icon'=>$isPassedMode ? 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' : 'M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636','iconColor'=>$isPassedMode ? '#059669' : '#e11d48','bg'=>$isPassedMode ? '#f0fdf4' : '#ffe4e6','valColor'=>$isPassedMode ? '#059669' : '#e11d48'],
             ];
             foreach ($kpis as $kitem): ?>
             <div class="card kpi-clickable-card" onclick="openKpiDrilldownModal('<?= $kitem['key'] ?>')" 
@@ -1175,7 +1233,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2.5" style="flex-shrink:0;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                         </div>
                         <div style="font-size:20px;font-weight:900;color:<?= $kitem['valColor'] ?? '#0f172a' ?>;line-height:1.15;margin-top:2px;">
-                            <?= $kitem['val'] ?><?php if($kitem['unit']): ?> <span style="font-size:11px;font-weight:500;color:#94a3b8;"><?= $kitem['unit'] ?></span><?php endif; ?>
+                            <span id="<?= $kitem['dom_id'] ?>"><?= $kitem['val'] ?></span><?php if($kitem['unit']): ?> <span style="font-size:11px;font-weight:500;color:#94a3b8;"><?= $kitem['unit'] ?></span><?php endif; ?>
                         </div>
                         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px;">
                             <span style="font-size:9.5px;color:#64748b;"><?= $kitem['sub'] ?></span>
@@ -1507,11 +1565,11 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                             <canvas id="chartDefect" style="width:100%;height:100%;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
                                 <span style="font-size:8.5px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.04em;"><?= $isPassedMode ? 'TOTAL' : 'TOTAL NG' ?></span>
-                                <span style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.1;"><?= number_format(array_sum($defectCounts)) ?></span>
+                                <span id="donutDefectTotalVal" style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.1;"><?= number_format(array_sum($defectCounts)) ?></span>
                                 <span style="font-size:8.5px;font-weight:700;color:#64748b;"><?= strtolower($unitText) ?></span>
                             </div>
                         </div>
-                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
+                        <div id="defectTypeLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
                             <?php $totalD = array_sum($defectCounts) ?: 1;
                             foreach ($defectLabels as $di => $dl):
                                 $dpct = round($defectCounts[$di]/$totalD*100,1);
@@ -1553,11 +1611,11 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                             <canvas id="chartModelPie" style="width:100%;height:100%;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
                                 <span style="font-size:8.5px;font-weight:800;color:#6366f1;text-transform:uppercase;letter-spacing:0.04em;">MODEL</span>
-                                <span style="font-size:15px;font-weight:900;color:#1e1b4b;line-height:1.1;"><?= count($modelCounts) ?></span>
+                                <span id="donutModelTotalVal" style="font-size:15px;font-weight:900;color:#1e1b4b;line-height:1.1;"><?= count($modelCounts) ?></span>
                                 <span style="font-size:8.5px;font-weight:700;color:#64748b;">tipe</span>
                             </div>
                         </div>
-                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
+                        <div id="modelLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
                             <?php $totalM = array_sum($modelCounts) ?: 1;
                             foreach ($modelLabels as $mi => $ml):
                                 $mpct = round($modelCounts[$mi]/$totalM*100,1);
@@ -1599,11 +1657,11 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                             <canvas id="chartPartPie" style="width:100%;height:100%;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
                                 <span style="font-size:8.5px;font-weight:800;color:#0d9488;text-transform:uppercase;letter-spacing:0.04em;">PART</span>
-                                <span style="font-size:15px;font-weight:900;color:#134e4a;line-height:1.1;"><?= count($pieCounts) ?></span>
+                                <span id="donutPartTotalVal" style="font-size:15px;font-weight:900;color:#134e4a;line-height:1.1;"><?= count($pieCounts) ?></span>
                                 <span style="font-size:8.5px;font-weight:700;color:#64748b;">item</span>
                             </div>
                         </div>
-                        <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
+                        <div id="partLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
                             <?php $totalP = array_sum($pieCounts) ?: 1;
                             foreach ($pieLabels as $pi => $pl):
                                 $ppct = round($pieCounts[$pi]/$totalP*100,1);
@@ -1623,7 +1681,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
         </div>
 
         <!-- ── Section 3: II. WORST PART OQC vs BEST PERFORMANCE PART OQC ─────── -->
-        <div class="card" style="padding:16px 18px;">
+        <div id="sectionWorstBestPartsContainer" class="card" style="padding:16px 18px;">
             <?php if ($isPassedMode): ?>
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">
                     <div>
@@ -1933,7 +1991,86 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     var activeSampleBasis      = '<?= $selectedSampleBasis ?>';
     var isPassedMode           = <?= $isPassedMode ? 'true' : 'false' ?>;
 
-    var trendChartInstance     = null;
+    var currentDashboardVersion = <?= json_encode($initialDashboardVersion) ?>;
+    var filterParams = {
+        customer: <?= json_encode($selectedCustomer) ?>,
+        unit: <?= json_encode($selectedUnit) ?>,
+        sample_basis: <?= json_encode($selectedSampleBasis) ?>,
+        result: <?= json_encode($selectedResult) ?>,
+        filter_type: <?= json_encode($filterType) ?>,
+        preset: <?= json_encode($presetFilter) ?>,
+        month: <?= json_encode($selectedMonth) ?>,
+        year: <?= json_encode($selectedYear) ?>,
+        start_date: <?= json_encode($startDate) ?>,
+        end_date: <?= json_encode($endDate) ?>,
+        top_rank: <?= json_encode($selectedTopRank) ?>
+    };
+
+    // ── LocalStorage Caching Engine (Stale-While-Revalidate) ───────────────────
+    function getDashboardCacheKey() {
+        return 'oqc_dash_cache_' + [
+            filterParams.customer || 'all',
+            filterParams.unit || 'pcs',
+            filterParams.sample_basis || 'lot',
+            filterParams.result || 'rejected',
+            filterParams.preset || 'bulanan',
+            filterParams.filter_type || 'default',
+            filterParams.start_date || '',
+            filterParams.end_date || '',
+            filterParams.top_rank || 3
+        ].join('_');
+    }
+
+    function saveDashboardCache(data) {
+        if (!data || data.status !== 'success') return;
+        try {
+            var key = getDashboardCacheKey();
+            var payload = {
+                v: data.version || currentDashboardVersion,
+                time: Date.now(),
+                data: data
+            };
+            localStorage.setItem(key, JSON.stringify(payload));
+
+            // Auto-clean old dashboard cache entries (> 48 jam)
+            if (Math.random() < 0.1) {
+                var now = Date.now();
+                for (var i = 0; i < localStorage.length; i++) {
+                    var k = localStorage.key(i);
+                    if (k && k.indexOf('oqc_dash_cache_') === 0) {
+                        try {
+                            var item = JSON.parse(localStorage.getItem(k));
+                            if (item && item.time && (now - item.time > 48 * 3600 * 1000)) {
+                                localStorage.removeItem(k);
+                            }
+                        } catch (e) {}
+                    }
+                }
+            }
+        } catch (err) {
+            console.warn('[OQC Cache] LocalStorage quota exceeded or error:', err);
+        }
+    }
+
+    function loadDashboardCache() {
+        try {
+            var key = getDashboardCacheKey();
+            var raw = localStorage.getItem(key);
+            if (!raw) return null;
+            var parsed = JSON.parse(raw);
+            if (parsed && parsed.data && parsed.data.status === 'success') {
+                return parsed;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    var trendChartInstance          = null;
+    var defectStackedChartInstance  = null;
+    var defectDoughnutChartInstance = null;
+    var modelPieChartInstance       = null;
+    var partPieChartInstance        = null;
+
     var trendLabelsData        = <?= $jsLabels ?>;
     var trendNGData            = <?= $jsTrendNG ?>;
     var trendSampleData        = <?= $jsTrendSample ?>;
@@ -2380,103 +2517,223 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     switchDefectTimelineView(currentDefectViewMode);
     <?php endif; ?>
 
+    // ── Universal Doughnut Floating Tooltip ───────────────────────────────────
+    var windowMouseX = 0;
+    var windowMouseY = 0;
+    window.addEventListener('mousemove', function(e) {
+        windowMouseX = e.clientX;
+        windowMouseY = e.clientY;
+    }, { passive: true });
+
+    function hideDashDonutTooltip() {
+        var tooltipEl = document.getElementById('chartjs-dash-donut-tooltip');
+        if (tooltipEl) {
+            tooltipEl.style.opacity = '0';
+            tooltipEl.style.display = 'none';
+        }
+    }
+
+    function dashDonutTooltipHandler(context) {
+        var tooltipEl = document.getElementById('chartjs-dash-donut-tooltip');
+
+        if (!tooltipEl) {
+            tooltipEl = document.createElement('div');
+            tooltipEl.id = 'chartjs-dash-donut-tooltip';
+            tooltipEl.style.position = 'fixed';
+            tooltipEl.style.zIndex = '99999';
+            tooltipEl.style.pointerEvents = 'none';
+            tooltipEl.style.background = 'rgba(15, 23, 42, 0.94)';
+            tooltipEl.style.backdropFilter = 'blur(6px)';
+            tooltipEl.style.color = '#ffffff';
+            tooltipEl.style.borderRadius = '8px';
+            tooltipEl.style.padding = '7px 12px';
+            tooltipEl.style.fontSize = '11px';
+            tooltipEl.style.boxShadow = '0 10px 25px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2)';
+            tooltipEl.style.border = '1px solid rgba(255, 255, 255, 0.16)';
+            tooltipEl.style.transition = 'opacity 0.08s ease-out';
+            tooltipEl.style.whiteSpace = 'nowrap';
+            document.body.appendChild(tooltipEl);
+        }
+
+        var tooltipModel = context.tooltip;
+        if (!tooltipModel || tooltipModel.opacity === 0) {
+            tooltipEl.style.opacity = '0';
+            tooltipEl.style.display = 'none';
+            return;
+        }
+
+        if (tooltipModel.body) {
+            var bodyLines = tooltipModel.body.map(function(b) { return b.lines; });
+            var colors = (tooltipModel.labelColors && tooltipModel.labelColors[0]) ? tooltipModel.labelColors[0] : null;
+            var bgColor = colors ? (colors.backgroundColor || '#2563eb') : '#2563eb';
+
+            var html = '';
+            bodyLines.forEach(function(body) {
+                var text = Array.isArray(body) ? body.join(' ') : String(body);
+                html += '<div style="display:flex;align-items:center;gap:7px;">' +
+                        '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + bgColor + ';box-shadow:0 0 0 1.5px rgba(255,255,255,0.4);flex-shrink:0;"></span>' +
+                        '<span style="font-weight:800;color:#f8fafc;letter-spacing:0.2px;">' + (typeof escapeHtml === 'function' ? escapeHtml(text.trim()) : text.trim()) + '</span>' +
+                        '</div>';
+            });
+            tooltipEl.innerHTML = html;
+        }
+
+        var canvas = context.chart.canvas;
+        var rect = canvas.getBoundingClientRect();
+
+        tooltipEl.style.display = 'block';
+        tooltipEl.style.opacity = '1';
+
+        var centerX = rect.left + rect.width / 2;
+        var centerY = rect.top + rect.height / 2;
+
+        if (windowMouseX > 0 && windowMouseX >= rect.left && windowMouseX <= rect.right && windowMouseY >= rect.top && windowMouseY <= rect.bottom) {
+            var dy = windowMouseY - centerY;
+            if (dy < 0) {
+                tooltipEl.style.transform = 'translate(-50%, -115%)';
+                tooltipEl.style.top = (windowMouseY - 8) + 'px';
+            } else {
+                tooltipEl.style.transform = 'translate(-50%, 18%)';
+                tooltipEl.style.top = (windowMouseY + 8) + 'px';
+            }
+            tooltipEl.style.left = windowMouseX + 'px';
+        } else {
+            var posX = rect.left + tooltipModel.caretX;
+            var posY = rect.top + tooltipModel.caretY;
+            var dx = posX - centerX;
+            var dy = posY - centerY;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 70) {
+                var angle = Math.atan2(dy, dx);
+                if (dist === 0) angle = -Math.PI / 2;
+                posX = centerX + Math.cos(angle) * 75;
+                posY = centerY + Math.sin(angle) * 75;
+            }
+            if (dy < 0) {
+                tooltipEl.style.transform = 'translate(-50%, -115%)';
+            } else {
+                tooltipEl.style.transform = 'translate(-50%, 18%)';
+            }
+            tooltipEl.style.left = posX + 'px';
+            tooltipEl.style.top = posY + 'px';
+        }
+    }
+
     <?php if (!empty($defectCounts)): ?>
-    new Chart(document.getElementById('chartDefect'), {
-        type:'doughnut',
-        data:{ 
-            labels:<?= $jsDefectLabels ?>, 
-            datasets:[{ 
-                data:<?= $jsDefectCounts ?>, 
-                backgroundColor:<?= $jsDefectColors ?>, 
-                borderWidth:2.5, 
-                borderColor:'#ffffff', 
-                hoverOffset:5,
-                borderRadius:4
-            }] 
-        },
-        options:{ 
-            responsive:true, 
-            maintainAspectRatio:false, 
-            cutout:'66%', 
-            plugins:{ 
-                legend:{display:false}, 
-                tooltip:{ 
-                    callbacks:{ 
-                        label:function(c){ 
-                            var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                            return ' '+c.label+': '+c.raw+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+    var ctxDef = document.getElementById('chartDefect');
+    if (ctxDef) {
+        defectDoughnutChartInstance = new Chart(ctxDef, {
+            type:'doughnut',
+            data:{ 
+                labels:<?= $jsDefectLabels ?>, 
+                datasets:[{ 
+                    data:<?= $jsDefectCounts ?>, 
+                    backgroundColor:<?= $jsDefectColors ?>, 
+                    borderWidth:2.5, 
+                    borderColor:'#ffffff', 
+                    hoverOffset:5,
+                    borderRadius:4
+                }] 
+            },
+            options:{ 
+                responsive:true, 
+                maintainAspectRatio:false, 
+                cutout:'66%', 
+                plugins:{ 
+                    legend:{display:false}, 
+                    tooltip:{ 
+                        enabled:false,
+                        external:dashDonutTooltipHandler,
+                        callbacks:{ 
+                            label:function(c){ 
+                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
+                                return c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+                            } 
                         } 
                     } 
                 } 
-            } 
-        }
-    });
+            }
+        });
+        ctxDef.onmouseleave = hideDashDonutTooltip;
+    }
     <?php endif; ?>
 
     <?php if (!empty($modelCounts)): ?>
-    new Chart(document.getElementById('chartModelPie'), {
-        type:'doughnut',
-        data:{ 
-            labels:<?= $jsModelLabels ?>, 
-            datasets:[{ 
-                data:<?= $jsModelCounts ?>, 
-                backgroundColor:<?= $jsModelColors ?>, 
-                borderWidth:2.5, 
-                borderColor:'#ffffff', 
-                hoverOffset:5,
-                borderRadius:3
-            }] 
-        },
-        options:{ 
-            responsive:true, 
-            maintainAspectRatio:false, 
-            cutout:'52%', 
-            plugins:{ 
-                legend:{display:false}, 
-                tooltip:{ 
-                    callbacks:{ 
-                        label:function(c){ 
-                            var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                            return ' Model '+c.label+': '+c.raw+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+    var ctxMod = document.getElementById('chartModelPie');
+    if (ctxMod) {
+        modelPieChartInstance = new Chart(ctxMod, {
+            type:'doughnut',
+            data:{ 
+                labels:<?= $jsModelLabels ?>, 
+                datasets:[{ 
+                    data:<?= $jsModelCounts ?>, 
+                    backgroundColor:<?= $jsModelColors ?>, 
+                    borderWidth:2.5, 
+                    borderColor:'#ffffff', 
+                    hoverOffset:5,
+                    borderRadius:3
+                }] 
+            },
+            options:{ 
+                responsive:true, 
+                maintainAspectRatio:false, 
+                cutout:'52%', 
+                plugins:{ 
+                    legend:{display:false}, 
+                    tooltip:{ 
+                        enabled:false,
+                        external:dashDonutTooltipHandler,
+                        callbacks:{ 
+                            label:function(c){ 
+                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
+                                return 'Model '+c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+                            } 
                         } 
                     } 
                 } 
-            } 
-        }
-    });
+            }
+        });
+        ctxMod.onmouseleave = hideDashDonutTooltip;
+    }
     <?php endif; ?>
 
     <?php if (!empty($pieCounts)): ?>
-    new Chart(document.getElementById('chartPartPie'), {
-        type:'doughnut',
-        data:{ 
-            labels:<?= $jsPieLabels ?>, 
-            datasets:[{ 
-                data:<?= $jsPieCounts ?>, 
-                backgroundColor:<?= $jsPartColors ?>, 
-                borderWidth:2, 
-                borderColor:'#ffffff', 
-                hoverOffset:5,
-                borderRadius:4
-            }] 
-        },
-        options:{ 
-            responsive:true, 
-            maintainAspectRatio:false, 
-            cutout:'74%', 
-            plugins:{ 
-                legend:{display:false}, 
-                tooltip:{ 
-                    callbacks:{ 
-                        label:function(c){ 
-                            var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                            return ' Part '+c.label+': '+c.raw+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+    var ctxPart = document.getElementById('chartPartPie');
+    if (ctxPart) {
+        partPieChartInstance = new Chart(ctxPart, {
+            type:'doughnut',
+            data:{ 
+                labels:<?= $jsPieLabels ?>, 
+                datasets:[{ 
+                    data:<?= $jsPieCounts ?>, 
+                    backgroundColor:<?= $jsPartColors ?>, 
+                    borderWidth:2, 
+                    borderColor:'#ffffff', 
+                    hoverOffset:5,
+                    borderRadius:4
+                }] 
+            },
+            options:{ 
+                responsive:true, 
+                maintainAspectRatio:false, 
+                cutout:'74%', 
+                plugins:{ 
+                    legend:{display:false}, 
+                    tooltip:{ 
+                        enabled:false,
+                        external:dashDonutTooltipHandler,
+                        callbacks:{ 
+                            label:function(c){ 
+                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
+                                return 'Part '+c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
+                            } 
                         } 
                     } 
                 } 
-            } 
-        }
-    });
+            }
+        });
+        ctxPart.onmouseleave = hideDashDonutTooltip;
+    }
     <?php endif; ?>
 
     function switchDateFilterMode(mode) {
@@ -2559,12 +2816,151 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     }
 
     // ── Universal KPI Drilldown Modal System ──────────────────────────────────
-    var kpiDrilldownCache = null;
-    var activeKpiTab      = null;
+    var kpiDrilldownCache      = null;
+    var activeKpiTab           = null;
+    var currentKpiGroupingMode = 'part'; // Default: Per Part
+
+    function switchKpiGroupingMode(mode) {
+        currentKpiGroupingMode = mode;
+        updateKpiGroupSwitcherUI();
+        if (kpiDrilldownCache) {
+            renderKpiDrilldownContent(kpiDrilldownCache);
+            var sInput = document.getElementById('kpiModalSearchInput');
+            if (sInput && sInput.value) {
+                filterKpiModalTable(sInput.value);
+            }
+        }
+    }
+
+    function updateKpiGroupSwitcherUI() {
+        var btnPart = document.getElementById('btnKpiGroupPart');
+        var btnCust = document.getElementById('btnKpiGroupCust');
+        if (!btnPart || !btnCust) return;
+
+        if (currentKpiGroupingMode === 'part') {
+            btnPart.style.background = '#ffffff';
+            btnPart.style.color = '#2563eb';
+            btnPart.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
+            btnCust.style.background = 'transparent';
+            btnCust.style.color = '#64748b';
+            btnCust.style.boxShadow = 'none';
+        } else {
+            btnCust.style.background = '#ffffff';
+            btnCust.style.color = '#2563eb';
+            btnCust.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
+            btnPart.style.background = 'transparent';
+            btnPart.style.color = '#64748b';
+            btnPart.style.boxShadow = 'none';
+        }
+    }
+
+    function groupRowsByPart(rawRows, kpiType) {
+        if (!rawRows || !rawRows.length || currentKpiGroupingMode !== 'part') {
+            return rawRows || [];
+        }
+
+        var map = {};
+        var order = [];
+        var grandTotalSample = 0;
+        var grandTotalNg = 0;
+
+        rawRows.forEach(function(r) {
+            var pCode = (r.part_code || '').trim();
+            var key = pCode || ('unassigned_' + Math.random());
+            var sChecked = Number(r.total_sample_checked || 0);
+            var ngPcs = Number(r.total_ng_pcs || 0);
+
+            grandTotalSample += sChecked;
+            grandTotalNg += ngPcs;
+
+            if (!map[key]) {
+                map[key] = {
+                    part_code: r.part_code,
+                    part_name: r.part_name,
+                    model: r.model,
+                    customer_list: [],
+                    total_sessions: 0,
+                    total_lots: 0,
+                    total_sample_checked: 0,
+                    total_ng_pcs: 0,
+                    passed_lots: 0,
+                    rejected_lots: 0
+                };
+                order.push(key);
+            }
+
+            var entry = map[key];
+            if (r.customer && r.customer !== '-' && entry.customer_list.indexOf(r.customer) === -1) {
+                entry.customer_list.push(r.customer);
+            }
+            entry.total_sessions += Number(r.total_sessions || 0);
+            entry.total_lots += Number(r.total_lots || 0);
+            entry.total_sample_checked += sChecked;
+            entry.total_ng_pcs += ngPcs;
+            entry.passed_lots += Number(r.passed_lots || 0);
+            entry.rejected_lots += Number(r.rejected_lots || 0);
+        });
+
+        var grouped = order.map(function(key) {
+            var g = map[key];
+            g.customer = g.customer_list.length ? g.customer_list.join(', ') : '-';
+            g.customer_count = g.customer_list.length;
+
+            if (kpiType === 'sample_inspected') {
+                g.percent_share = grandTotalSample > 0 ? ((g.total_sample_checked / grandTotalSample) * 100).toFixed(1) : '0.0';
+            } else if (kpiType === 'total_ng') {
+                g.ppm = g.total_sample_checked > 0 ? Math.round((g.total_ng_pcs / g.total_sample_checked) * 1000000) : 0;
+                g.percent_share = grandTotalNg > 0 ? ((g.total_ng_pcs / grandTotalNg) * 100).toFixed(1) : '0.0';
+            } else if (kpiType === 'defect_rate') {
+                g.ppm = g.total_sample_checked > 0 ? Math.round((g.total_ng_pcs / g.total_sample_checked) * 1000000) : 0;
+                g.pct = g.total_sample_checked > 0 ? Number(((g.total_ng_pcs / g.total_sample_checked) * 100).toFixed(2)) : 0;
+                if (g.ppm > 10000) {
+                    g.status_badge = 'kritis';
+                } else if (g.ppm > 0) {
+                    g.status_badge = 'waspada';
+                } else {
+                    g.status_badge = 'aman';
+                }
+            } else if (kpiType === 'total_lot') {
+                g.pass_rate = g.total_lots > 0 ? Math.round((g.passed_lots / g.total_lots) * 1000) / 10 : 0;
+            }
+
+            return g;
+        });
+
+        if (kpiType === 'sample_inspected') {
+            grouped.sort(function(a, b) { return b.total_sample_checked - a.total_sample_checked; });
+        } else if (kpiType === 'total_ng') {
+            grouped.sort(function(a, b) { return b.total_ng_pcs - a.total_ng_pcs; });
+        } else if (kpiType === 'defect_rate') {
+            grouped.sort(function(a, b) { return b.ppm - a.ppm; });
+        } else if (kpiType === 'total_lot') {
+            grouped.sort(function(a, b) { return b.total_lots - a.total_lots; });
+        }
+
+        return grouped;
+    }
+
+    function formatCustomerDisplay(r) {
+        if (r.customer_list && r.customer_list.length > 1) {
+            var html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+            r.customer_list.forEach(function(c) {
+                html += '<span style="display:inline-block;padding:1px 6px;font-size:9.5px;font-weight:700;background:#eff6ff;color:#1e40af;border-radius:4px;border:1px solid #dbeafe;">' + escapeHtml(c) + '</span>';
+            });
+            html += '</div>';
+            return html;
+        }
+        return escapeHtml(r.customer || '-');
+    }
 
     function openKpiDrilldownModal(kpiType) {
         var modal = document.getElementById('modalKpiDrilldown');
         if (!modal) return;
+
+        // Default to Per Part view on open
+        currentKpiGroupingMode = 'part';
+        updateKpiGroupSwitcherUI();
+        activeKpiTab = 'by_part';
 
         // Reset search input and container
         var searchInput = document.getElementById('kpiModalSearchInput');
@@ -2691,11 +3087,26 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                 });
                 tabsEl.innerHTML = tabsHtml;
             }
+
+            var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
+            if (groupSwitcher) {
+                groupSwitcher.style.display = (activeKpiTab === 'by_part') ? 'inline-flex' : 'none';
+                updateKpiGroupSwitcherUI();
+            }
+
             renderTotalNgTable(activeKpiTab, json.data);
             return;
         }
 
-        // Other KPI Cards render direct table
+        // Other KPI Cards: group switcher visibility
+        var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
+        var canGroup = (json.kpi_type === 'sample_inspected' || json.kpi_type === 'defect_rate' || json.kpi_type === 'total_lot');
+        if (groupSwitcher) {
+            groupSwitcher.style.display = canGroup ? 'inline-flex' : 'none';
+            updateKpiGroupSwitcherUI();
+        }
+
+        // Render direct table
         switch (json.kpi_type) {
             case 'sample_inspected':
                 renderSampleInspectedTable(json.data);
@@ -2717,8 +3128,73 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
 
     function switchKpiModalTab(tabKey) {
         activeKpiTab = tabKey;
-        if (kpiDrilldownCache) {
-            renderKpiDrilldownContent(kpiDrilldownCache);
+        if (!kpiDrilldownCache) return;
+
+        // Update visual tab button secara instan
+        var tabsContainer = document.getElementById('kpiModalTabsContainer');
+        if (tabsContainer) {
+            var tabBtns = tabsContainer.querySelectorAll('button');
+            tabBtns.forEach(function(btn) {
+                if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(tabKey) !== -1) {
+                    btn.style.background = '#ffffff';
+                    btn.style.color = '#dc2626';
+                    btn.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
+                } else {
+                    btn.style.background = 'transparent';
+                    btn.style.color = '#64748b';
+                    btn.style.boxShadow = 'none';
+                }
+            });
+        }
+
+        var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
+        if (groupSwitcher) {
+            groupSwitcher.style.display = (tabKey === 'by_part') ? 'inline-flex' : 'none';
+        }
+
+        // Lazy load tab Log Temuan jika belum pernah diambil dari backend
+        if (tabKey === 'by_log' && (!kpiDrilldownCache.data || kpiDrilldownCache.data.by_log === null)) {
+            var bodyEl = document.getElementById('kpiModalBody');
+            if (bodyEl) {
+                bodyEl.innerHTML = '<div style="padding:48px 16px;text-align:center;color:#64748b;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">' +
+                                   '<svg class="w-7 h-7 animate-spin" style="color:#dc2626;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>' +
+                                   '<span style="font-size:12.5px;font-weight:700;color:#334155;">Memuat rincian log temuan cacat lapangan...</span>' +
+                                   '</div>';
+            }
+
+            var qs = new URLSearchParams(window.location.search);
+            qs.set('kpi_type', 'total_ng');
+            qs.set('tab', 'by_log');
+            qs.set('metric_scale', currentMetricScale);
+
+            fetch('ajax_kpi_drilldown.php?' + qs.toString(), {
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(res) {
+                if (res.success && res.data) {
+                    kpiDrilldownCache.data.by_log = res.data;
+                } else {
+                    kpiDrilldownCache.data.by_log = [];
+                }
+                renderKpiDrilldownContent(kpiDrilldownCache);
+                var sInput = document.getElementById('kpiModalSearchInput');
+                if (sInput && sInput.value) {
+                    filterKpiModalTable(sInput.value);
+                }
+            })
+            .catch(function(err) {
+                if (bodyEl) {
+                    bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-size:12px;font-weight:700;">Gagal memuat log temuan: ' + err.message + '</div>';
+                }
+            });
+            return;
+        }
+
+        renderKpiDrilldownContent(kpiDrilldownCache);
+        var sInput = document.getElementById('kpiModalSearchInput');
+        if (sInput && sInput.value) {
+            filterKpiModalTable(sInput.value);
         }
     }
 
@@ -2726,6 +3202,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     function renderSampleInspectedTable(rows) {
         var bodyEl = document.getElementById('kpiModalBody');
         if (!bodyEl) return;
+        rows = groupRowsByPart(rows, 'sample_inspected');
         if (!rows || !rows.length) {
             bodyEl.innerHTML = renderEmptyState('Tidak ada data sampel diperiksa pada periode ini.');
             updateFooterCount(0, 0);
@@ -2750,7 +3227,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                     '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
                     '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
                     '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.customer) + '</td>' +
+                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
                     '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#334155;">' + Number(r.total_sessions || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#334155;">' + Number(r.total_lots || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:#2563eb;background:#eff6ff;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
@@ -2769,7 +3246,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
         dataObj = dataObj || {};
 
         if (tabKey === 'by_part') {
-            var rows = dataObj.by_part || [];
+            var rows = groupRowsByPart(dataObj.by_part || [], 'total_ng');
             if (!rows.length) {
                 bodyEl.innerHTML = renderEmptyState('Tidak ada temuan part reject pada periode ini.');
                 updateFooterCount(0, 0);
@@ -2794,7 +3271,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                         '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
                         '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
                         '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                        '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.customer) + '</td>' +
+                        '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
                         '<td style="padding:7px 10px;text-align:right;font-family:monospace;color:#64748b;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
                         '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(r.total_ng_pcs || 0).toLocaleString() + '</td>' +
                         '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:800;color:#b91c1c;">' + Number(r.ppm || 0).toLocaleString() + ' PPM</td>' +
@@ -2883,6 +3360,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     function renderDefectRateTable(rows, scale) {
         var bodyEl = document.getElementById('kpiModalBody');
         if (!bodyEl) return;
+        rows = groupRowsByPart(rows, 'defect_rate');
         if (!rows || !rows.length) {
             bodyEl.innerHTML = renderEmptyState('Tidak ada data kualitas per part.');
             updateFooterCount(0, 0);
@@ -2924,7 +3402,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                     '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
                     '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
                     '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.customer) + '</td>' +
+                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
                     '<td style="padding:7px 10px;text-align:right;font-family:monospace;color:#64748b;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:' + (r.total_ng_pcs > 0 ? '#dc2626' : '#64748b') + ';">' + Number(r.total_ng_pcs || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:' + (r.ppm > 10000 ? '#b91c1c' : (r.ppm > 0 ? '#b45309' : '#059669')) + ';">' + rateValStr + '</td>' +
@@ -2940,6 +3418,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
     function renderTotalLotTable(rows) {
         var bodyEl = document.getElementById('kpiModalBody');
         if (!bodyEl) return;
+        rows = groupRowsByPart(rows, 'total_lot');
         if (!rows || !rows.length) {
             bodyEl.innerHTML = renderEmptyState('Tidak ada data volume lot.');
             updateFooterCount(0, 0);
@@ -2968,7 +3447,7 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                     '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
                     '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
                     '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.customer) + '</td>' +
+                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
                     '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:900;color:#0284c7;background:#f0f9ff;">' + Number(r.total_lots || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:700;color:#059669;">' + Number(r.passed_lots || 0).toLocaleString() + '</td>' +
                     '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:700;color:' + (r.rejected_lots > 0 ? '#dc2626' : '#94a3b8') + ';">' + Number(r.rejected_lots || 0).toLocaleString() + '</td>' +
@@ -3123,6 +3602,357 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ── OQC DASHBOARD REALTIME LIVE ENGINE (SMART HEARTBEAT) ──────────────────
+    // ══════════════════════════════════════════════════════════════════════════
+    var isLiveSyncActive   = true;
+    var liveSyncIntervalMs = 5000;
+    var liveSyncTimer      = null;
+    var isFetchingLiveSync = false;
+
+    function animateValue(elemId, endVal) {
+        var el = document.getElementById(elemId);
+        if (!el) return;
+        var startVal = parseInt(el.textContent.replace(/[^0-9]/g, '')) || 0;
+        endVal = parseInt(endVal) || 0;
+        if (startVal === endVal) return;
+
+        var duration = 400;
+        var startTime = performance.now();
+        function step(currentTime) {
+            var progress = Math.min((currentTime - startTime) / duration, 1);
+            var current = Math.floor(progress * (endVal - startVal) + startVal);
+            el.textContent = current.toLocaleString();
+            if (progress < 1) {
+                requestAnimationFrame(step);
+            } else {
+                el.textContent = endVal.toLocaleString();
+            }
+        }
+        requestAnimationFrame(step);
+    }
+
+    function checkLiveHeartbeat() {
+        if (!isLiveSyncActive || isFetchingLiveSync) return;
+        if (document.hidden) return; // Tab sedang di background, hemat resource
+
+        var q = new URLSearchParams(filterParams);
+        q.set('v', currentDashboardVersion);
+
+        fetch('ajax_heartbeat.php?' + q.toString(), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(res) {
+            if (res.status === 'success') {
+                if (res.has_update) {
+                    fetchLatestDashboardData();
+                } else {
+                    var timeEl = document.getElementById('liveSyncLastTime');
+                    if (timeEl && res.server_time) {
+                        timeEl.textContent = res.server_time;
+                    }
+                }
+            }
+        })
+        .catch(function(err) {
+            console.warn('[OQC Live Sync] Heartbeat error:', err);
+        });
+    }
+
+    function fetchLatestDashboardData(isForce) {
+        if (isFetchingLiveSync) return;
+        isFetchingLiveSync = true;
+
+        var spinIcon = document.getElementById('iconLiveSyncSpin');
+        if (spinIcon) spinIcon.classList.add('animate-spin');
+
+        var q = new URLSearchParams(filterParams);
+        if (isForce) {
+            q.set('force', '1');
+            q.set('_t', Date.now());
+        }
+
+        fetch('ajax_get_data.php?' + q.toString(), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data && data.status === 'success') {
+                saveDashboardCache(data);
+                applyLiveDashboardData(data, false);
+            }
+        })
+        .catch(function(err) {
+            console.error('[OQC Live Sync] Data refresh failed:', err);
+        })
+        .finally(function() {
+            isFetchingLiveSync = false;
+            if (spinIcon) spinIcon.classList.remove('animate-spin');
+        });
+    }
+
+    function applyLiveDashboardData(d, skipAnim) {
+        if (!d || d.status !== 'success') return;
+
+        // 1. Update version token & clock
+        if (d.version) {
+            currentDashboardVersion = d.version;
+        }
+        var timeEl = document.getElementById('liveSyncLastTime');
+        if (timeEl && d.server_time) {
+            timeEl.textContent = d.server_time;
+        }
+
+        // 2. Animate KPI numbers
+        if (d.kpi) {
+            animateValue('kpi-val-sample_inspected', d.kpi.total_inspected);
+            animateValue('kpi-val-total_ng', d.kpi.total_ng);
+            animateValue('kpi-val-total_lot', d.kpi.total_lot);
+            animateValue('kpi-val-pass_reject_lot', isPassedMode ? d.kpi.pass_count : d.kpi.rejected_count);
+
+            var isPct = (currentMetricScale === 'pct' || currentMetricScale === 'percent' || currentMetricScale === '%');
+            var rateVal = isPct ? (d.kpi.pct_rate || 0) : (d.kpi.ppm_rate || 0);
+            var elRate = document.getElementById('kpiMetricRateVal');
+            if (elRate) {
+                elRate.textContent = Number(rateVal).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: isPct ? 2 : 1});
+            }
+        }
+
+        // 3. Update Trend Chart
+        if (d.trend && trendChartInstance) {
+            trendLabelsData = d.trend.labels || [];
+            trendNGData     = d.trend.ng || [];
+            trendSampleData = d.trend.sample || [];
+            initTrendChart(currentChartType, currentMetricScale);
+        }
+
+        // 4. Update Stacked Defect Timeline Chart
+        if (d.stacked && defectStackedChartInstance) {
+            defectStackedChartInstance.data.labels = d.stacked.labels;
+            defectStackedChartInstance.data.datasets = (currentDefectMetricUnit === 'ppm') ? d.stacked.datasets_ppm : d.stacked.datasets_pcs;
+            defectStackedChartInstance.update();
+        }
+
+        // 5. Update Donut Charts & Legends
+        if (d.defect_types && defectDoughnutChartInstance) {
+            defectDoughnutChartInstance.data.labels = d.defect_types.labels;
+            if (defectDoughnutChartInstance.data.datasets[0]) {
+                defectDoughnutChartInstance.data.datasets[0].data = d.defect_types.counts;
+            }
+            defectDoughnutChartInstance.update();
+            updateDefectLegend(d.defect_types);
+        }
+
+        if (d.pie_model && modelPieChartInstance) {
+            modelPieChartInstance.data.labels = d.pie_model.labels;
+            if (modelPieChartInstance.data.datasets[0]) {
+                modelPieChartInstance.data.datasets[0].data = d.pie_model.counts;
+            }
+            modelPieChartInstance.update();
+            updateModelLegend(d.pie_model);
+        }
+
+        if (d.pie_part && partPieChartInstance) {
+            partPieChartInstance.data.labels = d.pie_part.labels;
+            if (partPieChartInstance.data.datasets[0]) {
+                partPieChartInstance.data.datasets[0].data = d.pie_part.counts;
+            }
+            partPieChartInstance.update();
+            updatePartLegend(d.pie_part);
+        }
+
+        // 6. Update Worst / Best Parts Section
+        if (d.worst_parts) {
+            updateWorstBestPartsSection(d.worst_parts);
+        }
+    }
+
+    function updateDefectLegend(dt) {
+        var elTotal = document.getElementById('donutDefectTotalVal');
+        var elList  = document.getElementById('defectTypeLegendContainer');
+        var counts  = dt.counts || [];
+        var labels  = dt.labels || [];
+        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
+        if (elTotal) elTotal.textContent = sum.toLocaleString();
+        if (!elList) return;
+
+        var html = '';
+        var pal = isPassedMode ? ['#059669', '#dc2626', '#3b82f6', '#f59e0b', '#8b5cf6', '#06b6d4', '#10b981', '#6366f1'] : ['#ef4444', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f97316', '#64748b', '#14b8a6'];
+        labels.forEach(function(l, i) {
+            var c = counts[i] || 0;
+            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
+            var col = pal[i % pal.length];
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
+                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
+                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
+                    '</span>' +
+                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
+                    '</div>';
+        });
+        elList.innerHTML = html;
+    }
+
+    function updateModelLegend(mp) {
+        var elTotal = document.getElementById('donutModelTotalVal');
+        var elList  = document.getElementById('modelLegendContainer');
+        var counts  = mp.counts || [];
+        var labels  = mp.labels || [];
+        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
+        if (elTotal) elTotal.textContent = counts.length;
+        if (!elList) return;
+
+        var html = '';
+        var pal = ['#6366f1', '#0ea5e9', '#3b82f6', '#8b5cf6', '#475569', '#06b6d4', '#2563eb', '#1e293b', '#64748b', '#0284c7'];
+        labels.forEach(function(l, i) {
+            var c = counts[i] || 0;
+            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
+            var col = pal[i % pal.length];
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
+                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
+                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
+                    '</span>' +
+                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
+                    '</div>';
+        });
+        elList.innerHTML = html;
+    }
+
+    function updatePartLegend(pp) {
+        var elTotal = document.getElementById('donutPartTotalVal');
+        var elList  = document.getElementById('partLegendContainer');
+        var counts  = pp.counts || [];
+        var labels  = pp.labels || [];
+        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
+        if (elTotal) elTotal.textContent = counts.length;
+        if (!elList) return;
+
+        var html = '';
+        var pal = ['#0d9488', '#10b981', '#f59e0b', '#f43f5e', '#7c3aed', '#0284c7', '#d97706', '#64748b', '#ec4899', '#3b82f6'];
+        labels.forEach(function(l, i) {
+            var c = counts[i] || 0;
+            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
+            var col = pal[i % pal.length];
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
+                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
+                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
+                    '</span>' +
+                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
+                    '</div>';
+        });
+        elList.innerHTML = html;
+    }
+
+    function updateWorstBestPartsSection(wb) {
+        var wrapper = document.getElementById('sectionWorstBestPartsContainer');
+        if (!wrapper) return;
+
+        var html = '';
+        if (wb.is_passed) {
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">' +
+                    '<div><h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;"><span style="color:#059669;">II.</span> BEST PERFORMANCE PART OQC</h2></div>' +
+                    '<span style="font-size:11px;font-weight:600;color:#059669;">Top Part &amp; Model Performa Lulus Terbaik</span>' +
+                    '</div>';
+
+            var best = wb.best || [];
+            if (best.length === 0) {
+                html += '<div style="padding:30px 0;text-align:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data part lulus pada periode ini.</div>';
+            } else {
+                html += '<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;">' +
+                        '<table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
+                        '<thead><tr style="background:#065f46;color:#ffffff;font-weight:800;font-size:10px;text-transform:uppercase;letter-spacing:.05em;">' +
+                        '<th style="padding:8px 12px;text-align:center;width:45px;">NO</th><th style="padding:8px 12px;">PART NAME</th><th style="padding:8px 12px;">PART CODE</th><th style="padding:8px 12px;">MODEL</th><th style="padding:8px 12px;text-align:center;">LOT CASE</th><th style="padding:8px 12px;text-align:center;">PASSED CASE</th>' +
+                        '</tr></thead><tbody>' +
+                        '<tr style="background:#ecfdf5;border-top:1px solid #a7f3d0;border-bottom:1px solid #a7f3d0;"><td colspan="6" style="padding:6px 12px;font-weight:900;color:#047857;font-size:11px;text-transform:uppercase;letter-spacing:.04em;">TOP PASSED PART &amp; MODEL PERFORMANCE</td></tr>';
+
+                best.forEach(function(b, idx) {
+                    html += '<tr style="border-bottom:1px solid #f1f5f9;" class="hover:bg-slate-50">' +
+                            '<td style="padding:8px 12px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
+                            '<td style="padding:8px 12px;font-weight:800;color:#0f172a;">' + escapeHtml(b.part_name) + '</td>' +
+                            '<td style="padding:8px 12px;font-family:monospace;color:#475569;">' + escapeHtml(b.part_code) + '</td>' +
+                            '<td style="padding:8px 12px;color:#475569;">' + escapeHtml(b.model) + '</td>' +
+                            '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:700;color:#334155;">' + Number(b.lot_case || 0).toLocaleString() + '</td>' +
+                            '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:900;color:#059669;background:#ecfdf5;">' + Number(b.passed_lot_case || 0).toLocaleString() + '</td>' +
+                            '</tr>';
+                });
+                html += '</tbody></table></div>';
+                html += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:10px 14px;"><span style="font-size:12px;font-weight:900;color:#166534;">Conclusion : </span><span style="font-size:12px;font-weight:700;color:#15803d;">3 best performing parts are <span style="font-weight:900;color:#0f172a;">' + escapeHtml(wb.summary_str) + '</span></span></div>';
+            }
+        } else {
+            html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">' +
+                    '<div><h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;"><span style="color:#2563eb;">II.</span> WORST PART OQC</h2></div>' +
+                    '<span style="font-size:11px;font-weight:600;color:#94a3b8;">Breakdown per Defect Area</span>' +
+                    '</div>';
+
+            var grouped = wb.grouped || {};
+            var keys = Object.keys(grouped);
+            if (keys.length === 0) {
+                html += '<div style="padding:30px 0;text-align:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data part terburuk pada periode ini.</div>';
+            } else {
+                html += '<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;">' +
+                        '<table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
+                        '<thead><tr style="background:#1e293b;color:#ffffff;font-weight:800;font-size:10px;text-transform:uppercase;letter-spacing:.05em;">' +
+                        '<th style="padding:8px 12px;text-align:center;width:45px;">NO</th><th style="padding:8px 12px;">PART NAME</th><th style="padding:8px 12px;">PART CODE</th><th style="padding:8px 12px;">MODEL</th><th style="padding:8px 12px;text-align:center;">LOT CASE</th><th style="padding:8px 12px;text-align:center;">NG CASE</th>' +
+                        '</tr></thead><tbody>';
+
+                keys.forEach(function(dCat) {
+                    html += '<tr style="background:#fff1f2;border-top:1px solid #fecdd3;border-bottom:1px solid #fecdd3;"><td colspan="6" style="padding:6px 12px;font-weight:900;color:#be123c;font-size:11px;text-transform:uppercase;letter-spacing:.04em;">' + escapeHtml(dCat) + '</td></tr>';
+                    var pList = grouped[dCat] || [];
+                    pList.forEach(function(p, idx) {
+                        html += '<tr style="border-bottom:1px solid #f1f5f9;" class="hover:bg-slate-50">' +
+                                '<td style="padding:8px 12px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
+                                '<td style="padding:8px 12px;font-weight:800;color:#0f172a;">' + escapeHtml(p.part_name) + '</td>' +
+                                '<td style="padding:8px 12px;font-family:monospace;color:#475569;">' + escapeHtml(p.part_code) + '</td>' +
+                                '<td style="padding:8px 12px;color:#475569;">' + escapeHtml(p.model) + '</td>' +
+                                '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:700;color:#334155;">' + Number(p.lot_case || 0).toLocaleString() + '</td>' +
+                                '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(p.ng_case || 0).toLocaleString() + '</td>' +
+                                '</tr>';
+                    });
+                });
+                html += '</tbody></table></div>';
+                html += '<div style="background:#eff6ff;border:1px solid #dbeafe;border-radius:10px;padding:10px 14px;"><span style="font-size:12px;font-weight:900;color:#1e40af;">Conclusion : </span><span style="font-size:12px;font-weight:700;color:#1d4ed8;">3 worst parts are <span style="font-weight:900;color:#0f172a;">' + escapeHtml(wb.summary_str) + '</span></span></div>';
+            }
+        }
+        wrapper.innerHTML = html;
+    }
+
+    function resetLiveSyncTimer() {
+        if (liveSyncTimer) clearInterval(liveSyncTimer);
+        liveSyncTimer = setInterval(checkLiveHeartbeat, liveSyncIntervalMs);
+    }
+
+    function manualSyncNow() {
+        var btn = document.getElementById('btnLiveSyncManual');
+        if (btn) {
+            btn.style.opacity = '0.6';
+            btn.style.pointerEvents = 'none';
+        }
+        // Force refresh langsung ke server (bypass server query cache & client cache)
+        fetchLatestDashboardData(true);
+        setTimeout(function() {
+            if (btn) {
+                btn.style.opacity = '1';
+                btn.style.pointerEvents = 'auto';
+            }
+        }, 1200);
+    }
+
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden && isLiveSyncActive) {
+            checkLiveHeartbeat();
+        }
+    });
+
+    // ── Instant Cache Hydration & Start Realtime Live Sync ────────────────────
+    (function initDashboardCacheAndRealtime() {
+        var cached = loadDashboardCache();
+        if (cached && cached.data) {
+            // Jika ada cache lokal, terapkan seketika dalam 0 ms
+            applyLiveDashboardData(cached.data, true);
+        }
+        resetLiveSyncTimer();
+    })();
     </script>
 
     <!-- ── Universal KPI Drilldown Modal Container ──────────────────────────── -->
@@ -3149,11 +3979,19 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
                 <!-- Rendered by JS -->
             </div>
 
-            <!-- Controls: Sub-Tabs, Live Search Bar, & CSV Export -->
+            <!-- Controls: Sub-Tabs, Grouping Switcher, Live Search Bar, & CSV Export -->
             <div style="padding:8px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-                <!-- Tabs container (visible for total_ng) -->
-                <div id="kpiModalTabsContainer" style="display:none;align-items:center;gap:4px;background:#e2e8f0;padding:3px;border-radius:8px;">
-                    <!-- Buttons injected by JS -->
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <!-- Grouping Toggle: Per Part vs Per Customer -->
+                    <div id="kpiModalGroupSwitcher" style="display:none;align-items:center;gap:4px;background:#e2e8f0;padding:3px;border-radius:8px;">
+                        <button type="button" id="btnKpiGroupPart" onclick="switchKpiGroupingMode('part')" style="padding:3px 10px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.06);">Per Part</button>
+                        <button type="button" id="btnKpiGroupCust" onclick="switchKpiGroupingMode('customer')" style="padding:3px 10px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:transparent;color:#64748b;">Per Customer</button>
+                    </div>
+
+                    <!-- Tabs container (visible for total_ng) -->
+                    <div id="kpiModalTabsContainer" style="display:none;align-items:center;gap:4px;background:#e2e8f0;padding:3px;border-radius:8px;">
+                        <!-- Buttons injected by JS -->
+                    </div>
                 </div>
                 
                 <!-- Live Search Bar -->

@@ -71,7 +71,7 @@ try {
                        SELECT SUM(
                            CASE 
                                WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
-                                   COALESCE((SELECT SUM(CASE WHEN isl2.lot_result = 'passed' AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                   COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
                                              FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0)
                                WHEN s2.status = 'passed' THEN
                                    s2.total_scanned_qty

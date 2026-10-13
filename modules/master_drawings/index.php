@@ -9,6 +9,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 require_menu_access('master_drawings');
 
 $pdo = getDB();
+$csrfToken = generate_csrf_token();
 $drawings = [];
 $search = sanitize($_GET['search'] ?? '');
 $status_filter = sanitize($_GET['status_filter'] ?? 'all');
@@ -305,10 +306,10 @@ if ($pdo) {
                                                 <?= $hasDrawing ? 'Ganti File' : 'Upload' ?>
                                             </a>
 
-                                            <!-- Delete Drawing -->
+                                            <!-- Delete Drawing (Secure POST with CSRF) -->
                                             <?php if ($hasDrawing || !empty($row['drawing_id'])): ?>
                                                 <button type="button" 
-                                                        onclick="confirmDelete('<?= base_url('modules/master_drawings/delete.php?part_id=' . $row['part_id'] . (!empty($row['drawing_id']) ? '&id=' . $row['drawing_id'] : '')) ?>', 'Drawing Part <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>')"
+                                                        onclick="confirmPostDelete('<?= base_url('modules/master_drawings/delete.php') ?>', '<?= !empty($row['drawing_id']) ? $row['drawing_id'] : '' ?>', 'Drawing Part <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>', '<?= $csrfToken ?>', { part_id: '<?= $row['part_id'] ?>' })"
                                                         class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Berkas Drawing">
                                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

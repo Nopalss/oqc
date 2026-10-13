@@ -9,7 +9,12 @@ require_once __DIR__ . '/config/helper.php';
 
 // Redirect to dashboard if already logged in
 if (is_logged_in() && !isset($_GET['reauth'])) {
-    redirect('index.php');
+    $roleExist = strtolower(trim($_SESSION['user_role'] ?? ''));
+    if (in_array($roleExist, ['inspektur', 'inspektor', 'operator'])) {
+        redirect('modules/inspection/index.php');
+    } else {
+        redirect('index.php');
+    }
 }
 
 // ── CSRF Token ─────────────────────────────────────────────────────────────
@@ -55,16 +60,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         // Regenerate CSRF token
                         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 
-                        $_SESSION['user_id']   = (int)$userFound['id'];
-                        $_SESSION['user_name'] = $userFound['name'];
-                        $_SESSION['username']  = $userFound['username'];
-                        $_SESSION['user_role'] = $userFound['role'];
+                        $_SESSION['user_id']      = (int)$userFound['id'];
+                        $_SESSION['user_name']    = $userFound['name'];
+                        $_SESSION['username']     = $userFound['username'];
+                        $_SESSION['user_role']    = $userFound['role'];
+                        $_SESSION['user_role_id'] = isset($userFound['role_id']) ? (int)$userFound['role_id'] : null;
 
                         // Load RBAC permissions into session
                         load_user_permissions($pdo, $userFound['role']);
 
                         set_flash('success', 'Selamat datang kembali, ' . htmlspecialchars($userFound['name']) . '!');
-                        redirect('index.php');
+
+                        // Role-based redirect: inspektur/operator langsung ke halaman Scan Inspeksi
+                        $roleNorm = strtolower(trim($userFound['role']));
+                        if (in_array($roleNorm, ['inspektur', 'inspektor', 'operator'])) {
+                            redirect('modules/inspection/index.php');
+                        } else {
+                            redirect('index.php');
+                        }
 
                     } else {
                         // ── Failed Login ───────────────────────────────────────

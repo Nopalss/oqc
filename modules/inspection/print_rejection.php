@@ -78,7 +78,7 @@ if ($sessionId > 0 && $pdo) {
                 $stmtNg->execute([':lid' => $sessionLotId]);
                 $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
             } else {
-                // Mode lama (per sesi)
+                // Mode per sesi
                 $stmtNg = $pdo->prepare("
                     SELECT n.*, d.name as defect_name, COALESCE(sp.sample_number, 1) as sample_number
                     FROM inspection_ng_records n
@@ -90,6 +90,38 @@ if ($sessionId > 0 && $pdo) {
                 ");
                 $stmtNg->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
                 $ngRecords = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
+
+                // Fallback: Jika sesi ini tidak memiliki record defect langsung (misal re-inspeksi passed),
+                // cari defect dari riwayat lot / ref_number yang sama
+                if (empty($ngRecords)) {
+                    $stmtLots = $pdo->prepare("SELECT ref_number, lot_number FROM inspection_session_lots WHERE inspection_session_id = :sid");
+                    $stmtLots->execute([':sid' => $sessionId]);
+                    $sessionLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
+
+                    $refNums = array_filter(array_unique(array_column($sessionLots, 'ref_number')));
+                    if (!empty($refNums)) {
+                        $inRef = implode(',', array_fill(0, count($refNums), '?'));
+                        $stmtFallback = $pdo->prepare("
+                            SELECT n.*, d.name as defect_name, COALESCE(sp.sample_number, 1) as sample_number
+                            FROM inspection_ng_records n
+                            LEFT JOIN inspection_samples sp ON sp.id = n.inspection_sample_id
+                            JOIN defect_types d ON d.id = n.defect_type_id
+                            WHERE n.ref_number IN ($inRef)
+                              AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
+                            ORDER BY n.id ASC
+                        ");
+                        $stmtFallback->execute(array_values($refNums));
+                        $ngRecords = $stmtFallback->fetchAll(PDO::FETCH_ASSOC);
+                    }
+                }
+
+                if ((int)($session['ng_count'] ?? 0) === 0 && !empty($ngRecords)) {
+                    $calcNg = 0;
+                    foreach ($ngRecords as $r) {
+                        $calcNg += (int)($r['qty_ng'] ?? 1);
+                    }
+                    $session['ng_count'] = $calcNg;
+                }
             }
 
             // Log manual reprint if user clicked reprint
@@ -114,13 +146,18 @@ foreach ($ngRecords as $rec) {
 }
 $defectProblemText = !empty($defectSummaryList) ? implode(', ', array_unique($defectSummaryList)) : 'Visual / Dimension Defect';
 
-// Fetch list of active users for Chief selection modal
-$chiefUsersList = [];
+// Fetch list of saved Chief names for select options
+$savedChiefNames = [];
 if ($pdo) {
     try {
-        $stmtUsers = $pdo->query("SELECT id, name, username, role FROM users WHERE status = 'active' ORDER BY name ASC");
-        $chiefUsersList = $stmtUsers->fetchAll(PDO::FETCH_ASSOC);
-    } catch (PDOException $eUsers) {}
+        $stmtNames = $pdo->query("
+            SELECT DISTINCT chief_notes FROM inspection_session_lots WHERE chief_notes IS NOT NULL AND chief_notes != ''
+            UNION
+            SELECT DISTINCT chief_notes FROM inspection_sessions WHERE chief_notes IS NOT NULL AND chief_notes != ''
+            ORDER BY chief_notes ASC
+        ");
+        $savedChiefNames = array_values(array_filter($stmtNames->fetchAll(PDO::FETCH_COLUMN)));
+    } catch (Exception $eNames) {}
 }
 
 // Inspector & Chief Approval Status Metadata
@@ -131,11 +168,11 @@ $inspectorShortSign = !empty($partsInspector[0]) ? $partsInspector[0] : 'Inspect
 // Chief Approval Status & Hybrid Stamp Metadata (Dedicated Chief Columns - Per Lot Priority)
 if ($targetLot) {
     $isChiefApproved = (!empty($targetLot['is_chief_approved']) && (int)$targetLot['is_chief_approved'] === 1);
-    $chiefName = !empty($targetLot['chief_display_name']) ? $targetLot['chief_display_name'] : (!empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC');
+    $chiefName = !empty($targetLot['chief_notes']) ? $targetLot['chief_notes'] : (!empty($targetLot['chief_display_name']) ? $targetLot['chief_display_name'] : (!empty($session['chief_notes']) ? $session['chief_notes'] : (!empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC')));
     $chiefApprovedAtRaw = $targetLot['chief_approved_at'] ?? null;
 } else {
     $isChiefApproved = (!empty($session['is_chief_approved']) && (int)$session['is_chief_approved'] === 1);
-    $chiefName = !empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC';
+    $chiefName = !empty($session['chief_notes']) ? $session['chief_notes'] : (!empty($session['chief_display_name']) ? $session['chief_display_name'] : 'Chief QC');
     $chiefApprovedAtRaw = $session['chief_approved_at'] ?? null;
 }
 $isApproved = $isChiefApproved;
@@ -801,7 +838,39 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
         var CURRENT_SESSION_ID = <?= (int)$session['id'] ?>;
         var CURRENT_SESSION_LOT_ID = <?= (int)$sessionLotId ?>;
         var DEFAULT_CHIEF_NAME = '<?= addslashes($chiefName) ?>';
-        var CHIEF_USERS = <?= json_encode($chiefUsersList, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        var SAVED_CHIEF_NAMES_DB = <?= json_encode($savedChiefNames, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function getCombinedSavedChiefNames() {
+            var list = Array.isArray(SAVED_CHIEF_NAMES_DB) ? SAVED_CHIEF_NAMES_DB.slice() : [];
+            try {
+                var local = JSON.parse(localStorage.getItem('oqc_saved_chief_names') || '[]');
+                if (Array.isArray(local)) {
+                    local.forEach(function(n) {
+                        if (n && typeof n === 'string') {
+                            var trimmed = n.trim();
+                            if (trimmed && !list.some(function(x) { return x.toLowerCase() === trimmed.toLowerCase(); })) {
+                                list.push(trimmed);
+                            }
+                        }
+                    });
+                }
+            } catch(e) {}
+            return list;
+        }
+
+        function saveChiefNameLocally(name) {
+            if (!name || typeof name !== 'string') return;
+            var trimmed = name.trim();
+            if (!trimmed) return;
+            try {
+                var local = JSON.parse(localStorage.getItem('oqc_saved_chief_names') || '[]');
+                if (!Array.isArray(local)) local = [];
+                if (!local.some(function(x) { return x.toLowerCase() === trimmed.toLowerCase(); })) {
+                    local.push(trimmed);
+                    localStorage.setItem('oqc_saved_chief_names', JSON.stringify(local));
+                }
+            } catch(e) {}
+        }
 
         function setBtnLoading(btn, isLoading) {
             if (!btn) return;
@@ -816,30 +885,33 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
         }
 
         /**
-         * Trigger Chief QC Approval via Modal (User Selection + Password Verification)
+         * Trigger Chief QC Approval via Modal (Manual Text Input + Saved Select Options)
          */
         function triggerChiefApprove() {
-            var userOptionsHtml = '<option value="">-- Pilih Akun Chief QC --</option>';
-            if (CHIEF_USERS && CHIEF_USERS.length > 0) {
-                CHIEF_USERS.forEach(function(u) {
-                    var roleLabel = u.role ? (' (' + u.role.toUpperCase() + ')') : '';
-                    userOptionsHtml += '<option value="' + u.id + '">' + escapeHtml(u.name) + roleLabel + '</option>';
-                });
-            }
-
-            var capturedUserId = '';
+            var savedNames = getCombinedSavedChiefNames();
+            var selectOptionsHtml = '<option value="">-- Pilih Nama Chief QC (Tersimpan) --</option>';
+            savedNames.forEach(function(n) {
+                selectOptionsHtml += '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + '</option>';
+            });
 
             Swal.fire({
                 title: 'Persetujuan (ACC) Chief QC',
                 html: '<div style="font-size: 13px; text-align: left; line-height: 1.5; color: #334155;">' +
                       '<p style="margin-bottom: 12px;">Konfirmasi persetujuan lembar penolakan (Rejection Sheet) untuk Part <b style="color: #1d4ed8; font-family: monospace;"><?= htmlspecialchars($session['part_code']) ?></b> (Lot #<?= htmlspecialchars($session['lot_number']) ?>):</p>' +
+                      
                       '<div style="margin-bottom: 10px;">' +
-                      '  <label style="font-size: 11px; font-weight: 700; color: #475569; display: block; margin-bottom: 4px;">Pilih Akun Chief QC:</label>' +
-                      '  <select id="swal-chief-user-id" style="width: 100%; box-sizing: border-box; font-size: 13px; font-weight: 600; padding: 8px 10px; border: 1.5px solid #cbd5e1; border-radius: 6px; background-color: #fff; outline: none;">' +
-                         userOptionsHtml +
+                      '  <label style="font-size: 11px; font-weight: 700; color: #475569; display: block; margin-bottom: 4px;">Pilih Nama Tersimpan:</label>' +
+                      '  <select id="swal-chief-select" onchange="document.getElementById(\'swal-chief-name-input\').value = this.value;" style="width: 100%; box-sizing: border-box; font-size: 13px; font-weight: 600; padding: 8px 10px; border: 1.5px solid #cbd5e1; border-radius: 6px; background-color: #fff; outline: none; margin-bottom: 8px;">' +
+                         selectOptionsHtml +
                       '  </select>' +
                       '</div>' +
-                      '<p style="font-size: 11px; color: #64748b; margin-top: 8px; line-height: 1.4;">Pilih nama Chief QC yang bertugas untuk menerbitkan stempel resmi digital.</p>' +
+
+                      '<div style="margin-bottom: 10px;">' +
+                      '  <label style="font-size: 11px; font-weight: 700; color: #475569; display: block; margin-bottom: 4px;">Ketik Nama Chief QC (Manual):</label>' +
+                      '  <input id="swal-chief-name-input" type="text" placeholder="Contoh: Budi / Agus..." style="width: 100%; box-sizing: border-box; font-size: 13px; font-weight: 700; padding: 8px 10px; border: 1.5px solid #2563eb; border-radius: 6px; outline: none; background-color: #f8fafc;" autocomplete="off">' +
+                      '</div>' +
+
+                      '<p style="font-size: 11px; color: #64748b; margin-top: 6px; line-height: 1.4;">💡 Nama yang Anda ketik (misal: <b>Budi</b>) akan otomatis tersimpan di daftar pilihan untuk ACC berikutnya.</p>' +
                       '</div>',
                 icon: 'question',
                 showCancelButton: true,
@@ -848,26 +920,27 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
                 confirmButtonText: 'Verifikasi & ACC',
                 cancelButtonText: 'Batal',
                 focusConfirm: false,
+                didOpen: function() {
+                    var inputEl = document.getElementById('swal-chief-name-input');
+                    if (inputEl) {
+                        setTimeout(function() { inputEl.focus(); }, 100);
+                    }
+                },
                 preConfirm: function() {
-                    var selectEl = document.getElementById('swal-chief-user-id');
-                    var userId = selectEl ? selectEl.value : '';
+                    var inputEl = document.getElementById('swal-chief-name-input');
+                    var chiefName = inputEl ? inputEl.value.trim() : '';
 
-                    if (!userId) {
-                        Swal.showValidationMessage('Silakan pilih akun Chief QC terlebih dahulu!');
+                    if (!chiefName) {
+                        Swal.showValidationMessage('Silakan ketik atau pilih Nama Chief QC terlebih dahulu!');
                         return false;
                     }
-                    capturedUserId = userId;
-                    return { chief_user_id: userId };
+                    saveChiefNameLocally(chiefName);
+                    return { chief_name: chiefName };
                 }
             }).then(function(result) {
-                if (!result || !result.isConfirmed) return;
+                if (!result || !result.isConfirmed || !result.value) return;
 
-                var finalUserId = (result.value && result.value.chief_user_id) ? result.value.chief_user_id : capturedUserId;
-
-                if (!finalUserId) {
-                    Swal.fire({ icon: 'error', title: 'Data Kurang', text: 'Silakan pilih akun Chief QC terlebih dahulu!' });
-                    return;
-                }
+                var finalChiefName = result.value.chief_name;
 
                 Swal.fire({
                     title: 'Menyimpan ACC...',
@@ -881,13 +954,22 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
                     payload.append('session_lot_id', CURRENT_SESSION_LOT_ID);
                 }
                 payload.append('action', 'approve');
-                payload.append('chief_user_id', finalUserId);
+                payload.append('chief_name', finalChiefName);
 
                 fetch('<?= base_url("modules/inspection/api/chief_approve.php") ?>', {
                     method: 'POST',
                     body: payload
                 })
-                .then(function(res) { return res.json(); })
+                .then(function(res) {
+                    return res.text().then(function(text) {
+                        try {
+                            return JSON.parse(text);
+                        } catch(e) {
+                            console.error('Server output:', text);
+                            return { success: false, message: 'Respon server tidak valid JSON.' };
+                        }
+                    });
+                })
                 .then(function(data) {
                     if (!data.success) {
                         Swal.fire({ icon: 'error', title: 'Verifikasi Gagal', text: data.message || 'Terjadi kesalahan sistem' });
@@ -897,7 +979,7 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
                     Swal.fire({
                         icon: 'success',
                         title: 'Disetujui Chief QC',
-                        text: 'ACC berhasil diverifikasi! Stempel digital & QR verifikasi telah diterbitkan.',
+                        text: 'ACC berhasil disetujui atas nama ' + escapeHtml(finalChiefName) + '! Stempel digital telah diterbitkan.',
                         timer: 1400,
                         showConfirmButton: false
                     }).then(function() {

@@ -3,6 +3,8 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('kanban');
+
 $dateParam = isset($_GET['date']) ? trim($_GET['date']) : '';
 
 // Validate date format
@@ -22,25 +24,29 @@ $daySummary = [
 
 if ($pdo) {
     try {
-        // Fetch all Kanban batches on this date, ordered by time ascending
+        $startDt = $dateParam . ' 00:00:00';
+        $endDt   = $dateParam . ' 23:59:59';
+
+        // Fetch all Kanban batches on this date using sargable range (hits index)
         $stmtBatches = $pdo->prepare(
             "SELECT * FROM kanban_batches
-             WHERE DATE(imported_at) = :date AND plan_type = 'kanban'
+             WHERE plan_type = 'kanban' AND imported_at >= :sdate AND imported_at <= :edate
              ORDER BY imported_at ASC"
         );
-        $stmtBatches->execute([':date' => $dateParam]);
+        $stmtBatches->execute([':sdate' => $startDt, ':edate' => $endDt]);
         $rawBatches = $stmtBatches->fetchAll(PDO::FETCH_ASSOC);
 
+        // Prepare items query ONCE outside the loop
+        $stmtItems = $pdo->prepare(
+            "SELECT * FROM kanban_items 
+             WHERE batch_id = :bid 
+               AND (plan_type IS NULL OR plan_type = 'kanban') 
+               AND (check_type IS NULL OR check_type != 'Safety Stock') 
+               AND (kanban_no IS NULL OR kanban_no NOT LIKE 'SS-%') 
+             ORDER BY id ASC"
+        );
+
         foreach ($rawBatches as $b) {
-            // Fetch items for each batch (strictly Kanban items only)
-            $stmtItems = $pdo->prepare(
-                "SELECT * FROM kanban_items 
-                 WHERE batch_id = :bid 
-                   AND (plan_type IS NULL OR plan_type = 'kanban') 
-                   AND (check_type IS NULL OR check_type != 'Safety Stock') 
-                   AND (kanban_no IS NULL OR kanban_no NOT LIKE 'SS-%') 
-                 ORDER BY id ASC"
-            );
             $stmtItems->execute([':bid' => $b['id']]);
             $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
 
@@ -208,7 +214,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             Edit Batch
                         </a>
                         <button type="button"
-                                onclick="confirmDelete('<?= base_url('modules/kanban/delete_batch.php?id=' . $b['id'] . '&return_date=' . urlencode($dateParam)) ?>', 'Dokumen <?= htmlspecialchars($b['document_number'] ?? '', ENT_QUOTES) ?>')"
+                                onclick="confirmPostDelete('<?= base_url('modules/kanban/delete_batch.php') ?>', <?= (int)$b['id'] ?>, 'Dokumen <?= htmlspecialchars($b['document_number'] ?? '', ENT_QUOTES) ?>', '<?= generate_csrf_token() ?>', { return_date: '<?= htmlspecialchars($dateParam, ENT_QUOTES) ?>' })"
                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Batch Ini">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
@@ -305,7 +311,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 </svg>
                                             </a>
                                             <button type="button"
-                                                    onclick="confirmDelete('<?= base_url('modules/kanban/delete.php?id=' . $row['id'] . '&return_date=' . urlencode($dateParam)) ?>', 'Kanban <?= htmlspecialchars($row['kanban_no'] ?? '', ENT_QUOTES) ?>')"
+                                                    onclick="confirmPostDelete('<?= base_url('modules/kanban/delete.php') ?>', <?= (int)$row['id'] ?>, 'Kanban <?= htmlspecialchars($row['kanban_no'] ?? '', ENT_QUOTES) ?>', '<?= generate_csrf_token() ?>', { return_date: '<?= htmlspecialchars($dateParam, ENT_QUOTES) ?>' })"
                                                     class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

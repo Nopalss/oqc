@@ -48,8 +48,26 @@ function nav_active($keyword, $currentUri) {
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Operasional
             </div>
+            <?php
+            $sidebarRole = strtolower(trim($_SESSION['user_role'] ?? ''));
+            $isInspectorRole = in_array($sidebarRole, ['inspektor', 'inspektur', 'operator']);
+            ?>
+
+            <?php if ($isInspectorRole && can_access('inspection')): ?>
+            <!-- Scan Inspeksi FIRST (untuk inspektor/operator) -->
+            <a href="<?= base_url('modules/inspection/index.php') ?>"
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('inspection', $currentUri) ?>"
+               title="Scan & Inspeksi OQC">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Scan Inspeksi</span>
+            </a>
+            <?php endif; ?>
+
             <?php if (can_access('dashboard')): ?>
-            <a href="<?= base_url('modules/dashboard/index.php') ?>" 
+            <!-- Dashboard Laporan -->
+            <a href="<?= base_url('modules/dashboard/index.php') ?>"
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('dashboard', $currentUri) ?>"
                title="Dashboard Performance OQC">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -61,7 +79,7 @@ function nav_active($keyword, $currentUri) {
 
             <?php if (can_access('defect_analysis')): ?>
             <!-- Analisis Defect -->
-            <a href="<?= base_url('modules/defect_analysis/index.php') ?>" 
+            <a href="<?= base_url('modules/defect_analysis/index.php') ?>"
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('defect_analysis', $currentUri) ?>"
                title="Analisis & Leaderboard Defect">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -71,15 +89,57 @@ function nav_active($keyword, $currentUri) {
             </a>
             <?php endif; ?>
 
-            <?php if (can_access('inspection')): ?>
-            <!-- Scan Inspeksi -->
-            <a href="<?= base_url('modules/inspection/index.php') ?>" 
+            <?php if (!$isInspectorRole && can_access('inspection')): ?>
+            <!-- Scan Inspeksi (setelah Dashboard, untuk admin/supervisor/dll) -->
+            <a href="<?= base_url('modules/inspection/index.php') ?>"
                class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('inspection', $currentUri) ?>"
                title="Scan & Inspeksi OQC">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
                 </svg>
                 <span class="sidebar-text truncate">Scan Inspeksi</span>
+            </a>
+            <?php endif; ?>
+
+            <?php if (can_access('inspection') || can_access('ng_quarantine')): ?>
+            <!-- Lot NG / Karantina -->
+            <a href="<?= base_url('modules/ng_quarantine/index.php') ?>" 
+               class="sidebar-nav-item flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('ng_quarantine', $currentUri) ?>"
+               title="Tracking Lot NG & Karantina OQC">
+                <div class="flex items-center min-w-0">
+                    <svg class="w-4 h-4 mr-2.5 flex-shrink-0 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    <span class="sidebar-text truncate">Lot NG / Karantina</span>
+                </div>
+                <?php
+                try {
+                    $pdoSide = getDB();
+                    if ($pdoSide) {
+                        $cntPendingNg = (int)$pdoSide->query("
+                            SELECT COUNT(*) 
+                            FROM inspection_session_lots isl
+                            JOIN inspection_sessions s ON isl.inspection_session_id = s.id
+                            WHERE (
+                                isl.lot_result = 'rejected' 
+                                OR isl.lot_status IN ('rejected', 'ng_quarantine')
+                                OR EXISTS (
+                                    SELECT 1 FROM inspection_ng_records ngr 
+                                    WHERE ngr.session_lot_id = isl.id 
+                                      AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                                )
+                            )
+                            AND (isl.lot_result != 'passed' AND isl.lot_status NOT IN ('passed', 'reinspected', 'replaced'))
+                            AND isl.replaced_by_lot_id IS NULL
+                            AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                            AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
+                        ")->fetchColumn();
+                        if ($cntPendingNg > 0) {
+                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px] ml-auto flex-shrink-0">' . ($cntPendingNg > 99 ? '99+' : $cntPendingNg) . '</span>';
+                        }
+                    }
+                } catch (Exception $eSide) {}
+                ?>
             </a>
             <?php endif; ?>
 
@@ -125,6 +185,29 @@ function nav_active($keyword, $currentUri) {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
                 </svg>
                 <span class="sidebar-text truncate">Upload DID</span>
+            </a>
+
+            <!-- Request DID (Approval) -->
+            <a href="<?= base_url('modules/did_requests/index.php') ?>" 
+               class="sidebar-nav-item flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('did_requests', $currentUri) ?>"
+               title="Persetujuan Request DID">
+                <div class="flex items-center min-w-0">
+                    <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span class="sidebar-text truncate">Request DID</span>
+                </div>
+                <?php
+                try {
+                    $pdoSide = getDB();
+                    if ($pdoSide) {
+                        $cntPendingSide = (int)$pdoSide->query("SELECT COUNT(*) FROM did_approval_requests WHERE status = 'pending'")->fetchColumn();
+                        if ($cntPendingSide > 0) {
+                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px]">' . ($cntPendingSide > 99 ? '99+' : $cntPendingSide) . '</span>';
+                        }
+                    }
+                } catch (Exception $eSide) {}
+                ?>
             </a>
             <?php endif; ?>
 

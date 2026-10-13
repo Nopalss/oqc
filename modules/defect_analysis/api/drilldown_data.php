@@ -7,6 +7,20 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
+
+// Global Security Guard: Enforce login & RBAC menu access for API
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login telah berakhir atau tidak valid. Silakan login kembali.']);
+    exit;
+}
+if (!can_access('defect_analysis')) {
+    http_response_code(403);
+    echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak akses ke modul analisis defect.']);
+    exit;
+}
+
+// Release session lock immediately to allow non-blocking concurrent AJAX calls
 session_write_close();
 
 $pdo = getDB();

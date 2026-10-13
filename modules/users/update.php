@@ -16,11 +16,11 @@ $id       = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
 $name     = sanitize($_POST['name'] ?? '');
 $username = strtolower(trim(sanitize($_POST['username'] ?? '')));
 $password = $_POST['password'] ?? '';
-$role     = trim(sanitize($_POST['role'] ?? 'admin'));
+$role_id  = filter_input(INPUT_POST, 'role_id', FILTER_VALIDATE_INT);
 $status   = in_array($_POST['status'] ?? '', ['active', 'inactive']) ? $_POST['status'] : 'active';
 
-if (!$id || empty($name) || empty($username)) {
-    set_flash('danger', 'Data input tidak valid!');
+if (!$id || empty($name) || empty($username) || !$role_id) {
+    set_flash('danger', 'Data input tidak valid! Pastikan Role dipilih.');
     redirect('modules/users/index.php');
 }
 
@@ -40,38 +40,47 @@ try {
         redirect('modules/users/edit.php?id=' . $id);
     }
 
-    // Verify role exists
-    $stmtRole = $pdo->prepare("SELECT id FROM roles WHERE role_name = :role LIMIT 1");
-    $stmtRole->execute([':role' => $role]);
-    if (!$stmtRole->fetch()) {
-        $role = 'admin';
+    // Lookup role_name dari roles table berdasarkan id
+    $stmtRole = $pdo->prepare("SELECT id, role_name FROM roles WHERE id = :id LIMIT 1");
+    $stmtRole->execute([':id' => $role_id]);
+    $roleRow = $stmtRole->fetch(PDO::FETCH_ASSOC);
+
+    if (!$roleRow) {
+        set_flash('danger', 'Role yang dipilih tidak valid!');
+        redirect('modules/users/edit.php?id=' . $id);
     }
+
+    $roleName = $roleRow['role_name'];
 
     if (!empty($password)) {
         $passwordHash = password_hash($password, PASSWORD_DEFAULT);
         $stmt = $pdo->prepare("
             UPDATE users 
-            SET name = :name, username = :username, password_hash = :password_hash, role = :role, status = :status, updated_at = NOW() 
+            SET name = :name, username = :username, password_hash = :password_hash,
+                role = :role, role_id = :role_id, status = :status, updated_at = NOW() 
             WHERE id = :id
         ");
         $stmt->execute([
             ':name'          => $name,
             ':username'      => $username,
             ':password_hash' => $passwordHash,
-            ':role'          => $role,
+            ':role'          => $roleName,
+            ':role_id'       => (int)$role_id,
             ':status'        => $status,
             ':id'            => $id
         ]);
     } else {
         $stmt = $pdo->prepare("
             UPDATE users 
-            SET name = :name, username = :username, role = :role, status = :status, updated_at = NOW() 
+            SET name = :name, username = :username,
+                role = :role, role_id = :role_id, status = :status, updated_at = NOW() 
             WHERE id = :id
         ");
         $stmt->execute([
             ':name'     => $name,
             ':username' => $username,
-            ':role'     => $role,
+            ':role'     => $roleName,
+            ':role_id'  => (int)$role_id,
             ':status'   => $status,
             ':id'       => $id
         ]);
@@ -79,16 +88,16 @@ try {
 
     // If current logged-in user updated their own record, update session
     $cur = current_user();
-    if ($cur['id'] === $id) {
+    if ((int)$cur['id'] === (int)$id) {
         $_SESSION['user_name'] = $name;
         $_SESSION['username']  = $username;
-        if ($_SESSION['user_role'] !== $role) {
-            $_SESSION['user_role'] = $role;
-            load_user_permissions($pdo, $role);
+        if ($_SESSION['user_role'] !== $roleName) {
+            $_SESSION['user_role'] = $roleName;
+            load_user_permissions($pdo, $roleName);
         }
     }
 
-    set_flash('success', "Data User '{$name}' berhasil diperbarui!");
+    set_flash('success', "Data User '{$name}' berhasil diperbarui dengan role {$roleName}!");
 } catch (PDOException $e) {
     set_flash('danger', 'Gagal memperbarui data user: ' . $e->getMessage());
 }

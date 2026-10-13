@@ -6,6 +6,8 @@ $pageSubtitle = "Tambahkan referensi Part Code dan Part Name baru ke dalam siste
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_parts');
+
 $pdo = getDB();
 $modelsList = [];
 if ($pdo) {
@@ -32,6 +34,7 @@ if ($pdo) {
 
         <div class="card">
             <form action="<?= base_url('modules/master_parts/store.php') ?>" method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 
                 <!-- Part Code -->
                 <div>

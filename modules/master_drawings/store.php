@@ -8,9 +8,16 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('master_drawings');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_drawings/index.php');
 }
+
+csrf_verify();
+
+$currentUser = function_exists('current_user') ? current_user() : null;
+$createdById = !empty($currentUser['id']) ? (int)$currentUser['id'] : 1;
 
 $part_id = (int)($_POST['part_id'] ?? 0);
 
@@ -178,12 +185,13 @@ if ($uploadedAny) {
     } else {
         $stmtInsert = $pdo->prepare("
             INSERT INTO master_drawings (part_id, drawing_2d_path, drawing_3d_path, uploaded_by, created_at, updated_at) 
-            VALUES (:part_id, :p2d, :p3d, 1, NOW(), NOW())
+            VALUES (:part_id, :p2d, :p3d, :uploaded_by, NOW(), NOW())
         ");
         $stmtInsert->execute([
-            ':part_id' => $part_id,
-            ':p2d' => $path2D,
-            ':p3d' => $path3D
+            ':part_id'     => $part_id,
+            ':p2d'         => $path2D,
+            ':p3d'         => $path3D,
+            ':uploaded_by' => $createdById
         ]);
     }
     set_flash('success', 'Berkas drawing berhasil disimpan ke dalam folder part!');

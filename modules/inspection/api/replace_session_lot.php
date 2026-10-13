@@ -10,6 +10,17 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Metode permintaan tidak valid']);
     exit;
@@ -54,7 +65,7 @@ try {
     $stmtLot = $pdo->prepare("
         SELECT isl.*, 
                s.id as session_id, s.part_id, s.kanban_item_id, s.flow_version, 
-               s.status as session_status,
+               s.status as session_status, s.inspector_id,
                did.part_code as session_part_code, did.part_name as session_part_name,
                p.aql_level as part_aql_level
         FROM inspection_session_lots isl
@@ -70,6 +81,21 @@ try {
     if (!$oldLot) {
         $pdo->rollBack();
         echo json_encode(['success' => false, 'message' => 'Data lot lama tidak ditemukan']);
+        exit;
+    }
+
+    // Ownership check (IDOR protection)
+    $isSessionOwner = (!empty($oldLot['inspector_id']) && (int)$oldLot['inspector_id'] === $currentUserId);
+    if (!$isSessionOwner && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk menggantikan lot pada sesi inspektur lain.']);
+        exit;
+    }
+
+    // Closed session check
+    if (in_array($oldLot['session_status'], ['passed', 'rejected'], true) && !$isSessionOwner && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Sesi inspeksi telah selesai/ditutup dan tidak dapat dimodifikasi.']);
         exit;
     }
 
@@ -144,6 +170,114 @@ try {
                 'message' => "Ref Number ({$newZ5}) sudah terdaftar pada box aktif lain dalam sesi ini"
             ]);
             exit;
+        }
+    }
+
+    // 4.A Validasi 3-Way Match (Part Code + Lot Number + Ref Number): Cek apakah Box sudah PASSED di Kanban lain
+    // Jika box sudah lolos (passed) di kanban lain dan bukan safety stock yang masih ada saldo, TOLAK KERAS!
+    $refToCheck = !empty($newZ5) ? $newZ5 : '';
+    if (!empty($refToCheck)) {
+        $stmtChkPassed = $pdo->prepare("
+            SELECT s.id AS passed_session_id, ki.kanban_no, s.inspection_type, isl.ref_number, isl.lot_number
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+            LEFT JOIN master_parts mp ON mp.id = s.part_id
+            WHERE UPPER(isl.ref_number) = UPPER(:ref)
+              AND UPPER(isl.lot_number) = UPPER(:lot)
+              AND (UPPER(did.part_code) = UPPER(:pc1) OR UPPER(ki.item_code) = UPPER(:pc2) OR UPPER(mp.part_code) = UPPER(:pc3))
+              AND (isl.lot_result IN ('passed', 'skipped') OR s.status = 'passed')
+              AND s.status != 'in_progress'
+              AND s.id != :curr_sid
+            ORDER BY isl.id DESC
+            LIMIT 1
+        ");
+        $stmtChkPassed->execute([
+            ':ref'      => $refToCheck,
+            ':lot'      => $newZ2,
+            ':pc1'      => $effectivePartCode,
+            ':pc2'      => $effectivePartCode,
+            ':pc3'      => $effectivePartCode,
+            ':curr_sid' => $sessionId
+        ]);
+        $passedRow = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
+
+        if ($passedRow && $passedRow['inspection_type'] !== 'safety_stock') {
+            // Periksa apakah box ini ada di Safety Stock dan masih ada saldo
+            $stmtSSCheck = $pdo->prepare("
+                SELECT isl.qty FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                WHERE s.inspection_type = 'safety_stock'
+                  AND s.status = 'passed'
+                  AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                  AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
+                  AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
+                  AND isl.qty > 0
+                  AND UPPER(isl.ref_number) = UPPER(:ref)
+                  AND UPPER(isl.lot_number) = UPPER(:lot)
+                LIMIT 1
+            ");
+            $stmtSSCheck->execute([':ref' => $refToCheck, ':lot' => $newZ2]);
+            $ssBal = (int)$stmtSSCheck->fetchColumn();
+
+            if ($ssBal <= 0) {
+                $pdo->rollBack();
+                $kbInfo = !empty($passedRow['kanban_no']) ? " (Kanban: {$passedRow['kanban_no']})" : "";
+                echo json_encode([
+                    'success' => false,
+                    'error_type' => 'already_passed_duplicate',
+                    'message' => "Box pengganti Part {$effectivePartCode} | Lot #{$newZ2} | Ref #{$refToCheck} SUDAH PERNAH diinspeksi & dinyatakan PASSED pada Sesi #{$passedRow['passed_session_id']}{$kbInfo}. Box ini tidak boleh digunakan kembali!"
+                ]);
+                exit;
+            }
+        }
+    }
+
+    // 4.B Validasi apakah Box Pengganti berasal dari Safety Stock Gudang
+    if (!empty($newZ5)) {
+        $stmtEverSS = $pdo->prepare("
+            SELECT 1 FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            WHERE s.inspection_type = 'safety_stock'
+              AND UPPER(isl.ref_number) = UPPER(:ref)
+            LIMIT 1
+        ");
+        $stmtEverSS->execute([':ref' => $newZ5]);
+        $isEverSS = (bool)$stmtEverSS->fetchColumn();
+
+        if ($isEverSS) {
+            $stmtChkSS = $pdo->prepare("
+                SELECT isl.id as lot_id, isl.qty, isl.lot_number, isl.ref_number, s.id as session_id
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                WHERE s.inspection_type = 'safety_stock'
+                  AND s.status = 'passed'
+                  AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                  AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
+                  AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
+                  AND isl.qty > 0
+                  AND UPPER(isl.ref_number) = UPPER(:ref)
+                ORDER BY isl.id DESC
+                LIMIT 1
+            ");
+            $stmtChkSS->execute([':ref' => $newZ5]);
+            $ssLot = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
+
+            if (!$ssLot || (int)$ssLot['qty'] <= 0) {
+                $pdo->rollBack();
+                echo json_encode([
+                    'success'    => false,
+                    'error_type' => 'safety_stock_exhausted',
+                    'message'    => "Safety Stock Ref #{$newZ5} (Lot #{$newZ2}) sudah habis terpakai (sisa 0 pcs) di gudang!"
+                ]);
+                exit;
+            }
+
+            // Clamp qty pengganti jika melebihi saldo riil gudang
+            if ($newZ3 > (int)$ssLot['qty']) {
+                $newZ3 = (int)$ssLot['qty'];
+            }
         }
     }
 

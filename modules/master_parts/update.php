@@ -6,9 +6,13 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('master_parts');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_parts/index.php');
 }
+
+csrf_verify();
 
 $id        = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
 $part_code = strtoupper(sanitize($_POST['part_code'] ?? ''));

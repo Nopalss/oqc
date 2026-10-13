@@ -12,6 +12,17 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Method not allowed']);
     exit;
@@ -78,6 +89,7 @@ try {
         FROM inspection_sessions s
         JOIN daily_inspection_data did ON did.id = s.did_id
         WHERE s.id = :id
+        FOR UPDATE
     ");
     $stmtSess->execute([':id' => $originalSessionId]);
     $origSession = $stmtSess->fetch(PDO::FETCH_ASSOC);
@@ -87,6 +99,14 @@ try {
         echo json_encode(['success' => false, 'message' => 'Sesi original tidak ditemukan']);
         exit;
     }
+
+    // Ownership check (IDOR protection)
+    if (!empty($origSession['inspector_id']) && (int)$origSession['inspector_id'] !== $currentUserId && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk melakukan re-inspeksi pada sesi inspektur lain.']);
+        exit;
+    }
+
     if ($origSession['status'] !== 'rejected') {
         $pdo->rollBack();
         echo json_encode(['success' => false, 'message' => 'Sesi original harus berstatus REJECTED']);
@@ -331,7 +351,7 @@ try {
         ':parent'   => $originalSessionId,
         ':rtype'    => $action,
         ':rnotes'   => $reinspNotes,
-        ':insp'     => $_SESSION['user_id'] ?? null,
+        ':insp'     => $currentUserId,
     ]);
     $reinspSessionId = (int)$pdo->lastInsertId();
 
@@ -355,8 +375,14 @@ try {
     // 6. Insert Lots ke Sesi Re-Inspeksi Baru & Log Audit
     $stmtInsLot = $pdo->prepare("
         INSERT INTO inspection_session_lots
-          (inspection_session_id, ref_number, lot_number, qty, remarks, scanned_qr_raw, lot_status, created_at)
-        VALUES (:sid, :ref, :lot, :qty, :rem, :raw, 'ok', NOW())
+          (inspection_session_id, ref_number, lot_number, qty,
+           aql_level, sample_code, sample_size, accept_number, reject_number,
+           ng_count, lot_result, lot_status, remarks, scanned_qr_raw, created_at)
+        VALUES (
+           :sid, :ref, :lot, :qty,
+           :aql, :scode, :ssize, :acc, :rej,
+           0, 'in_progress', 'ok', :rem, :raw, NOW()
+        )
     ");
 
     $stmtInsLog = $pdo->prepare("
@@ -368,13 +394,33 @@ try {
     ");
 
     foreach ($newSessionLots as $nl) {
+        $nlQty = (int)$nl['qty'];
+        $stmtAqlLot = $pdo->prepare("SELECT sample_code, sample_size, accept_number, reject_number FROM aql_standards WHERE inspection_level = :lvl AND :qty BETWEEN qty_min AND qty_max LIMIT 1");
+        $stmtAqlLot->execute([':lvl' => $aqlLevel, ':qty' => $nlQty]);
+        $aqlLotRow = $stmtAqlLot->fetch(PDO::FETCH_ASSOC);
+        if (!$aqlLotRow) {
+            $stmtAqlFbLot = $pdo->prepare("SELECT sample_code, sample_size, accept_number, reject_number FROM aql_standards WHERE :qty BETWEEN qty_min AND qty_max LIMIT 1");
+            $stmtAqlFbLot->execute([':qty' => $nlQty]);
+            $aqlLotRow = $stmtAqlFbLot->fetch(PDO::FETCH_ASSOC);
+        }
+
+        $lSampleSize   = $aqlLotRow ? (int)$aqlLotRow['sample_size'] : min(5, $nlQty);
+        $lSampleCode   = $aqlLotRow ? $aqlLotRow['sample_code'] : 'H';
+        $lAcceptNumber = $aqlLotRow ? (int)$aqlLotRow['accept_number'] : 0;
+        $lRejectNumber = $aqlLotRow ? (int)$aqlLotRow['reject_number'] : 1;
+
         $stmtInsLot->execute([
-            ':sid' => $reinspSessionId,
-            ':ref' => $nl['ref_number'],
-            ':lot' => $nl['lot_number'],
-            ':qty' => $nl['qty'],
-            ':rem' => $nl['remarks'],
-            ':raw' => $nl['scanned_qr'],
+            ':sid'   => $reinspSessionId,
+            ':ref'   => $nl['ref_number'],
+            ':lot'   => $nl['lot_number'],
+            ':qty'   => $nlQty,
+            ':aql'   => $aqlLevel,
+            ':scode' => $lSampleCode,
+            ':ssize' => $lSampleSize,
+            ':acc'   => $lAcceptNumber,
+            ':rej'   => $lRejectNumber,
+            ':rem'   => $nl['remarks'],
+            ':raw'   => $nl['scanned_qr'],
         ]);
         $insertedLotId = (int)$pdo->lastInsertId();
 

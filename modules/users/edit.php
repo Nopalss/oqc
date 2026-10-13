@@ -25,7 +25,7 @@ if ($pdo) {
         $stmt->execute([':id' => $id]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        $stmtRoles = $pdo->query("SELECT role_name, display_name FROM roles ORDER BY id ASC");
+        $stmtRoles = $pdo->query("SELECT id, role_name, display_name FROM roles ORDER BY id ASC");
         $roles = $stmtRoles->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
         set_flash('danger', 'Gagal memuat data user: ' . $e->getMessage());
@@ -89,11 +89,12 @@ if (!$user) {
 
                     <!-- Role Akses -->
                     <div>
-                        <label for="role" class="form-label text-xs font-semibold text-slate-700">Role Akses <span class="text-rose-500">*</span></label>
-                        <select id="role" name="role" required class="form-input text-xs">
+                        <label for="role_id" class="form-label text-xs font-semibold text-slate-700">Role Akses <span class="text-rose-500">*</span></label>
+                        <select id="role_id" name="role_id" required class="form-input text-xs">
+                            <option value="">-- Pilih Role --</option>
                             <?php foreach ($roles as $r): ?>
-                                <option value="<?= htmlspecialchars($r['role_name']) ?>" <?= ($user['role'] === $r['role_name']) ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($r['display_name']) ?>
+                                <option value="<?= (int)$r['id'] ?>" <?= ((int)($user['role_id'] ?? 0) === (int)$r['id']) ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($r['display_name']) ?> (<?= htmlspecialchars($r['role_name']) ?>)
                                 </option>
                             <?php endforeach; ?>
                         </select>

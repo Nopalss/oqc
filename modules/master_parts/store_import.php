@@ -1,6 +1,7 @@
 <?php
 /**
  * Action Handler: Execute Store/Import Master Parts from Confirmed Review
+ * Protected with RBAC, CSRF token, and optimized batch queries
  */
 @set_time_limit(180);
 @ini_set('memory_limit', '256M');
@@ -9,9 +10,13 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('master_parts');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_parts/index.php');
 }
+
+csrf_verify();
 
 $rawJson = $_POST['import_data_json'] ?? '';
 if (empty($rawJson)) {
@@ -36,9 +41,31 @@ $currentUser = function_exists('current_user') ? current_user() : null;
 $createdById = !empty($currentUser['id']) ? (int)$currentUser['id'] : 1;
 
 try {
+    // 1. Pre-fetch existing part codes to eliminate N+1 queries during the transaction
+    $allCodes = [];
+    foreach ($rows as $item) {
+        $c = strtoupper(trim((string)($item['part_code'] ?? '')));
+        if ($c !== '') {
+            $allCodes[] = $c;
+        }
+    }
+    $allCodes = array_values(array_unique($allCodes));
+
+    $existingDbParts = [];
+    if (!empty($allCodes)) {
+        foreach (array_chunk($allCodes, 500) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+            $chkStmt = $pdo->prepare("SELECT part_code FROM master_parts WHERE part_code IN ($placeholders)");
+            $chkStmt->execute($chunk);
+            while ($col = $chkStmt->fetchColumn()) {
+                $existingDbParts[strtoupper(trim($col))] = true;
+            }
+        }
+    }
+
     $pdo->beginTransaction();
 
-    // 1. Prepare Model Resolver Cache
+    // 2. Prepare Model Resolver Cache
     $modelCache = [];
     $stmtAllModels = $pdo->query("SELECT id, name FROM master_models");
     while ($m = $stmtAllModels->fetch(PDO::FETCH_ASSOC)) {
@@ -48,8 +75,7 @@ try {
     $stmtInsertModel = $pdo->prepare("INSERT INTO master_models (name, created_at, updated_at) VALUES (:name, NOW(), NOW()) ON DUPLICATE KEY UPDATE name=VALUES(name)");
     $stmtGetModelId  = $pdo->prepare("SELECT id FROM master_models WHERE name = :name LIMIT 1");
 
-    // 2. Prepare Part Statements
-    $stmtCheckPart = $pdo->prepare("SELECT id FROM master_parts WHERE part_code = :part_code LIMIT 1");
+    // 3. Prepare Part Insert Statement
     $stmtInsertPart = $pdo->prepare("
         INSERT INTO master_parts (part_code, part_name, model_id, aql_level, source, created_by, created_at)
         VALUES (:part_code, :part_name, :model_id, :aql_level, 'manual', :created_by, NOW())
@@ -75,9 +101,8 @@ try {
             continue;
         }
 
-        // Check duplicate in database
-        $stmtCheckPart->execute([':part_code' => $partCode]);
-        if ($stmtCheckPart->fetch()) {
+        // Check duplicate from pre-fetched array (Ultra-fast in-memory check)
+        if (isset($existingDbParts[$partCode])) {
             $skipCount++;
             continue;
         }
@@ -111,6 +136,8 @@ try {
             ':created_by' => $createdById
         ]);
 
+        // Mark as inserted to prevent intra-file duplicates
+        $existingDbParts[$partCode] = true;
         $successCount++;
     }
 

@@ -6,9 +6,13 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('master_parts');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_parts/index.php');
 }
+
+csrf_verify();
 
 $part_code = strtoupper(sanitize($_POST['part_code'] ?? ''));
 $part_name = sanitize($_POST['part_name'] ?? '');
@@ -23,6 +27,9 @@ if (empty($part_code) || empty($part_name)) {
     redirect('modules/master_parts/create.php');
 }
 
+$currentUser = function_exists('current_user') ? current_user() : null;
+$createdById = !empty($currentUser['id']) ? (int)$currentUser['id'] : 1;
+
 $pdo = getDB();
 
 if ($pdo) {
@@ -35,12 +42,13 @@ if ($pdo) {
             redirect('modules/master_parts/create.php');
         }
 
-        $stmt = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, model_id, aql_level, source, created_by, created_at) VALUES (:part_code, :part_name, :model_id, :aql_level, 'manual', 1, NOW())");
+        $stmt = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, model_id, aql_level, source, created_by, created_at) VALUES (:part_code, :part_name, :model_id, :aql_level, 'manual', :created_by, NOW())");
         $stmt->execute([
-            ':part_code' => $part_code,
-            ':part_name' => $part_name,
-            ':model_id'  => $model_id,
-            ':aql_level' => $aql_level
+            ':part_code'  => $part_code,
+            ':part_name'  => $part_name,
+            ':model_id'   => $model_id,
+            ':aql_level'  => $aql_level,
+            ':created_by' => $createdById
         ]);
 
         set_flash('success', "Master Part '{$part_code}' berhasil ditambahkan!");

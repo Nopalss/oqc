@@ -3,6 +3,7 @@
  * Backend API untuk Fitur Drill-Down Modal KPI Dashboard OQC
  * Mengambil data rincian analitik secara instan sesuai metrik dan filter aktif.
  */
+@ini_set('display_errors', '0');
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -10,11 +11,16 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
-// Verifikasi sesi / login
-if (!isset($_SESSION['user_id'])) {
+// Verifikasi sesi / login & hak akses menu dashboard
+$hasAccess = is_logged_in() && can_access('dashboard');
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
+if (!$hasAccess) {
     echo json_encode([
         'success' => false,
-        'message' => 'Sesi telah berakhir. Silakan muat ulang halaman.'
+        'message' => 'Akses ditolak! Anda tidak memiliki izin untuk mengakses Dashboard.'
     ]);
     exit;
 }
@@ -56,8 +62,12 @@ $monthNames = [
 if ($filterType === 'all_years') {
     $dbYears = [];
     try {
-        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC");
+        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(summary_date) AS y FROM oqc_daily_summary ORDER BY y ASC");
         $dbYears = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        if (empty($dbYears)) {
+            $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC LIMIT 20");
+            $dbYears = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        }
     } catch (Exception $e) {}
     if (empty($dbYears)) $dbYears = [(int)date('Y')];
 
@@ -100,6 +110,8 @@ if ($filterType === 'all_years') {
             $filterPeriodLabel = "Bulan Ini (" . ($monthNames[(int)date('n')] ?? date('F')) . " " . date('Y') . ")";
     }
 }
+
+$reqTab = sanitize($_GET['tab'] ?? '');
 
 $nextDay = date('Y-m-d', strtotime($endDate . ' +1 day'));
 $paramsSummary = [
@@ -197,6 +209,64 @@ try {
                 ? "COALESCE(NULLIF(s.total_sample_size_session, 0), s.total_sample_size, 0)"
                 : "COALESCE(NULLIF(s.total_sample_size_lot, 0), s.total_sample_size, 0)";
 
+            // Handler khusus jika request hanya meminta Tab 3 (Lazy Loading Log)
+            if ($reqTab === 'by_log') {
+                $custLogCond = "";
+                $paramsLog = [
+                    ':sd'      => $startDate,
+                    ':ed_next' => $nextDay,
+                ];
+                if ($selectedCustomer !== '') {
+                    if ($selectedCustomer === 'INTERNAL') {
+                        $custLogCond = " AND (ki.customer = 'INTERNAL' OR ki.customer IS NULL OR ki.customer = '') ";
+                    } else {
+                        $custLogCond = " AND ki.customer = :cust ";
+                        $paramsLog[':cust'] = $selectedCustomer;
+                    }
+                }
+
+                $sqlLog = "SELECT 
+                                ngr.id,
+                                ngr.created_at,
+                                ss.id AS session_id,
+                                ss.started_at,
+                                COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer,
+                                COALESCE(mp.part_code, '-') AS part_code,
+                                COALESCE(mp.part_name, '-') AS part_name,
+                                COALESCE(mm.name, mp.model, '-') AS model,
+                                COALESCE(NULLIF(TRIM(isl.lot_number), ''), ngr.lot_number, '-') AS lot_number,
+                                COALESCE(NULLIF(TRIM(isl.ref_number), ''), ngr.ref_number, '-') AS ref_number,
+                                dt.name AS defect_name,
+                                ngr.qty_ng,
+                                ngr.remark,
+                                ngr.is_sorted,
+                                ngr.sort_notes
+                           FROM inspection_ng_records ngr
+                           INNER JOIN inspection_sessions ss ON ngr.inspection_session_id = ss.id
+                           INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                           LEFT JOIN inspection_session_lots isl ON ngr.session_lot_id = isl.id
+                           LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
+                           LEFT JOIN master_parts mp ON ss.part_id = mp.id
+                           LEFT JOIN master_models mm ON mp.model_id = mm.id
+                           WHERE (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                             AND ss.started_at >= :sd AND ss.started_at < :ed_next
+                             AND NOT (ss.inspector_id IS NULL AND ss.sample_size <= 1 AND ss.ng_count = 0 AND ki.remark LIKE '%AUTO-SS-SESS-%')
+                             {$custLogCond}
+                           ORDER BY ngr.created_at DESC, ngr.id DESC
+                           LIMIT 100";
+
+                $stmtLog = $pdo->prepare($sqlLog);
+                $stmtLog->execute($paramsLog);
+                $logRows = $stmtLog->fetchAll(PDO::FETCH_ASSOC);
+
+                echo json_encode([
+                    'success' => true,
+                    'tab'     => 'by_log',
+                    'data'    => $logRows
+                ]);
+                exit;
+            }
+
             // Tab 1: Rincian per Part
             $sqlParts = "SELECT 
                             s.part_id,
@@ -262,51 +332,17 @@ try {
             }
             unset($dItem);
 
-            // Tab 3: Log Riwayat Temuan Cacat Lapangan
-            $sqlLog = "SELECT 
-                            ngr.id,
-                            ngr.created_at,
-                            ss.id AS session_id,
-                            ss.started_at,
-                            COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer,
-                            COALESCE(mp.part_code, '-') AS part_code,
-                            COALESCE(mp.part_name, '-') AS part_name,
-                            COALESCE(mm.name, mp.model, '-') AS model,
-                            COALESCE(NULLIF(TRIM(isl.lot_number), ''), ngr.lot_number, '-') AS lot_number,
-                            COALESCE(NULLIF(TRIM(isl.ref_number), ''), ngr.ref_number, '-') AS ref_number,
-                            dt.name AS defect_name,
-                            ngr.qty_ng,
-                            ngr.remark,
-                            ngr.is_sorted,
-                            ngr.sort_notes
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions ss ON ngr.inspection_session_id = ss.id
-                       INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
-                       LEFT JOIN inspection_session_lots isl ON ngr.session_lot_id = isl.id
-                       LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
-                       LEFT JOIN master_parts mp ON ss.part_id = mp.id
-                       LEFT JOIN master_models mm ON mp.model_id = mm.id
-                       WHERE (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                         AND ss.started_at >= :sd AND ss.started_at < :ed_next
-                         " . ($selectedCustomer !== '' ? " AND (ki.customer = :cust OR (:cust = 'INTERNAL' AND (ki.customer IS NULL OR ki.customer = ''))) " : "") . "
-                       ORDER BY ngr.created_at DESC, ngr.id DESC
-                       LIMIT 100";
-
-            $stmtLog = $pdo->prepare($sqlLog);
-            $stmtLog->execute($paramsSummary);
-            $logRows = $stmtLog->fetchAll(PDO::FETCH_ASSOC);
-
             $response['stats'] = [
                 ['label' => 'Total Fisik Cacat',    'value' => number_format($grandTotalNg) . ' pcs',     'color' => '#dc2626'],
                 ['label' => 'Part Terdampak Cacat', 'value' => number_format(count($partsRows)) . ' part', 'color' => '#d97706'],
                 ['label' => 'Variasi Jenis Defect', 'value' => number_format(count($defectRows)) . ' jenis','color' => '#7c3aed'],
-                ['label' => 'Total Kasus Temuan',   'value' => number_format(count($logRows)) . ' catatan', 'color' => '#475569'],
+                ['label' => 'Total Kasus Temuan',   'value' => number_format($grandTotalNg) . ' pcs',     'color' => '#475569'],
             ];
 
             $response['data'] = [
                 'by_part'   => $partsRows,
                 'by_defect' => $defectRows,
-                'by_log'    => $logRows
+                'by_log'    => null // Lazy loaded saat tab dibuka
             ];
             break;
 
@@ -450,46 +486,102 @@ try {
                 ? 'Informasi lengkap box/lot fisik yang memenuhi standar spesifikasi mutu'
                 : 'Daftar lot yang dikarantina, disortir, atau diganti akibat temuan cacat';
 
-            $condStatus = $isPassedModeReq 
-                ? "isl.lot_result = 'passed' AND isl.lot_status = 'ok'"
-                : "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR active_ng_cnt > 0)";
+            $custLotCond = "";
+            $paramsLots = [
+                ':sd'      => $startDate,
+                ':ed_next' => $nextDay,
+            ];
+            if ($selectedCustomer !== '') {
+                if ($selectedCustomer === 'INTERNAL') {
+                    $custLotCond = " AND (ki.customer = 'INTERNAL' OR ki.customer IS NULL OR ki.customer = '') ";
+                } else {
+                    $custLotCond = " AND ki.customer = :cust ";
+                    $paramsLots[':cust'] = $selectedCustomer;
+                }
+            }
 
-            $sqlDetailLots = "SELECT 
-                                isl.id,
-                                isl.inspection_session_id,
-                                ss.started_at,
-                                COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer,
-                                COALESCE(mp.part_code, '-') AS part_code,
-                                COALESCE(mp.part_name, '-') AS part_name,
-                                COALESCE(mm.name, mp.model, '-') AS model,
-                                isl.lot_number,
-                                isl.ref_number,
-                                isl.qty,
-                                isl.sample_size,
-                                isl.lot_result,
-                                isl.lot_status,
-                                isl.remarks,
-                                COUNT(CASE WHEN (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0) THEN ngr.id END) AS active_ng_cnt,
-                                GROUP_CONCAT(DISTINCT CONCAT(dt.name, ' (', ngr.qty_ng, ')') SEPARATOR ', ') AS defect_breakdown
-                              FROM inspection_session_lots isl
-                              INNER JOIN inspection_sessions ss ON isl.inspection_session_id = ss.id
-                              LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
-                              LEFT JOIN master_parts mp ON ss.part_id = mp.id
-                              LEFT JOIN master_models mm ON mp.model_id = mm.id
-                              LEFT JOIN inspection_ng_records ngr ON ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                              LEFT JOIN defect_types dt ON ngr.defect_type_id = dt.id
-                              WHERE ss.started_at >= :sd AND ss.started_at < :ed_next
-                                AND (ki.remark IS NULL OR (ki.remark NOT LIKE '%AUTO-SS-SESS-%' AND ki.remark NOT LIKE '%Split%'))
-                                AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE 'Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE 'Alokasi Safety Stock%'))
-                                " . ($selectedCustomer !== '' ? " AND (ki.customer = :cust OR (:cust = 'INTERNAL' AND (ki.customer IS NULL OR ki.customer = ''))) " : "") . "
-                              GROUP BY isl.id, isl.inspection_session_id, ss.started_at, ki.customer, mp.part_code, mp.part_name, mm.name, mp.model, isl.lot_number, isl.ref_number, isl.qty, isl.sample_size, isl.lot_result, isl.lot_status, isl.remarks
-                              HAVING {$condStatus}
-                              ORDER BY ss.started_at DESC, isl.id DESC
-                              LIMIT 150";
+            if ($isPassedModeReq) {
+                // Optimasi Passed Lot: Ringan, tanpa JOIN defect & ngr, tanpa GROUP BY 14 kolom
+                $sqlDetailLots = "SELECT 
+                                    isl.id,
+                                    isl.inspection_session_id,
+                                    ss.started_at,
+                                    COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer,
+                                    COALESCE(mp.part_code, '-') AS part_code,
+                                    COALESCE(mp.part_name, '-') AS part_name,
+                                    COALESCE(mm.name, mp.model, '-') AS model,
+                                    isl.lot_number,
+                                    isl.ref_number,
+                                    isl.qty,
+                                    isl.sample_size,
+                                    isl.lot_result,
+                                    isl.lot_status,
+                                    isl.remarks,
+                                    0 AS active_ng_cnt,
+                                    '' AS defect_breakdown
+                                  FROM inspection_session_lots isl
+                                  INNER JOIN inspection_sessions ss ON isl.inspection_session_id = ss.id
+                                  LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
+                                  LEFT JOIN master_parts mp ON ss.part_id = mp.id
+                                  LEFT JOIN master_models mm ON mp.model_id = mm.id
+                                  WHERE isl.lot_result = 'passed'
+                                    AND isl.lot_status = 'ok'
+                                    AND ss.started_at >= :sd AND ss.started_at < :ed_next
+                                    AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
+                                    AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                                    AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Direct Close%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))
+                                    AND NOT (ki.remark LIKE '%AUTO-SS-SESS-%' OR ki.remark LIKE '%Auto Safety Stock Sisa Excess%' OR ki.remark LIKE '%Sisa Excess Kanban%')
+                                    AND (ki.remark IS NULL OR ki.remark NOT LIKE '%Split%')
+                                    {$custLotCond}
+                                  ORDER BY ss.started_at DESC, isl.id DESC
+                                  LIMIT 150";
 
-            $stmtDetailLots = $pdo->prepare($sqlDetailLots);
-            $stmtDetailLots->execute($paramsSummary);
-            $detailLotRows = $stmtDetailLots->fetchAll(PDO::FETCH_ASSOC);
+                $stmtDetailLots = $pdo->prepare($sqlDetailLots);
+                $stmtDetailLots->execute($paramsLots);
+                $detailLotRows = $stmtDetailLots->fetchAll(PDO::FETCH_ASSOC);
+
+            } else {
+                // Optimasi Rejected / NG Lot
+                $sqlDetailLots = "SELECT 
+                                    isl.id,
+                                    isl.inspection_session_id,
+                                    ss.started_at,
+                                    COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer,
+                                    COALESCE(mp.part_code, '-') AS part_code,
+                                    COALESCE(mp.part_name, '-') AS part_name,
+                                    COALESCE(mm.name, mp.model, '-') AS model,
+                                    isl.lot_number,
+                                    isl.ref_number,
+                                    isl.qty,
+                                    isl.sample_size,
+                                    isl.lot_result,
+                                    isl.lot_status,
+                                    isl.remarks,
+                                    COUNT(CASE WHEN (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0) THEN ngr.id END) AS active_ng_cnt,
+                                    GROUP_CONCAT(DISTINCT CONCAT(dt.name, ' (', ngr.qty_ng, ')') SEPARATOR ', ') AS defect_breakdown
+                                  FROM inspection_session_lots isl
+                                  INNER JOIN inspection_sessions ss ON isl.inspection_session_id = ss.id
+                                  LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
+                                  LEFT JOIN master_parts mp ON ss.part_id = mp.id
+                                  LEFT JOIN master_models mm ON mp.model_id = mm.id
+                                  LEFT JOIN inspection_ng_records ngr ON ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                                  LEFT JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                                  WHERE ss.started_at >= :sd AND ss.started_at < :ed_next
+                                    AND (isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR ngr.id IS NOT NULL)
+                                    AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
+                                    AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                                    AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Direct Close%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))
+                                    AND NOT (ki.remark LIKE '%AUTO-SS-SESS-%' OR ki.remark LIKE '%Auto Safety Stock Sisa Excess%' OR ki.remark LIKE '%Sisa Excess Kanban%')
+                                    AND (ki.remark IS NULL OR ki.remark NOT LIKE '%Split%')
+                                    {$custLotCond}
+                                  GROUP BY isl.id, isl.inspection_session_id, ss.started_at, ki.customer, mp.part_code, mp.part_name, mm.name, mp.model, isl.lot_number, isl.ref_number, isl.qty, isl.sample_size, isl.lot_result, isl.lot_status, isl.remarks
+                                  ORDER BY ss.started_at DESC, isl.id DESC
+                                  LIMIT 150";
+
+                $stmtDetailLots = $pdo->prepare($sqlDetailLots);
+                $stmtDetailLots->execute($paramsLots);
+                $detailLotRows = $stmtDetailLots->fetchAll(PDO::FETCH_ASSOC);
+            }
 
             $totQtyPieces = 0;
             foreach ($detailLotRows as $dlr) {
@@ -503,6 +595,8 @@ try {
             ];
             $response['data'] = $detailLotRows;
             break;
+
+
 
         default:
             echo json_encode([

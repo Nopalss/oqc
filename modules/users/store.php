@@ -15,11 +15,11 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $name     = sanitize($_POST['name'] ?? '');
 $username = strtolower(trim(sanitize($_POST['username'] ?? '')));
 $password = $_POST['password'] ?? '';
-$role     = trim(sanitize($_POST['role'] ?? 'admin'));
+$role_id  = filter_input(INPUT_POST, 'role_id', FILTER_VALIDATE_INT);
 $status   = in_array($_POST['status'] ?? '', ['active', 'inactive']) ? $_POST['status'] : 'active';
 
-if (empty($name) || empty($username) || empty($password)) {
-    set_flash('danger', 'Nama, Username, dan Password wajib diisi!');
+if (empty($name) || empty($username) || empty($password) || !$role_id) {
+    set_flash('danger', 'Nama, Username, Password, dan Role wajib diisi!');
     redirect('modules/users/create.php');
 }
 
@@ -39,28 +39,33 @@ try {
         redirect('modules/users/create.php');
     }
 
-    // Verify role exists in roles table
-    $stmtRole = $pdo->prepare("SELECT id FROM roles WHERE role_name = :role LIMIT 1");
-    $stmtRole->execute([':role' => $role]);
-    if (!$stmtRole->fetch()) {
-        $role = 'admin'; // fallback to admin if not found
+    // Lookup role_name dari roles table berdasarkan id
+    $stmtRole = $pdo->prepare("SELECT id, role_name FROM roles WHERE id = :id LIMIT 1");
+    $stmtRole->execute([':id' => $role_id]);
+    $roleRow = $stmtRole->fetch(PDO::FETCH_ASSOC);
+
+    if (!$roleRow) {
+        set_flash('danger', 'Role yang dipilih tidak valid!');
+        redirect('modules/users/create.php');
     }
 
+    $roleName = $roleRow['role_name'];
     $passwordHash = password_hash($password, PASSWORD_DEFAULT);
 
     $stmt = $pdo->prepare("
-        INSERT INTO users (name, username, password_hash, role, status, created_at, updated_at) 
-        VALUES (:name, :username, :password_hash, :role, :status, NOW(), NOW())
+        INSERT INTO users (name, username, password_hash, role, role_id, status, created_at, updated_at) 
+        VALUES (:name, :username, :password_hash, :role, :role_id, :status, NOW(), NOW())
     ");
     $stmt->execute([
         ':name'          => $name,
         ':username'      => $username,
         ':password_hash' => $passwordHash,
-        ':role'          => $role,
+        ':role'          => $roleName,
+        ':role_id'       => (int)$role_id,
         ':status'        => $status
     ]);
 
-    set_flash('success', "User '{$name}' ({$username}) berhasil ditambahkan!");
+    set_flash('success', "User '{$name}' ({$username}) berhasil ditambahkan dengan role {$roleName}!");
 } catch (PDOException $e) {
     set_flash('danger', 'Gagal menyimpan user: ' . $e->getMessage());
 }

@@ -6,7 +6,14 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('did');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    redirect('modules/did/index.php');
+}
+
+if (!verify_csrf_token()) {
+    set_flash('error', 'Sesi keamanan (CSRF Token) tidak valid atau telah kedaluwarsa. Silakan muat ulang halaman.');
     redirect('modules/did/index.php');
 }
 

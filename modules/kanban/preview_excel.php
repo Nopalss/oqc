@@ -9,6 +9,11 @@ require_once __DIR__ . '/xlsx_kanban_parser.php';
 
 header('Content-Type: application/json');
 
+if (!is_logged_in()) {
+    echo json_encode(['success' => false, 'message' => 'Unauthorized. Silakan login terlebih dahulu.']);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Method tidak diizinkan!']);
     exit;
@@ -92,12 +97,12 @@ foreach ($result['rows'] as &$r) {
         $totalDuplicate++;
     } elseif (isset($seenInFile[$hash])) {
         $r['is_duplicate'] = true;
-        $r['duplicate_source'] = 'Kembar di file Excel';
+        $r['duplicate_source'] = 'Kembar di file (Sheet: ' . $seenInFile[$hash] . ')';
         $totalDuplicate++;
     } else {
         $r['is_duplicate'] = false;
         $r['duplicate_source'] = null;
-        $seenInFile[$hash] = true;
+        $seenInFile[$hash] = $r['sheet_name'] ?? 'lain';
         $totalNew++;
     }
 }

@@ -1,7 +1,15 @@
 /**
- * Core Application JavaScript Utilities (jQuery Powered)
- * Handles Sidebar Toggle, State Persistence, and SweetAlert2 Confirmations
+ * Global XSS Sanitization Helper
  */
+window.escapeHtml = function (str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+};
 
 $(document).ready(function () {
     console.log("OQC System JavaScript Initialized Successfully.");
@@ -103,6 +111,71 @@ function confirmDelete(deleteUrl, name) {
     } else {
         if (confirm(`Apakah Anda yakin ingin menghapus "${name}"?`)) {
             window.location.href = deleteUrl;
+        }
+    }
+}
+
+/**
+ * Show SweetAlert2 Confirmation Dialog and execute deletion via POST with CSRF Token
+ * 
+ * @param {string} actionUrl Target POST endpoint
+ * @param {number|string} id Item ID to delete
+ * @param {string} name Item name for display
+ * @param {string} csrfToken Valid CSRF token
+ */
+function confirmPostDelete(actionUrl, id, name, csrfToken, extraData) {
+    var doSubmit = function() {
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = actionUrl;
+        form.style.display = 'none';
+
+        var idInput = document.createElement('input');
+        idInput.type = 'hidden';
+        idInput.name = 'id';
+        idInput.value = id;
+        form.appendChild(idInput);
+
+        var csrfInput = document.createElement('input');
+        csrfInput.type = 'hidden';
+        csrfInput.name = 'csrf_token';
+        csrfInput.value = csrfToken || '';
+        form.appendChild(csrfInput);
+
+        if (extraData && typeof extraData === 'object') {
+            for (var key in extraData) {
+                if (extraData.hasOwnProperty(key)) {
+                    var extraInput = document.createElement('input');
+                    extraInput.type = 'hidden';
+                    extraInput.name = key;
+                    extraInput.value = extraData[key];
+                    form.appendChild(extraInput);
+                }
+            }
+        }
+
+        document.body.appendChild(form);
+        form.submit();
+    };
+
+    if (typeof Swal !== 'undefined') {
+        Swal.fire({
+            title: 'Konfirmasi Hapus Data',
+            html: `Apakah Anda yakin ingin menghapus data <b>"${name}"</b>?<br><span style="font-size: 11px; color: #64748b;">Tindakan ini tidak dapat dibatalkan.</span>`,
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#e11d48',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Ya, Hapus Sekarang!',
+            cancelButtonText: 'Batal'
+        }).then(function(result) {
+            if (result.isConfirmed) {
+                doSubmit();
+            }
+        });
+    } else {
+        if (confirm(`Apakah Anda yakin ingin menghapus "${name}"?`)) {
+            doSubmit();
         }
     }
 }

@@ -10,6 +10,14 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 
+// Production Security Guard: Require authenticated user
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true, 'items' => []]);
+    exit;
+}
+session_write_close();
+
 $pdo = getDB();
 $partCode = strtoupper(trim(sanitize($_GET['part_code'] ?? '')));
 
@@ -19,6 +27,7 @@ if (empty($partCode)) {
 }
 
 if (!$pdo) {
+    http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'Koneksi database gagal', 'items' => []]);
     exit;
 }
@@ -40,19 +49,30 @@ try {
             isl.scanned_qr_raw
         FROM inspection_sessions s
         LEFT JOIN inspection_session_lots isl ON isl.inspection_session_id = s.id 
-            AND (isl.lot_status = 'ok' OR isl.lot_status IS NULL)
-            AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
+            AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
+            AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
             AND isl.qty > 0
         LEFT JOIN daily_inspection_data d ON d.id = s.did_id
         LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
         WHERE s.inspection_type = 'safety_stock'
-          AND s.status != 'in_progress'
+          AND s.status = 'passed'
           AND (
-              (isl.id IS NOT NULL AND (isl.lot_result IN ('passed', 'skipped') OR (isl.lot_result IS NULL AND s.status = 'passed')) AND (isl.lot_status = 'ok' OR isl.lot_status IS NULL))
+              (isl.id IS NOT NULL AND (isl.lot_result != 'rejected' OR isl.lot_result IS NULL) AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', '')))
               OR (isl.id IS NULL AND s.status = 'passed')
           )
           AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
           AND COALESCE(d.part_code, ki.item_code, '') = :pcode
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM inspection_session_lots isl_used
+              JOIN inspection_sessions s_used ON s_used.id = isl_used.inspection_session_id
+              WHERE s_used.inspection_type != 'safety_stock'
+                AND (isl_used.lot_result IS NULL OR isl_used.lot_result != 'rejected')
+                AND (
+                    (isl.ref_number IS NOT NULL AND isl.ref_number != '-' AND isl_used.ref_number = isl.ref_number)
+                    OR (isl.scanned_qr_raw IS NOT NULL AND isl.scanned_qr_raw != '' AND isl_used.scanned_qr_raw = isl.scanned_qr_raw)
+                )
+          )
         ORDER BY s.started_at ASC, s.id ASC, isl.id ASC
     ");
     $stmt->execute([':pcode' => $partCode]);

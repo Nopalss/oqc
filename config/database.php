@@ -6,10 +6,10 @@
 
 require_once __DIR__ . '/env.php';
 
-$db_host = env('DB_HOST', 'localhost');
+$db_host = env('DB_HOST', '127.0.0.1');
 $db_user = env('DB_USER', 'root');
 $db_pass = env('DB_PASS', '');
-$db_name = env('DB_NAME', 'oqc_db');
+$db_name = env('DB_NAME', 'oqc_db2');
 $db_port = (int) env('DB_PORT', 3306);
 
 try {

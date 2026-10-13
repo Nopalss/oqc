@@ -6,6 +6,8 @@ $pageSubtitle = "Perbarui informasi item jadwal kirim Kanban";
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('kanban');
+
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 $pdo = getDB();
 $item = null;
@@ -56,6 +58,7 @@ if (!$item) {
         <!-- Edit Form Card -->
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <form action="<?= base_url('modules/kanban/update.php') ?>" method="POST" class="space-y-4">
+                <?= csrf_field() ?>
                 <input type="hidden" name="id" value="<?= $item['id'] ?>">
                 <input type="hidden" name="return_date" value="<?= htmlspecialchars($returnDate) ?>">
 

@@ -10,6 +10,8 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/../../vendor/autoload.php';
 
+require_menu_access('dashboard');
+
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
@@ -48,8 +50,13 @@ $defectUnitLabel     = strtoupper($selectedDefectUnit);
 $dbYears = [];
 if ($pdo) {
     try {
-        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC");
+        // Query from rollup summary table first (instant, < 1ms even with 100M transaction records)
+        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(summary_date) AS y FROM oqc_daily_summary ORDER BY y ASC");
         $dbYears = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        if (empty($dbYears)) {
+            $stmtYears = $pdo->query("SELECT DISTINCT YEAR(started_at) AS y FROM inspection_sessions WHERE started_at IS NOT NULL ORDER BY y ASC LIMIT 20");
+            $dbYears = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+        }
     } catch (Exception $e) {}
 }
 if (empty($dbYears)) {
@@ -110,6 +117,50 @@ if ($filterType === 'all_years') {
             $endDate   = date('Y-m-d');
             $filterTitleDesc = "Bulan Ini (" . date('M Y') . ")";
     }
+}
+
+// ── Server-Side File Caching for Excel Export ───────────────────────────────
+$forceExport = isset($_REQUEST['force']) && ($_REQUEST['force'] == '1' || $_REQUEST['force'] === 'true');
+$cacheDir = __DIR__ . '/../../uploads/cache_excel';
+if (!is_dir($cacheDir)) {
+    @mkdir($cacheDir, 0755, true);
+}
+
+// Compute latest update timestamp for cache invalidation
+$latestDbUpdate = '0';
+if ($pdo) {
+    try {
+        $stmtMaxUpdate = $pdo->prepare("SELECT COALESCE(MAX(updated_at), '1970-01-01') FROM oqc_daily_summary WHERE summary_date >= :sd AND summary_date <= :ed");
+        $stmtMaxUpdate->execute([':sd' => $startDate, ':ed' => $endDate]);
+        $latestDbUpdate = (string)$stmtMaxUpdate->fetchColumn();
+    } catch (Exception $e) {}
+}
+
+$cacheParamsString = implode('|', [
+    $selectedCustomer,
+    $selectedUnit,
+    $selectedResult,
+    $selectedMetricScale,
+    $selectedTopRank,
+    $selectedDefectUnit,
+    $startDate,
+    $endDate,
+    $latestDbUpdate
+]);
+$cacheHash = md5($cacheParamsString);
+$cacheFilePath = $cacheDir . '/oqc_excel_' . $cacheHash . '.xlsx';
+
+// If cache exists, is fresh, and force is not requested, stream it immediately (< 50ms)
+if (!$forceExport && file_exists($cacheFilePath) && filesize($cacheFilePath) > 1000) {
+    $filenameDate = date('Ymd_His');
+    header("Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    header("Content-Disposition: attachment; filename=OQC_Dashboard_Report_{$filenameDate}.xlsx");
+    header("Content-Length: " . filesize($cacheFilePath));
+    header("Cache-Control: max-age=0");
+    header("Pragma: no-cache");
+    header("X-OQC-Excel-Cache: HIT");
+    readfile($cacheFilePath);
+    exit;
 }
 
 // ── Data Fetch ──────────────────────────────────────────────────────────────
@@ -956,14 +1007,43 @@ if ($selectedResult === 'passed') {
 // Set active sheet to Summary
 $spreadsheet->setActiveSheetIndex(0);
 
-// Output
+// Output & Cache to Server
 $filenameDate = date('Ymd_His');
+
+$writer = new Xlsx($spreadsheet);
+$writer->setIncludeCharts(true);
+
+// Save copy to server cache if directory is writable
+try {
+    $writer->save($cacheFilePath);
+    
+    // Auto cleanup old caches (> 7 days) to save disk space
+    if (rand(1, 20) === 1) {
+        $files = glob($cacheDir . '/oqc_excel_*.xlsx');
+        $now = time();
+        if ($files) {
+            foreach ($files as $f) {
+                if ($now - filemtime($f) > 7 * 86400) {
+                    @unlink($f);
+                }
+            }
+        }
+    }
+} catch (Exception $e) {
+    // Non-blocking if server write fails
+}
+
 header("Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 header("Content-Disposition: attachment; filename=OQC_Dashboard_Report_{$filenameDate}.xlsx");
 header("Cache-Control: max-age=0");
 header("Pragma: no-cache");
+header("X-OQC-Excel-Cache: MISS_GENERATED");
 
-$writer = new Xlsx($spreadsheet);
-$writer->setIncludeCharts(true);
-$writer->save("php://output");
+if (file_exists($cacheFilePath) && filesize($cacheFilePath) > 1000) {
+    header("Content-Length: " . filesize($cacheFilePath));
+    readfile($cacheFilePath);
+} else {
+    $writer->save("php://output");
+}
 exit;
+

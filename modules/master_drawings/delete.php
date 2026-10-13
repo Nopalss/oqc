@@ -1,14 +1,23 @@
 <?php
 /**
  * Action Handler: Delete Master Drawing Files
- * Supports deletion via part_id or drawing id, removing physical files from folder
+ * Supports deletion via part_id or drawing id, removing physical files safely
+ * Protected with RBAC, CSRF token, and POST method
  */
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
-$part_id = filter_input(INPUT_GET, 'part_id', FILTER_VALIDATE_INT);
-$id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+require_menu_access('master_drawings');
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    redirect('modules/master_drawings/index.php');
+}
+
+csrf_verify();
+
+$part_id = filter_input(INPUT_POST, 'part_id', FILTER_VALIDATE_INT);
+$id = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
 
 if (!$part_id && !$id) {
     set_flash('error', 'Parameter drawing atau part tidak valid!');
@@ -87,4 +96,3 @@ if ($pdo) {
 }
 
 redirect('modules/master_drawings/index.php');
-

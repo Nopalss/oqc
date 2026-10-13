@@ -7,6 +7,8 @@ $pageSubtitle = "Input beberapa baris data pengecekan dimensi lot produksi sekal
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('did');
+
 $pdo = getDB();
 $master_parts = [];
 
@@ -58,6 +60,7 @@ if ($pdo) {
             <!-- TAB 1: Multi-Row Dynamic Manual Form -->
             <div id="tab-content-manual">
                 <form action="<?= base_url('modules/did/store.php') ?>" method="POST" class="space-y-4">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="entry_type" value="manual">
 
                     <!-- Shared Metadata Fields Header -->
@@ -135,6 +138,7 @@ if ($pdo) {
             <!-- TAB 2: Batch Excel Multi-Tab (.xlsx) Import Form -->
             <div id="tab-content-excel" class="hidden space-y-4">
                 <form action="<?= base_url('modules/did/store.php') ?>" method="POST" enctype="multipart/form-data" class="space-y-4" id="xlsx-upload-form">
+                    <?= csrf_field() ?>
                     <input type="hidden" name="entry_type" value="xlsx">
 
                     <div class="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
@@ -159,12 +163,17 @@ if ($pdo) {
 
                     <!-- Live Preview Container -->
                     <div id="xlsx-preview-card" style="display:none;" class="card p-3 bg-white border border-slate-200 rounded-xl space-y-2">
-                        <div class="flex items-center justify-between">
+                        <div class="flex items-center justify-between flex-wrap gap-2">
                             <h4 class="text-xs font-bold text-slate-800 flex items-center gap-1.5">
                                 <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                                 Hasil Analisis Sheet File Excel
                             </h4>
-                            <span id="preview-summary-badge" class="badge badge-blue">Analisis...</span>
+                            <div class="flex items-center space-x-2">
+                                <span id="preview-summary-badge" class="badge badge-blue">Analisis...</span>
+                                <button type="submit" class="btn-primary py-1.5 px-4 text-xs font-bold shadow-md shadow-blue-600/20">
+                                    🚀 Import Semua Tab Excel per Tanggal
+                                </button>
+                            </div>
                         </div>
                         <div class="overflow-x-auto border border-slate-100 rounded-lg">
                             <table class="w-full text-left text-xs">
@@ -527,23 +536,23 @@ if ($pdo) {
 
             var html = '';
             var newCount = 0;
-            var skipCount = 0;
+            var existCount = 0;
 
             sheets.forEach(function(s) {
                 if (s.taken) {
-                    skipCount++;
-                    html += '<tr class="bg-amber-50/50">';
-                    html += '<td class="px-3 py-2 font-mono font-bold text-slate-700">' + escapeHtml(s.tab) + '</td>';
-                    html += '<td class="px-3 py-2 text-slate-600">' + escapeHtml(s.date) + '</td>';
-                    html += '<td class="px-3 py-2 text-center font-bold text-slate-700">' + s.rows + ' row</td>';
-                    html += '<td class="px-3 py-2 text-right"><span class="badge badge-warning">⚠ Batch Sudah Ada (Dilewati)</span></td>';
+                    existCount++;
+                    html += '<tr class="bg-blue-50/40 hover:bg-blue-50/70 transition-colors">';
+                    html += '<td class="px-3 py-2 font-mono font-bold text-blue-800">' + escapeHtml(s.tab) + '</td>';
+                    html += '<td class="px-3 py-2 text-slate-700 font-medium">' + escapeHtml(s.date) + '</td>';
+                    html += '<td class="px-3 py-2 text-center font-bold text-blue-700">' + s.rows + ' row</td>';
+                    html += '<td class="px-3 py-2 text-right"><span class="badge badge-info bg-sky-50 text-sky-700 border border-sky-200 font-bold">⚡ Batch Ada (Update & Tambah Data)</span></td>';
                     html += '</tr>';
                 } else {
                     newCount++;
-                    html += '<tr class="hover:bg-slate-50">';
-                    html += '<td class="px-3 py-2 font-mono font-bold text-blue-700">' + escapeHtml(s.tab) + '</td>';
+                    html += '<tr class="hover:bg-slate-50 transition-colors">';
+                    html += '<td class="px-3 py-2 font-mono font-bold text-emerald-700">' + escapeHtml(s.tab) + '</td>';
                     html += '<td class="px-3 py-2 text-slate-800 font-semibold">' + escapeHtml(s.date) + '</td>';
-                    html += '<td class="px-3 py-2 text-center font-extrabold text-blue-600">' + s.rows + ' row</td>';
+                    html += '<td class="px-3 py-2 text-center font-extrabold text-emerald-600">' + s.rows + ' row</td>';
                     html += '<td class="px-3 py-2 text-right"><span class="badge badge-success">✓ Siap Import (Batch Baru)</span></td>';
                     html += '</tr>';
                 }
@@ -551,7 +560,8 @@ if ($pdo) {
 
             tbody.innerHTML = html;
             badge.className = 'badge badge-success';
-            badge.textContent = newCount + ' Batch Baru Siap Import (' + skipCount + ' Dilewati)';
+            badge.textContent = sheets.length + ' Tab Siap Diproses (' + newCount + ' Batch Baru, ' + existCount + ' Di-Upsert)';
+
         })
         .catch(function(err) {
             badge.className = 'badge badge-danger';

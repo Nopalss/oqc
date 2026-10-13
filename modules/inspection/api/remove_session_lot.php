@@ -12,6 +12,17 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 require_once __DIR__ . '/../../../config/summary_helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 $pdo = getDB();
 if (!$pdo) {
     echo json_encode(['success' => false, 'message' => 'Koneksi database gagal']);
@@ -38,7 +49,7 @@ try {
 
     // 1. Ambil data lot dan sesi terkait
     $stmtLot = $pdo->prepare("
-        SELECT isl.*, s.id as session_id, s.kanban_item_id, s.status as session_status, s.inspection_type
+        SELECT isl.*, s.id as session_id, s.kanban_item_id, s.status as session_status, s.inspection_type, s.inspector_id
         FROM inspection_session_lots isl
         JOIN inspection_sessions s ON s.id = isl.inspection_session_id
         WHERE isl.id = :id
@@ -50,6 +61,13 @@ try {
     if (!$lot) {
         $pdo->rollBack();
         echo json_encode(['success' => false, 'message' => 'Data lot tidak ditemukan dalam sistem']);
+        exit;
+    }
+
+    // Ownership check (IDOR protection)
+    if (!empty($lot['inspector_id']) && (int)$lot['inspector_id'] !== $currentUserId && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk menghapus lot pada sesi inspektur lain.']);
         exit;
     }
 

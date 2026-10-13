@@ -36,10 +36,10 @@ if (!isset($_SESSION['users_mock'])) {
 if ($pdo) {
     try {
         // 1. Count Total
-        $countSql = "SELECT COUNT(*) FROM users WHERE 1=1";
+        $countSql = "SELECT COUNT(*) FROM users u WHERE 1=1";
         $countParams = [];
         if (!empty($search)) {
-            $countSql .= " AND (name LIKE :search1 OR username LIKE :search2)";
+            $countSql .= " AND (u.name LIKE :search1 OR u.username LIKE :search2)";
             $countParams[':search1'] = '%' . $search . '%';
             $countParams[':search2'] = '%' . $search . '%';
         }
@@ -52,14 +52,14 @@ if ($pdo) {
         if ($page > $totalPages) $page = $totalPages;
 
         // 2. Fetch Data
-        $sql = "SELECT * FROM users WHERE 1=1";
+        $sql = "SELECT u.*, r.display_name AS role_display, r.role_name AS role_key FROM users u LEFT JOIN roles r ON r.id = u.role_id WHERE 1=1";
         $params = [];
         if (!empty($search)) {
-            $sql .= " AND (name LIKE :search1 OR username LIKE :search2)";
+            $sql .= " AND (u.name LIKE :search1 OR u.username LIKE :search2)";
             $params[':search1'] = '%' . $search . '%';
             $params[':search2'] = '%' . $search . '%';
         }
-        $sql .= " ORDER BY id DESC LIMIT :limit OFFSET :offset";
+        $sql .= " ORDER BY u.id DESC LIMIT :limit OFFSET :offset";
 
         $stmt = $pdo->prepare($sql);
         foreach ($params as $k => $v) {
@@ -164,7 +164,7 @@ if ($pdo) {
                                     <td class="px-4 py-3 font-mono font-semibold text-slate-700"><?= htmlspecialchars($user['username'] ?? $user['email'] ?? '-') ?></td>
                                     <td class="px-4 py-3">
                                         <span class="badge badge-blue">
-                                            <?= htmlspecialchars(strtoupper(str_replace('_', ' ', $user['role']))) ?>
+                                            <?= htmlspecialchars(strtoupper(str_replace('_', ' ', $user['role_display'] ?? $user['role'] ?? '-'))) ?>
                                         </span>
                                     </td>
                                     <td class="px-4 py-3">

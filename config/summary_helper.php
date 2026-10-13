@@ -50,19 +50,26 @@ if (!function_exists('syncDailySummaryForDate')) {
                 $stmtDel2 = $pdo->prepare("DELETE FROM oqc_daily_defect_summary WHERE summary_date = :dt");
                 $stmtDel2->execute([':dt' => $targetDate]);
 
-                // 2. Fetch all finished inspection sessions for this date
-                $nextDate = date('Y-m-d', strtotime($targetDate . ' +1 day'));
-                $sqlSess = "SELECT ss.id, ss.started_at, ss.inspection_type, ss.sample_size, ss.total_scanned_qty, ss.batch_sample_size, ss.status,
+                // 2. Fetch all finished inspection sessions for this operational date
+                $sqlSess = "SELECT ss.id, ss.started_at, ss.closed_at, ss.inspection_type, ss.sample_size, ss.total_scanned_qty, ss.use_safety_stock_qty, ss.auto_fulfilled_by_session_id, ss.batch_sample_size, ss.status,
                                    ss.ng_count, ss.part_id, mp.model_id, mp.aql_level,
                                    COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name
                             FROM inspection_sessions ss
                             LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
                             LEFT JOIN master_parts mp ON ss.part_id = mp.id
                             WHERE ss.status IN ('passed', 'rejected')
-                              AND ss.started_at >= :sd AND ss.started_at < :ed_next
-                              AND (ki.remark IS NULL OR (ki.remark NOT LIKE '%AUTO-SS-SESS-%' AND ki.remark NOT LIKE '%Split%'))";
+                              AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
+                              AND NOT (ki.remark LIKE '%AUTO-SS-SESS-%' OR ki.remark LIKE '%Auto Safety Stock Sisa Excess%' OR ki.remark LIKE '%Sisa Excess Kanban%')
+                              AND (ki.remark IS NULL OR ki.remark NOT LIKE '%Split%')
+                              AND (
+                                  CASE 
+                                      WHEN HOUR(ss.started_at) >= 20 THEN DATE(ss.started_at)
+                                      WHEN ss.closed_at IS NOT NULL AND DATE(ss.closed_at) > DATE(ss.started_at) THEN DATE(ss.closed_at)
+                                      ELSE DATE(ss.started_at)
+                                  END = :sd
+                              )";
                 $stmtSess = $pdo->prepare($sqlSess);
-                $stmtSess->execute([':sd' => $targetDate, ':ed_next' => $nextDate]);
+                $stmtSess->execute([':sd' => $targetDate]);
                 $sessions = $stmtSess->fetchAll(PDO::FETCH_ASSOC);
 
                 if (empty($sessions)) {
@@ -79,12 +86,12 @@ if (!function_exists('syncDailySummaryForDate')) {
                 // 3. Bulk fetch lots for all sessions in a single query (prevents N+1 query storm)
                 $lotsBySession = [];
                 if (!empty($inClause)) {
-                    $sqlLots = "SELECT isl.inspection_session_id, isl.id, isl.lot_status, isl.lot_result, isl.sample_size, isl.qty, isl.ng_count, isl.remarks,
+                    $sqlLots = "SELECT isl.inspection_session_id, isl.id, isl.lot_status, isl.lot_result, isl.sample_size, isl.qty, isl.ng_count, isl.remarks, isl.ref_number,
                                        COUNT(CASE WHEN (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0) THEN ngr.id END) AS active_ng_cnt
                                 FROM inspection_session_lots isl
                                 LEFT JOIN inspection_ng_records ngr ON ngr.session_lot_id = isl.id
                                 WHERE isl.inspection_session_id IN ($inClause)
-                                GROUP BY isl.inspection_session_id, isl.id, isl.lot_status, isl.lot_result, isl.sample_size, isl.qty, isl.ng_count, isl.remarks";
+                                GROUP BY isl.inspection_session_id, isl.id, isl.lot_status, isl.lot_result, isl.sample_size, isl.qty, isl.ng_count, isl.remarks, isl.ref_number";
                     $stmtLots = $pdo->query($sqlLots);
                     if ($stmtLots) {
                         while ($lotRow = $stmtLots->fetch(PDO::FETCH_ASSOC)) {
@@ -165,14 +172,24 @@ if (!function_exists('syncDailySummaryForDate')) {
                     $sessionLots = $lotsBySession[$sid] ?? [];
                     $lotSampleSizeSum = 0;
                     $reinspectSamplesSum = 0;
+                    $hasPhysicalLot = false;
                     if (!empty($sessionLots)) {
                         foreach ($sessionLots as $lot) {
-                            if (!empty($lot['remarks']) && (
-                                strpos($lot['remarks'], 'Alokasi Safety Stock') === 0 ||
-                                strpos($lot['remarks'], 'Sisa Kelebihan Kanban') === 0
-                            )) {
+                            $isExcessLot = !empty($lot['remarks']) && (
+                                strpos($lot['remarks'], 'Sisa Kelebihan Kanban') !== false ||
+                                strpos($lot['remarks'], 'Sisa Split Safety Stock') !== false
+                            );
+                            $isDirectCloseLot = (!empty($lot['ref_number']) && (
+                                $lot['ref_number'] === 'DIRECT-PASS' ||
+                                strpos($lot['ref_number'], 'DIRECT-PASS') !== false
+                            )) || (!empty($lot['remarks']) && (
+                                strpos($lot['remarks'], 'Direct Close') !== false
+                            ));
+
+                            if ($isExcessLot || $isDirectCloseLot || ($lot['lot_result'] ?? '') === 'skipped') {
                                 continue;
                             }
+                            $hasPhysicalLot = true;
                             $summaryBuckets[$key]['total_lots']++;
                             $lotSampleSizeSum += (int)($lot['sample_size'] ?? 0);
 
@@ -190,9 +207,6 @@ if (!function_exists('syncDailySummaryForDate')) {
                             // Hitung Beban Kerja Fisik untuk Putaran Re-Inspeksi (Sortir & Uji Ulang)
                             $lid = (int)$lot['id'];
                             $reinspectCount = $reinspectByLot[$lid] ?? 0;
-                            if ($reinspectCount === 0 && ($lot['lot_status'] === 'reinspected')) {
-                                $reinspectCount = 1;
-                            }
 
                             if ($reinspectCount > 0) {
                                 for ($r = 0; $r < $reinspectCount; $r++) {
@@ -204,37 +218,27 @@ if (!function_exists('syncDailySummaryForDate')) {
                             }
                         }
                     } else {
-                        $summaryBuckets[$key]['total_lots']++;
-                        if ($s['status'] === 'passed')   $summaryBuckets[$key]['passed_lots']++;
-                        if ($s['status'] === 'rejected') $summaryBuckets[$key]['rejected_lots']++;
+                        // Sesi tanpa catatan lot individual
+                        $isSsNoLots = !empty($s['auto_fulfilled_by_session_id']);
+                        if (!$isSsNoLots) {
+                            $summaryBuckets[$key]['total_lots']++;
+                            if ($s['status'] === 'passed')   $summaryBuckets[$key]['passed_lots']++;
+                            if ($s['status'] === 'rejected') $summaryBuckets[$key]['rejected_lots']++;
+                        }
                     }
 
                     // 1. Accumulate Lot Basis Sample Size
                     $currentLotSampleSize = 0;
-                    if ($lotSampleSizeSum > 0) {
+                    if (!empty($sessionLots) && $lotSampleSizeSum > 0) {
                         $currentLotSampleSize = $lotSampleSizeSum;
                     } else {
-                        $currentLotSampleSize = (int)$s['sample_size'];
+                        $currentLotSampleSize = (int)($s['sample_size'] ?? 0);
                     }
                     $summaryBuckets[$key]['total_sample_size_lot'] += $currentLotSampleSize;
                     $summaryBuckets[$key]['total_sample_size']     += $currentLotSampleSize;
 
                     // 2. Accumulate Session / Batch Basis Sample Size
                     $batchAqlSize = (int)($s['batch_sample_size'] ?? 0);
-                    if ($batchAqlSize <= 0) {
-                        $totalQty = (int)($s['total_scanned_qty'] ?? 0);
-                        if ($totalQty > 0) {
-                            $aqlLvl = $s['aql_level'] ?: 'Level II';
-                            $stmtAql = $pdo->prepare("SELECT sample_size FROM aql_standards WHERE inspection_level = :lvl AND :qty BETWEEN qty_min AND qty_max LIMIT 1");
-                            $stmtAql->execute([':lvl' => $aqlLvl, ':qty' => $totalQty]);
-                            $batchAqlSize = (int)$stmtAql->fetchColumn();
-                            if ($batchAqlSize <= 0) {
-                                $stmtAqlFB = $pdo->prepare("SELECT sample_size FROM aql_standards WHERE :qty BETWEEN qty_min AND qty_max LIMIT 1");
-                                $stmtAqlFB->execute([':qty' => $totalQty]);
-                                $batchAqlSize = (int)$stmtAqlFB->fetchColumn();
-                            }
-                        }
-                    }
                     if ($batchAqlSize <= 0) {
                         $batchAqlSize = (int)$s['sample_size'];
                     }
@@ -288,23 +292,22 @@ if (!function_exists('syncDailySummaryForDate')) {
                     }
 
                     // Tentukan jumlah fisik unit cacat untuk sesi ini (Defective Units / Fisik Sampel Cacat):
-                    // Prioritas:
-                    // 1. ng_count tercatat di inspection_session_lots / inspection_sessions
-                    // 2. Distinct (session_lot_id, unit_number) dari inspection_ng_records
-                    // 3. Distinct sample_id dari flow lama
-                    // 4. Fallback totalDefectQty
+                    // Akumulasikan seluruh temuan fisik defect ($totalDefectQty) yang terdata pada inspection_ng_records
+                    // (termasuk temuan historis dari ronde inspeksi 1 & 2 yang telah disortir/re-inspeksi).
                     $recordedLotNg = !empty($sessionLots) ? array_sum(array_map(function($l) { return (int)($l['ng_count'] ?? 0); }, $sessionLots)) : 0;
                     $recordedSessNg = (int)($s['ng_count'] ?? 0);
                     $recordedPhysicalNg = max($recordedLotNg, $recordedSessNg);
 
-                    if ($recordedPhysicalNg > 0) {
+                    if ($recordedPhysicalNg > 0 && $recordedPhysicalNg >= $totalDefectQty) {
                         $sessionPhysicalNg = $recordedPhysicalNg;
+                    } elseif ($totalDefectQty > 0) {
+                        $sessionPhysicalNg = $totalDefectQty;
                     } elseif (!empty($distinctUnits)) {
                         $sessionPhysicalNg = count($distinctUnits);
                     } elseif (!empty($distinctSampleNg)) {
                         $sessionPhysicalNg = count($distinctSampleNg);
                     } else {
-                        $sessionPhysicalNg = $totalDefectQty;
+                        $sessionPhysicalNg = 0;
                     }
 
                     $summaryBuckets[$key]['total_ng_pcs'] += $sessionPhysicalNg;
@@ -387,13 +390,31 @@ if (!function_exists('syncDailySummaryForSession')) {
             return false;
         }
         try {
-            $stmt = $pdo->prepare("SELECT DATE(started_at) AS s_date FROM inspection_sessions WHERE id = :id LIMIT 1");
-            $stmt->execute([':id' => $sessionId]);
-            $sDate = $stmt->fetchColumn();
+            $stmt = $pdo->prepare("
+                SELECT DISTINCT s_date FROM (
+                    SELECT DATE(started_at) AS s_date FROM inspection_sessions WHERE id = :sid1 AND started_at IS NOT NULL
+                    UNION
+                    SELECT DATE(closed_at) AS s_date FROM inspection_sessions WHERE id = :sid2 AND closed_at IS NOT NULL
+                    UNION
+                    SELECT DATE(created_at) AS s_date FROM inspection_ng_records WHERE inspection_session_id = :sid3 AND (is_cancelled IS NULL OR is_cancelled = 0)
+                    UNION
+                    SELECT CASE 
+                        WHEN HOUR(started_at) >= 20 THEN DATE(started_at)
+                        WHEN closed_at IS NOT NULL AND DATE(closed_at) > DATE(started_at) THEN DATE(closed_at)
+                        ELSE DATE(started_at)
+                    END AS s_date FROM inspection_sessions WHERE id = :sid4 AND started_at IS NOT NULL
+                ) d_union WHERE s_date IS NOT NULL
+            ");
+            $stmt->execute([':sid1' => $sessionId, ':sid2' => $sessionId, ':sid3' => $sessionId, ':sid4' => $sessionId]);
+            $dates = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-            if ($sDate) {
-                return syncDailySummaryForDate($pdo, (string)$sDate);
+            $res = true;
+            foreach ($dates as $d) {
+                if ($d) {
+                    $res = syncDailySummaryForDate($pdo, (string)$d) && $res;
+                }
             }
+            return $res;
         } catch (Exception $e) {
             error_log("Error in syncDailySummaryForSession({$sessionId}): " . $e->getMessage());
         }
@@ -411,11 +432,21 @@ if (!function_exists('backfillAllDailySummaries')) {
     function backfillAllDailySummaries(PDO $pdo): array {
         $dates = [];
         try {
-            $stmt = $pdo->query("SELECT DISTINCT DATE(started_at) AS s_date 
-                                 FROM inspection_sessions 
-                                 WHERE status IN ('passed', 'rejected') 
-                                   AND started_at IS NOT NULL 
-                                 ORDER BY s_date ASC");
+            $stmt = $pdo->query("
+                SELECT DISTINCT s_date FROM (
+                    SELECT DATE(started_at) AS s_date FROM inspection_sessions WHERE started_at IS NOT NULL
+                    UNION
+                    SELECT DATE(closed_at) AS s_date FROM inspection_sessions WHERE closed_at IS NOT NULL
+                    UNION
+                    SELECT DATE(created_at) AS s_date FROM inspection_ng_records WHERE (is_cancelled IS NULL OR is_cancelled = 0)
+                    UNION
+                    SELECT CASE 
+                        WHEN HOUR(started_at) >= 20 THEN DATE(started_at)
+                        WHEN closed_at IS NOT NULL AND DATE(closed_at) > DATE(started_at) THEN DATE(closed_at)
+                        ELSE DATE(started_at)
+                    END AS s_date FROM inspection_sessions WHERE started_at IS NOT NULL
+                ) d_union WHERE s_date IS NOT NULL ORDER BY s_date ASC
+            ");
             $dates = $stmt->fetchAll(PDO::FETCH_COLUMN);
         } catch (Exception $e) {
             error_log("Error fetching dates for backfill: " . $e->getMessage());

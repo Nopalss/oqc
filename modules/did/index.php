@@ -27,18 +27,6 @@ $totalPages = 1;
 
 if ($pdo) {
     try {
-        // Migration check: If unbatched rows exist, auto-create a legacy batch
-        $stmtUnbatched = $pdo->query("SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id IS NULL");
-        $unbatchedCount = (int)$stmtUnbatched->fetchColumn();
-        if ($unbatchedCount > 0) {
-            $cBy = current_user()['id'];
-            $pdo->exec("INSERT INTO did_batches (batch_name, import_method, total_items, created_by, created_at) 
-                        SELECT 'Legacy Import DID Batch', 'manual', COUNT(*), {$cBy}, MIN(created_at) 
-                        FROM daily_inspection_data WHERE batch_id IS NULL");
-            $newBatchId = $pdo->lastInsertId();
-            $pdo->exec("UPDATE daily_inspection_data SET batch_id = {$newBatchId} WHERE batch_id IS NULL");
-        }
-
         // Count Total Batches
         $countSql = "SELECT COUNT(*) FROM did_batches b WHERE 1=1";
         $countParams = [];
@@ -48,10 +36,10 @@ if ($pdo) {
             $countParams[':start_date'] = $startDate;
             $countParams[':end_date']   = $endDate;
         } elseif (!empty($startDate)) {
-            $countSql .= " AND b.inspecting_date = :start_date";
+            $countSql .= " AND b.inspecting_date >= :start_date";
             $countParams[':start_date'] = $startDate;
         } elseif (!empty($endDate)) {
-            $countSql .= " AND b.inspecting_date = :end_date";
+            $countSql .= " AND b.inspecting_date <= :end_date";
             $countParams[':end_date']   = $endDate;
         }
 
@@ -64,11 +52,8 @@ if ($pdo) {
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
 
-        // Fetch Batches with item breakdown stats
-        $sql = "SELECT b.*, 
-                       (SELECT COUNT(*) FROM daily_inspection_data d WHERE d.batch_id = b.id) as real_total,
-                       (SELECT COUNT(*) FROM daily_inspection_data d WHERE d.batch_id = b.id AND d.status_inspect = 'OK') as count_ok,
-                       (SELECT COUNT(*) FROM daily_inspection_data d WHERE d.batch_id = b.id AND d.status_inspect = 'NG') as count_ng
+        // Fetch Batches: O(1) point-lookup utilizing denormalized counters
+        $sql = "SELECT b.id, b.batch_name, b.inspecting_date, b.import_method, b.total_items, b.ok_count, b.ng_count, b.created_at
                 FROM did_batches b 
                 WHERE 1=1";
         $params = [];
@@ -78,10 +63,10 @@ if ($pdo) {
             $params[':start_date'] = $startDate;
             $params[':end_date']   = $endDate;
         } elseif (!empty($startDate)) {
-            $sql .= " AND b.inspecting_date = :start_date";
+            $sql .= " AND b.inspecting_date >= :start_date";
             $params[':start_date'] = $startDate;
         } elseif (!empty($endDate)) {
-            $sql .= " AND b.inspecting_date = :end_date";
+            $sql .= " AND b.inspecting_date <= :end_date";
             $params[':end_date']   = $endDate;
         }
 
@@ -95,7 +80,7 @@ if ($pdo) {
         $stmt->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
         $stmt->execute();
 
-        $batches = $stmt->fetchAll();
+        $batches = $stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
         $batches = [];
     }
@@ -180,36 +165,36 @@ if ($pdo) {
                                         <?= htmlspecialchars($b['batch_name']) ?>
                                     </td>
                                     <td class="px-4 py-3 font-extrabold text-blue-700 font-mono">
-                                        <?= number_format($b['real_total']) ?> Lot Item
+                                        <?= number_format($b['total_items']) ?> Lot Item
                                     </td>
                                     <td class="px-4 py-3">
                                         <div class="flex items-center space-x-1.5">
-                                            <span class="badge badge-success font-semibold">✓ <?= $b['count_ok'] ?> OK</span>
-                                            <?php if ($b['count_ng'] > 0): ?>
-                                                <span class="badge badge-danger font-semibold">⚠ <?= $b['count_ng'] ?> NG</span>
+                                            <span class="badge badge-success font-semibold">✓ <?= (int)$b['ok_count'] ?> OK</span>
+                                            <?php if ((int)$b['ng_count'] > 0): ?>
+                                                 <span class="badge badge-danger font-semibold">⚠ <?= (int)$b['ng_count'] ?> NG</span>
                                             <?php endif; ?>
                                         </div>
                                     </td>
                                     <td class="px-4 py-3 text-right space-x-1">
                                         <!-- Detail Button -->
                                         <a href="<?= base_url('modules/did/detail_batch.php?batch_id=' . $b['id']) ?>" 
-                                           class="btn-secondary py-1 px-2.5 text-xs inline-flex items-center" title="Lihat Rincian Item Lot">
-                                            <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                                            </svg>
-                                            Detail Item
-                                        </a>
+                                            class="btn-secondary py-1 px-2.5 text-xs inline-flex items-center" title="Lihat Rincian Item Lot">
+                                             <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                             </svg>
+                                             Detail Item
+                                         </a>
 
-                                        <!-- Delete Batch Button -->
+                                        <!-- Delete Batch Button (POST + CSRF Protected) -->
                                         <button type="button" 
-                                                onclick="confirmDelete('<?= base_url('modules/did/delete_batch.php?id=' . $b['id']) ?>', 'Riwayat Batch <?= htmlspecialchars($b['batch_name'], ENT_QUOTES) ?>')"
+                                                onclick="confirmPostDelete('<?= base_url('modules/did/delete_batch.php') ?>', <?= (int)$b['id'] ?>, 'Riwayat Batch <?= htmlspecialchars($b['batch_name'], ENT_QUOTES) ?>', '<?= generate_csrf_token() ?>')"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Seluruh Sesi Batch Ini">
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                            </svg>
-                                        </button>
-                                    </td>
+                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                             </svg>
+                                         </button>
+                                     </td>
                                 </tr>
                             <?php endforeach; ?>
                         <?php endif; ?>

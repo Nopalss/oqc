@@ -3,9 +3,23 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('kanban');
+
 // Accept batch_id or id parameter cleanly
 $batch_id = (int)($_GET['batch_id'] ?? $_GET['id'] ?? 0);
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+
+// Dynamic Limit & Server-side Pagination
+$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 25;
+if (!in_array($limit, [10, 25, 50, 100, 250])) {
+    $limit = 25;
+}
+
+$page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1;
+if ($page < 1) $page = 1;
+$offset      = ($page - 1) * $limit;
+$totalItems  = 0;
+$totalPages  = 1;
 
 $pdo = getDB();
 $batch = null;
@@ -29,6 +43,26 @@ if ($pdo) {
         if ($batch) {
             $batch_id = (int)$batch['id'];
 
+            $whereBase = "WHERE k.batch_id = :batch_id 
+                            AND (k.plan_type IS NULL OR k.plan_type = 'kanban') 
+                            AND (k.check_type IS NULL OR k.check_type != 'Safety Stock') 
+                            AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')";
+            $params = [':batch_id' => $batch_id];
+
+            if ($search !== '') {
+                $whereBase .= " AND (k.kanban_no LIKE :search OR k.item_code LIKE :search OR k.item_description LIKE :search OR k.customer LIKE :search OR k.str_loc LIKE :search OR k.remark LIKE :search)";
+                $params[':search'] = '%' . $search . '%';
+            }
+
+            // Count total items for pagination
+            $stmtCount = $pdo->prepare("SELECT COUNT(*) FROM kanban_items k " . $whereBase);
+            $stmtCount->execute($params);
+            $totalItems = (int)$stmtCount->fetchColumn();
+
+            $totalPages = max(1, ceil($totalItems / $limit));
+            if ($page > $totalPages) $page = $totalPages;
+            $offset = ($page - 1) * $limit;
+
             $sql = "SELECT k.*, 
                            COALESCE((
                                SELECT SUM(s.total_scanned_qty - COALESCE(s.excess_qty, 0)) 
@@ -41,24 +75,20 @@ if ($pdo) {
                                WHERE s.kanban_item_id = k.id
                            ) AS total_sessions_count
                     FROM kanban_items k 
-                    WHERE k.batch_id = :batch_id 
-                      AND (k.plan_type IS NULL OR k.plan_type = 'kanban') 
-                      AND (k.check_type IS NULL OR k.check_type != 'Safety Stock') 
-                      AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')";
-            $params = [':batch_id' => $batch_id];
-
-            if ($search !== '') {
-                $sql .= " AND (k.kanban_no LIKE :search OR k.item_code LIKE :search OR k.item_description LIKE :search OR k.customer LIKE :search OR k.str_loc LIKE :search OR k.remark LIKE :search)";
-                $params[':search'] = '%' . $search . '%';
-            }
-
-            $sql .= " ORDER BY k.id ASC";
+                    {$whereBase}
+                    ORDER BY k.id ASC
+                    LIMIT :limit OFFSET :offset";
 
             $stmtItems = $pdo->prepare($sql);
-            $stmtItems->execute($params);
+            foreach ($params as $k => $v) {
+                $stmtItems->bindValue($k, $v);
+            }
+            $stmtItems->bindValue(':limit',  (int)$limit,  PDO::PARAM_INT);
+            $stmtItems->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+            $stmtItems->execute();
             $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
 
-            // Fetch session audit history for all items in batch
+            // Fetch session audit history only for current page slice items (max limit items)
             if (!empty($items)) {
                 $itemIds = array_column($items, 'id');
                 $placeholders = implode(',', array_fill(0, count($itemIds), '?'));
@@ -134,7 +164,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <span>• 🕒 Print Time: <b class="font-mono text-slate-700"><?= date('Y-m-d H:i:s', strtotime($batch['print_datetime'])) ?></b></span>
                             <?php endif; ?>
                             <span>• Waktu Input: <b><?= date('d M Y, H:i', strtotime($batch['imported_at'])) ?> WIB</b></span>
-                            <span>• Total: <b><?= count($items) ?> Item</b></span>
+                            <span>• Total: <b><?= number_format($totalItems) ?> Item</b></span>
                         </p>
                     </div>
                 </div>
@@ -207,7 +237,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 $sessCount = count($sessList);
                             ?>
                                 <tr class="hover:bg-slate-50/80 transition-colors">
-                                    <td class="px-4 py-3 font-semibold text-slate-400"><?= $index + 1 ?></td>
+                                    <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
                                     <td class="px-4 py-3 font-extrabold text-blue-700 font-mono tracking-tight">
                                         <?= htmlspecialchars($row['kanban_no']) ?>
                                     </td>
@@ -301,9 +331,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
                                             </svg>
                                         </a>
-                                        <!-- Delete Item -->
+                                        <!-- Delete Item (POST + CSRF Protected) -->
                                         <button type="button" 
-                                                onclick="confirmDelete('<?= base_url('modules/kanban/delete.php?id=' . $row['id']) ?>', 'Kanban <?= htmlspecialchars($row['kanban_no'], ENT_QUOTES) ?>')"
+                                                onclick="confirmPostDelete('<?= base_url('modules/kanban/delete.php') ?>', <?= (int)$row['id'] ?>, 'Kanban <?= htmlspecialchars($row['kanban_no'], ENT_QUOTES) ?>', '<?= generate_csrf_token() ?>', { batch_id: <?= $batch_id ?> })"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item Ini">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
@@ -392,6 +422,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </tbody>
                 </table>
             </div>
+
+            <!-- Single Line Pagination Footer -->
+            <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
+
         </div>
 
     </main>

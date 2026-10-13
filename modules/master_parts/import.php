@@ -302,6 +302,7 @@ require_menu_access('master_parts');
 
             <!-- Bottom Action Bar -->
             <form id="form-submit-import" action="<?= base_url('modules/master_parts/store_import.php') ?>" method="POST" onsubmit="return handleFormSubmit(event)">
+                <?= csrf_field() ?>
                 <input type="hidden" name="import_data_json" id="import_data_json" value="">
 
                 <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
@@ -435,6 +436,7 @@ function submitForPreview() {
 
     var formData = new FormData();
     formData.append('excel_file', fileInput.files[0]);
+    formData.append('csrf_token', '<?= generate_csrf_token() ?>');
 
     // Stepper to step 2
     document.getElementById('step-pill-2').style.background = '#eff6ff';

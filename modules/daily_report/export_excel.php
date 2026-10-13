@@ -2,9 +2,7 @@
 /**
  * Visual Excel Report Generator — Detail Laporan Harian OQC (Supervisor Executive View)
  * Mirroring tampilan web modules/daily_report/detail.php:
- * 1. Sheet 1: Kanban & Safety Stock (KPI Cards Persetujuan Supervisor, Jalur Kanban & SS, Sub-sesi, Child Lots, Defect Breakdown)
- * 2. Sheet 2: Kronologi Sesi Inspeksi (Urutan pelaksanaan di meja QC dari pagi ke sore, Kolom Persetujuan Supervisor)
- * 3. Sheet 3: Distribusi Cacat Mutu & Analitik Diagram (Top Defect Types, Top Models, Top Parts, Native Excel Pie Chart)
+ * 1. Sheet 1: Rincian Per Lot (Flat Data Table & Defect Matrix Crosstab)
  *
  * PT. Surya Technology Industri — Outgoing Quality Control Division
  */
@@ -192,11 +190,22 @@ try {
         ))
         AND (ss.original_ss_session_id IS NULL OR ss.original_ss_session_id = 0)
         AND (ki.remark IS NULL OR (ki.remark NOT LIKE '%AUTO-SS-SESS-%' AND ki.remark NOT LIKE '%Split%'))
+        AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
+        AND NOT EXISTS (
+            SELECT 1 FROM inspection_session_lots isl_dc 
+            WHERE isl_dc.inspection_session_id = ss.id 
+              AND (isl_dc.ref_number = 'DIRECT-PASS' OR isl_dc.ref_number LIKE '%DIRECT-PASS%' OR isl_dc.remarks LIKE '%Direct Close%')
+        )
         {$searchWhere}
         ORDER BY ss.started_at ASC, ss.id ASC
     ");
     $stmtSessions->execute($params);
     $rawSessions = $stmtSessions->fetchAll(PDO::FETCH_ASSOC);
+
+    $sessions = [];
+    foreach ($rawSessions as $s) {
+        $sessions[(int)$s['session_id']] = $s;
+    }
 
     if (!empty($rawSessions)) {
         $sessIds = array_map(fn($s) => (int)$s['session_id'], $rawSessions);
@@ -219,25 +228,46 @@ try {
                 isl.remarks,
                 isl.created_at AS scanned_at,
                 isl.action_noted_at,
-                isl.replaced_by_lot_id
+                isl.replaced_by_lot_id,
+                (SELECT COUNT(*) 
+                 FROM inspection_session_lots prev_isl
+                 JOIN inspection_sessions prev_s ON prev_s.id = prev_isl.inspection_session_id
+                 WHERE prev_isl.lot_number = isl.lot_number
+                   AND (
+                       (isl.ref_number IS NOT NULL AND isl.ref_number != '' AND prev_isl.ref_number = isl.ref_number)
+                       OR ((isl.ref_number IS NULL OR isl.ref_number = '') AND (prev_isl.ref_number IS NULL OR prev_isl.ref_number = ''))
+                   )
+                   AND prev_isl.id != isl.id
+                   AND prev_isl.created_at < isl.created_at
+                   AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
+                ) AS has_prev_rejected
             FROM inspection_session_lots isl
             WHERE isl.inspection_session_id IN ({$inSessIds})
-              AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE 'Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE 'Alokasi Safety Stock%'))
+              AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%'))
+              AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
             ORDER BY isl.id ASC
         ");
         $rawLotsList = [];
+        $sessionsWithLots = [];
         foreach ($stmtLots->fetchAll(PDO::FETCH_ASSOC) as $lRow) {
             $sId = (int)$lRow['inspection_session_id'];
+            $sessionsWithLots[$sId] = true;
             $lRow['defects'] = [];
 
+            $isSafetyStock = (($lRow['lot_result'] ?? '') === 'skipped') || (empty($lRow['sample_size']) && isset($lRow['remarks']) && stripos($lRow['remarks'], 'Alokasi Safety Stock') !== false);
             $lotQty = (int)($lRow['qty'] ?? 0);
             $lSampleSize = (int)($lRow['sample_size'] ?? 0);
             $lRejectNum = isset($lRow['reject_number']) ? (int)$lRow['reject_number'] : 0;
-            if ($lSampleSize <= 0 || $lRejectNum <= 0) {
+            
+            if ($isSafetyStock) {
+                $lSampleSize = 0;
+                $lRejectNum = 0;
+            } elseif ($lSampleSize <= 0 || $lRejectNum <= 0) {
                 $aqlFb = getLotAqlFallback($lotQty, $pdo);
                 if ($lSampleSize <= 0) $lSampleSize = $aqlFb['sample_size'];
                 if ($lRejectNum <= 0) $lRejectNum = $aqlFb['reject_number'];
             }
+            $lRow['is_safety_stock'] = $isSafetyStock;
             $lRow['computed_sample_size'] = $lSampleSize;
             $lRow['computed_reject_number'] = $lRejectNum;
 
@@ -292,7 +322,7 @@ try {
             LEFT JOIN inspection_sessions ss ON ngr.inspection_session_id = ss.id
             LEFT JOIN users u ON u.id = ss.inspector_id
             WHERE ngr.inspection_session_id IN ({$inSessIds})
-              AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+              AND ((ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0) OR ngr.is_sorted = 1)
             ORDER BY ngr.id ASC
         ");
         foreach ($stmtNg->fetchAll(PDO::FETCH_ASSOC) as $ngRow) {
@@ -341,40 +371,33 @@ try {
                 $lotDefects = $lRow['defects'] ?? [];
 
                 if ($hasSubst) {
-                    $sortLog = null;
+                    $sortLogs = [];
                     foreach ($substByLot[$lotId] as $log) {
-                        if ($log['action_type'] === 'sort_reinspect') {
-                            $sortLog = $log;
-                            break;
+                        if (($log['action_type'] ?? '') === 'sort_reinspect') {
+                            $sortLogs[] = $log;
                         }
                     }
 
-                    if ($sortLog) {
-                        // Separate defects between Initial Attempt and Reinspection Attempt
-                        $initialDefects = [];
-                        $reinspectDefects = [];
+                    // Sort logs chronologically by action_at / created_at ASC
+                    usort($sortLogs, function($a, $b) {
+                        return strtotime($a['action_at'] ?: $a['created_at']) <=> strtotime($b['action_at'] ?: $b['created_at']);
+                    });
 
-                        foreach ($lotDefects as $df) {
+                    if (!empty($sortLogs)) {
+                        $numLogs = count($sortLogs);
+                        $firstLogTime = $sortLogs[0]['action_at'] ?: $sortLogs[0]['created_at'];
+
+                        // Row 1: Initial Attempt (Always Rejected/NG)
+                        $initialDefects = array_values(array_filter($lotDefects, function($df) use ($firstLogTime) {
+                            $dfTime = $df['defect_created_at'] ?? ($df['created_at'] ?? null);
                             if (!empty($df['is_sorted'])) {
-                                $initialDefects[] = $df;
-                            } else {
-                                if (!empty($sortLog['action_at']) && !empty($df['defect_created_at']) && $df['defect_created_at'] < $sortLog['action_at']) {
-                                    $initialDefects[] = $df;
-                                } else {
-                                    $reinspectDefects[] = $df;
+                                if ($firstLogTime && $dfTime && $dfTime >= $firstLogTime) {
+                                    return false;
                                 }
+                                return true;
                             }
-                        }
-
-                        if (empty($initialDefects) && !empty($lotDefects)) {
-                            $actualRes = strtolower($lRow['lot_result'] ?? '');
-                            if ($actualRes === 'passed') {
-                                $initialDefects = $lotDefects;
-                                $reinspectDefects = [];
-                            } else {
-                                $initialDefects = $lotDefects;
-                            }
-                        }
+                            return (!$firstLogTime || ($dfTime && $dfTime < $firstLogTime));
+                        }));
 
                         $initialNgCount = 0;
                         foreach ($initialDefects as $id) {
@@ -384,18 +407,6 @@ try {
                             $initialNgCount = count($initialDefects);
                         }
 
-                        $reinspectNgCount = 0;
-                        foreach ($reinspectDefects as $rd) {
-                            $reinspectNgCount += (int)($rd['qty_ng'] ?? 1);
-                        }
-                        if ($reinspectNgCount === 0 && !empty($reinspectDefects)) {
-                            $reinspectNgCount = count($reinspectDefects);
-                        }
-
-                        $actualLotResult = strtolower($lRow['lot_result'] ?? '');
-                        $rejectLimit = (int)($lRow['computed_reject_number'] ?? 1);
-
-                        // Row 1: Initial Attempt (Always Rejected/NG)
                         $attempt1 = $lRow;
                         $attempt1['attempt_type'] = 'initial';
                         $attempt1['attempt_label'] = 'Inspeksi Awal';
@@ -406,42 +417,76 @@ try {
                         $attempt1['status_label'] = 'REJECTED';
                         $attempt1['is_initial_attempt'] = true;
                         $attempt1['has_subsequent_reinspect'] = true;
-
-                        // Row 2: Reinspection Attempt (Dynamic: Passed or Rejected or In Progress)
-                        $attempt2 = $lRow;
-                        $attempt2['attempt_type'] = 'reinspection';
-                        $attempt2['attempt_label'] = 'Re-inspeksi';
-                        $attempt2['scanned_at'] = $sortLog['action_at'] ?: ($lRow['action_noted_at'] ?: $lRow['scanned_at']);
-                        $attempt2['is_reinspected_attempt'] = true;
-                        $attempt2['action_type'] = 'sort_reinspect';
-                        $attempt2['actioned_by_name'] = $sortLog['actioned_by_name'];
-                        $attempt2['action_at'] = $sortLog['action_at'];
-
-                        if ($actualLotResult === 'rejected' || ($reinspectNgCount >= $rejectLimit && $rejectLimit > 0)) {
-                            $attempt2['lot_result'] = 'rejected';
-                            $attempt2['defects'] = $reinspectDefects;
-                            $attempt2['ng_count'] = $reinspectNgCount;
-                            $attempt2['status_badge'] = 'REJECTED (Re-inspeksi)';
-                            $attempt2['status_label'] = 'REJECTED (RE-INSPEKSI)';
-                            $attempt2['action_notes'] = $sortLog['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
-                        } elseif ($actualLotResult === 'passed') {
-                            $attempt2['lot_result'] = 'passed';
-                            $attempt2['defects'] = [];
-                            $attempt2['ng_count'] = 0;
-                            $attempt2['status_badge'] = 'PASSED (Re-inspeksi)';
-                            $attempt2['status_label'] = 'PASSED (RE-INSPEKSI)';
-                            $attempt2['action_notes'] = $sortLog['notes'] ?: 'Part NG disortir dan ditukar dengan part bagus -> Dilakukan re-inspeksi sampel fisik dan lolos uji.';
-                        } else {
-                            $attempt2['lot_result'] = 'in_progress';
-                            $attempt2['defects'] = $reinspectDefects;
-                            $attempt2['ng_count'] = $reinspectNgCount;
-                            $attempt2['status_badge'] = 'IN PROGRESS (Re-inspeksi)';
-                            $attempt2['status_label'] = 'IN PROGRESS (RE-INSPEKSI)';
-                            $attempt2['action_notes'] = $sortLog['notes'] ?: 'Dalam proses re-inspeksi fisik.';
-                        }
-
                         $allLotsMap[$sId][] = $attempt1;
-                        $allLotsMap[$sId][] = $attempt2;
+
+                        // Subsequent Re-inspection Attempts (Ronde 2, Ronde 3, dst.)
+                        for ($k = 0; $k < $numLogs; $k++) {
+                            $log = $sortLogs[$k];
+                            $startTime = $log['action_at'] ?: $log['created_at'];
+                            $endTime = isset($sortLogs[$k + 1]) ? ($sortLogs[$k + 1]['action_at'] ?: $sortLogs[$k + 1]['created_at']) : null;
+                            $isLatest = ($k === $numLogs - 1);
+                            $roundNum = $k + 2;
+
+                            $roundDefects = array_values(array_filter($lotDefects, function($df) use ($startTime, $endTime, $firstLogTime) {
+                                $dfTime = $df['defect_created_at'] ?? ($df['created_at'] ?? null);
+                                if (!empty($df['is_sorted']) && $dfTime && $dfTime < $firstLogTime) {
+                                    return false;
+                                }
+                                if ($startTime && $dfTime && $dfTime < $startTime) return false;
+                                if ($endTime && $dfTime && $dfTime >= $endTime) return false;
+                                return true;
+                            }));
+
+                            $roundNgCount = 0;
+                            foreach ($roundDefects as $rd) {
+                                $roundNgCount += (int)($rd['qty_ng'] ?? 1);
+                            }
+                            if ($roundNgCount === 0 && !empty($roundDefects)) {
+                                $roundNgCount = count($roundDefects);
+                            }
+
+                            $actualLotResult = strtolower($lRow['lot_result'] ?? '');
+                            $rejectLimit = (int)($lRow['computed_reject_number'] ?? 1);
+
+                            $att = $lRow;
+                            $att['attempt_type'] = 'reinspection';
+                            $att['attempt_label'] = "Re-inspeksi (Ronde {$roundNum})";
+                            $att['scanned_at'] = $startTime ?: ($lRow['action_noted_at'] ?: $lRow['scanned_at']);
+                            $att['is_reinspected_attempt'] = true;
+                            $att['is_reinspected_lot'] = true;
+                            $att['action_type'] = $log['action_type'];
+                            $att['actioned_by_name'] = $log['actioned_by_name'];
+                            $att['action_at'] = $startTime;
+                            $att['defects'] = $roundDefects;
+                            $att['ng_count'] = $roundNgCount;
+
+                            if ($isLatest) {
+                                if ($actualLotResult === 'passed') {
+                                    $att['lot_result'] = 'passed';
+                                    $att['status_badge'] = 'PASSED (Re-inspeksi)';
+                                    $att['status_label'] = 'PASSED (RE-INSPEKSI)';
+                                    $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan ditukar dengan part bagus -> Dilakukan re-inspeksi sampel fisik dan lolos uji.';
+                                } elseif ($actualLotResult === 'rejected' || ($roundNgCount >= $rejectLimit && $rejectLimit > 0)) {
+                                    $att['lot_result'] = 'rejected';
+                                    $att['status_badge'] = 'REJECTED (Re-inspeksi)';
+                                    $att['status_label'] = 'REJECTED (RE-INSPEKSI)';
+                                    $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
+                                } else {
+                                    $att['lot_result'] = 'in_progress';
+                                    $att['status_badge'] = 'IN PROGRESS (Re-inspeksi)';
+                                    $att['status_label'] = 'IN PROGRESS (RE-INSPEKSI)';
+                                    $att['action_notes'] = $log['notes'] ?: 'Dalam proses re-inspeksi fisik.';
+                                }
+                            } else {
+                                // Earlier re-inspection attempt that failed
+                                $att['lot_result'] = 'rejected';
+                                $att['status_badge'] = 'REJECTED (Re-inspeksi)';
+                                $att['status_label'] = 'REJECTED (RE-INSPEKSI)';
+                                $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
+                            }
+
+                            $allLotsMap[$sId][] = $att;
+                        }
                         continue;
                     }
                 }
@@ -449,7 +494,7 @@ try {
                 if ($lRow['lot_status'] === 'replaced') {
                     $lRow['attempt_type'] = 'standard';
                     $lRow['is_replaced'] = true;
-                    $lRow['status_badge'] = 'DIGANTIKAN';
+                    $lRow['status_badge'] = 'REJECTED';
                     $allLotsMap[$sId][] = $lRow;
                     continue;
                 }
@@ -462,8 +507,68 @@ try {
                     continue;
                 }
 
-                // Normal lot
-                $lRow['attempt_type'] = 'standard';
+                // Check if session or lot is a re-inspection
+                $sess = $sessions[$sId] ?? [];
+                $isReinspectionSess = !empty($lRow['has_prev_rejected'])
+                    || !empty($sess['is_reinspection']) 
+                    || !empty($sess['reinspection_type']) 
+                    || !empty($sess['parent_session_id']) 
+                    || !empty($lRow['is_reinspected_attempt']) 
+                    || !empty($lRow['is_reinspected_lot'])
+                    || (($lRow['attempt_type'] ?? '') === 'reinspection')
+                    || (strtolower($lRow['lot_status'] ?? '') === 'reinspected')
+                    || (isset($lRow['remarks']) && (strripos($lRow['remarks'], 're-inspeksi') !== false || strripos($lRow['remarks'], 'reinspeksi') !== false || strripos($lRow['remarks'], 're-inspect') !== false || strripos($lRow['remarks'], 'reinspect') !== false))
+                    || (isset($sess['reinspection_notes']) && !empty($sess['reinspection_notes']))
+                    || (isset($sess['remarks']) && (strripos($sess['remarks'], 're-inspeksi') !== false || strripos($sess['remarks'], 'reinspeksi') !== false));
+
+                // DB Fallback if not detected yet
+                if (!$isReinspectionSess && !empty($lRow['lot_number']) && !empty($lRow['lot_id'])) {
+                    static $prevRejectedDrCache = [];
+                    $cacheKey = $sId . '_' . (int)$lRow['lot_id'];
+                    if (!isset($prevRejectedDrCache[$cacheKey])) {
+                        try {
+                            $refStr = (string)($lRow['ref_number'] ?? '');
+                            $currTime = (string)($lRow['created_at'] ?? $lRow['scanned_at'] ?? date('Y-m-d H:i:s'));
+                            $chkStmt = $pdo->prepare("
+                                SELECT 1 
+                                FROM inspection_session_lots prev_isl
+                                WHERE prev_isl.lot_number = :lot_num
+                                  AND (
+                                      (:ref_num1 != '' AND prev_isl.ref_number = :ref_num2)
+                                      OR (:ref_num3 = '' AND (prev_isl.ref_number IS NULL OR prev_isl.ref_number = ''))
+                                  )
+                                  AND prev_isl.id != :curr_lid
+                                  AND prev_isl.created_at < :curr_created
+                                  AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
+                                LIMIT 1
+                            ");
+                            $chkStmt->execute([
+                                ':lot_num'      => (string)$lRow['lot_number'],
+                                ':ref_num1'     => $refStr,
+                                ':ref_num2'     => $refStr,
+                                ':ref_num3'     => $refStr,
+                                ':curr_lid'     => (int)$lRow['lot_id'],
+                                ':curr_created' => $currTime
+                            ]);
+                            $prevRejectedDrCache[$cacheKey] = (bool)$chkStmt->fetchColumn();
+                        } catch (Exception $e) {
+                            $prevRejectedDrCache[$cacheKey] = false;
+                        }
+                    }
+                    if (!empty($prevRejectedDrCache[$cacheKey])) {
+                        $isReinspectionSess = true;
+                    }
+                }
+
+                if ($isReinspectionSess) {
+                    $lRow['attempt_type'] = 'reinspection';
+                    $lRow['is_reinspected_attempt'] = true;
+                    $lRow['is_reinspected_lot'] = true;
+                    $lRow['status_badge'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'IN PROGRESS (RE-INSPEKSI)');
+                    $lRow['status_label'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'IN PROGRESS (RE-INSPEKSI)');
+                } else {
+                    $lRow['attempt_type'] = 'standard';
+                }
                 $allLotsMap[$sId][] = $lRow;
             }
         }
@@ -969,6 +1074,21 @@ if (!empty($rawSessions)) {
 
         if (!empty($sessLots)) {
             foreach ($sessLots as $sl) {
+                $refNo = trim($sl['ref_number'] ?? '');
+                $remarks = trim($sl['remarks'] ?? '');
+
+                // Filter hanya lot yang diinspeksi secara real / fisik (hanya skip yang bypassed skipped / virtual split)
+                $isBypassedSkipped = (($sl['lot_result'] ?? '') === 'skipped');
+                $isVirtualOrExcluded = stripos($remarks, 'Sisa Split') !== false
+                    || stripos($remarks, 'Sisa Kelebihan') !== false
+                    || $refNo === 'DIRECT-PASS' 
+                    || stripos($refNo, 'DIRECT-PASS') !== false 
+                    || stripos($remarks, 'Direct Close') !== false;
+
+                if ($isBypassedSkipped || $isVirtualOrExcluded) {
+                    continue;
+                }
+
                 $lId = (int)$sl['lot_id'];
 
                 $ngByType = [];
@@ -1008,8 +1128,61 @@ if (!empty($rawSessions)) {
                 $lTotalNg   = $totalNg;
                 $lResult    = strtolower($sl['lot_result'] ?? '');
                 $lStatus    = strtolower($sl['lot_status'] ?? '');
-                $isReinspect = !empty($sl['is_reinspected_attempt']) || ($sl['attempt_type'] ?? '') === 'reinspection';
-                $isInitial   = !empty($sl['is_initial_attempt']) || ($sl['attempt_type'] ?? '') === 'initial';
+                $isReinspect = !empty($sl['has_prev_rejected'])
+                    || !empty($sl['is_reinspected_attempt']) 
+                    || !empty($sl['is_reinspected_lot']) 
+                    || !empty($sl['is_reinspection']) 
+                    || (($sl['attempt_type'] ?? '') === 'reinspection')
+                    || (!empty($sess['is_reinspection']))
+                    || (!empty($sess['reinspection_type']))
+                    || (!empty($sess['parent_session_id']))
+                    || (!empty($sess['reinspection_notes']))
+                    || (isset($sl['remarks']) && (strripos($sl['remarks'], 're-inspeksi') !== false || strripos($sl['remarks'], 'reinspeksi') !== false || strripos($sl['remarks'], 're-inspect') !== false || strripos($sl['remarks'], 'reinspect') !== false))
+                    || (isset($sess['remarks']) && (strripos($sess['remarks'], 're-inspeksi') !== false || strripos($sess['remarks'], 'reinspeksi') !== false))
+                    || (strtolower($sl['lot_status'] ?? '') === 'reinspected')
+                    || (isset($sl['status_badge']) && stripos($sl['status_badge'], 'RE-INSPEKSI') !== false)
+                    || (isset($sl['status_label']) && stripos($sl['status_label'], 'RE-INSPEKSI') !== false);
+
+                // DB Fallback
+                if (!$isReinspect && !empty($sl['lot_number']) && !empty($sl['lot_id'])) {
+                    static $prevRejectedFlatDrCache = [];
+                    $cacheKey = $sId . '_' . (int)$sl['lot_id'];
+                    if (!isset($prevRejectedFlatDrCache[$cacheKey])) {
+                        try {
+                            $refStr = (string)($sl['ref_number'] ?? '');
+                            $currTime = (string)($sl['created_at'] ?? $sl['scanned_at'] ?? date('Y-m-d H:i:s'));
+                            $chkStmt = $pdo->prepare("
+                                SELECT 1 
+                                FROM inspection_session_lots prev_isl
+                                WHERE prev_isl.lot_number = :lot_num
+                                  AND (
+                                      (:ref_num1 != '' AND prev_isl.ref_number = :ref_num2)
+                                      OR (:ref_num3 = '' AND (prev_isl.ref_number IS NULL OR prev_isl.ref_number = ''))
+                                  )
+                                  AND prev_isl.id != :curr_lid
+                                  AND prev_isl.created_at < :curr_created
+                                  AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
+                                LIMIT 1
+                            ");
+                            $chkStmt->execute([
+                                ':lot_num'      => (string)$sl['lot_number'],
+                                ':ref_num1'     => $refStr,
+                                ':ref_num2'     => $refStr,
+                                ':ref_num3'     => $refStr,
+                                ':curr_lid'     => (int)$sl['lot_id'],
+                                ':curr_created' => $currTime
+                            ]);
+                            $prevRejectedFlatDrCache[$cacheKey] = (bool)$chkStmt->fetchColumn();
+                        } catch (Exception $e) {
+                            $prevRejectedFlatDrCache[$cacheKey] = false;
+                        }
+                    }
+                    if (!empty($prevRejectedFlatDrCache[$cacheKey])) {
+                        $isReinspect = true;
+                    }
+                }
+
+                $isInitial = !empty($sl['is_initial_attempt']) || ($sl['attempt_type'] ?? '') === 'initial';
 
                 if ($isReinspect) {
                     if ($lResult === 'rejected' || ($lTotalNg >= $lRejectNum && $lRejectNum > 0)) {
@@ -1027,7 +1200,7 @@ if (!empty($rawSessions)) {
                     $rowStatusLabel = 'REJECTED';
                 } elseif ($lResult === 'rejected' || ($lTotalNg >= $lRejectNum && $lRejectNum > 0)) {
                     $rowStatusCode = 'rejected';
-                    $rowStatusLabel = ($lStatus === 'replaced') ? 'REJECTED (DIGANTI)' : 'REJECTED';
+                    $rowStatusLabel = 'REJECTED';
                 } elseif ($lResult === 'passed') {
                     $rowStatusCode = 'passed';
                     $rowStatusLabel = 'PASSED';
@@ -1047,8 +1220,13 @@ if (!empty($rawSessions)) {
                     }
                 }
 
+                $isSs = ($sess['inspection_type'] === 'safety_stock') 
+                    || (empty($sess['kanban_item_id']) && (!empty($sess['original_ss_session_id']) || !empty($sl['is_safety_stock'])));
+                $jenisLabel = $isSs ? 'SAFETY STOCK' : 'KANBAN';
+
                 $flatLotRows[] = [
                     'started_at'     => $sess['started_at'],
+                    'jenis'          => $jenisLabel,
                     'part_code'      => $sess['part_code'],
                     'part_name'      => $sess['part_name'],
                     'model_name'     => $sess['model_name'] ?: '-',
@@ -1068,6 +1246,21 @@ if (!empty($rawSessions)) {
                 ];
             }
         } else {
+            // Jika sesi sudah punya catatan lot di DB (artinya semua lotnya SS/skipped), jangan buat fallback dummy
+            if (!empty($sessionsWithLots[$sId])) {
+                continue;
+            }
+            // Skip direct close sessions from fallback row
+            if (!empty($sess['approval_notes']) && stripos($sess['approval_notes'], 'Direct Close') !== false) {
+                continue;
+            }
+            if (!empty($sess['auto_fulfilled_by_session_id'])) {
+                continue;
+            }
+            if ((int)($sess['sample_size'] ?? 0) <= 0 && (int)($sess['total_scanned_qty'] ?? 0) <= 0) {
+                continue;
+            }
+
             // Fallback for session without session_lots entry
             $ngData = $ngBySessionMap[$sId] ?? ['total_ng' => 0, 'by_type' => [], 'defect_names' => []];
             $defStr = '-';
@@ -1096,8 +1289,13 @@ if (!empty($rawSessions)) {
                 $rowStatusLabel = 'IN PROGRESS';
             }
 
+            $isSs = ($sess['inspection_type'] === 'safety_stock') 
+                || (empty($sess['kanban_item_id']) && !empty($sess['original_ss_session_id']));
+            $jenisLabel = $isSs ? 'SAFETY STOCK' : 'KANBAN';
+
             $flatLotRows[] = [
                 'started_at'     => $sess['started_at'],
+                'jenis'          => $jenisLabel,
                 'part_code'      => $sess['part_code'],
                 'part_name'      => $sess['part_name'],
                 'model_name'     => $sess['model_name'] ?: '-',
@@ -1122,7 +1320,7 @@ if (!empty($rawSessions)) {
 // 5. Render Headers (Row 5)
 $hRow = 5;
 $coreHeaders = [
-    'Tanggal', 'Part Code', 'Part Name', 'Model', 'Lot No', 'Ref No', 
+    'Tanggal', 'Jenis', 'Part Code', 'Part Name', 'Model', 'Lot No', 'Ref No', 
     'QTY Lot', 'QTY Sampling', 'NG', 'Defect', 'Status', 
     'Sesi', 'Shift', 'Inspektor'
 ];
@@ -1133,23 +1331,23 @@ foreach ($coreHeaders as $idx => $hText) {
     $sheet1->getStyle($colLetter . $hRow)->getFont()->setBold(true)->setSize(10)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFFFFF'));
     $sheet1->getStyle($colLetter . $hRow)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('0F172A');
     $sheet1->getStyle($colLetter . $hRow)->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
-    if (in_array($hText, ['Tanggal', 'Model', 'Status', 'Sesi', 'Shift', 'NG'])) {
+    if (in_array($hText, ['Tanggal', 'Jenis', 'Model', 'Status', 'Sesi', 'Shift', 'NG'])) {
         $sheet1->getStyle($colLetter . $hRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
     } elseif (in_array($hText, ['QTY Lot', 'QTY Sampling'])) {
         $sheet1->getStyle($colLetter . $hRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
     }
 }
 
-// 5 Gap Spacer Columns (Cols 15 to 19 -> O to S)
-for ($gCol = 15; $gCol <= 19; $gCol++) {
+// 5 Gap Spacer Columns (Cols 16 to 20 -> P to T)
+for ($gCol = 16; $gCol <= 20; $gCol++) {
     $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($gCol);
     $sheet1->setCellValue($colLetter . $hRow, '');
     $sheet1->getColumnDimension($colLetter)->setWidth(4);
 }
 
-// Dynamic Defect Matrix Headers (Cols 20+ -> T+)
+// Dynamic Defect Matrix Headers (Cols 21+ -> U+)
 $defectColIndexMap = [];
-$cIdx = 20;
+$cIdx = 21;
 foreach ($defectTypesMaster as $dtM) {
     $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($cIdx);
     $defectColIndexMap[$dtM['id']] = $colLetter;
@@ -1165,699 +1363,202 @@ $sheet1->getRowDimension($hRow)->setRowHeight(24);
 
 // 6. Render Data Rows (Starting Row 6)
 $rIdx = 6;
-foreach ($flatLotRows as $rowItem) {
-    $bgRowColor = ($rIdx % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
+if (empty($flatLotRows)) {
+    $sheet1->mergeCells("A{$rIdx}:O{$rIdx}");
+    $sheet1->setCellValue("A{$rIdx}", "Tidak ada data inspeksi yang ditemukan untuk rentang tanggal yang dipilih.");
+    $sheet1->getStyle("A{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER)->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet1->getStyle("A{$rIdx}")->getFont()->setItalic(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
+    $sheet1->getStyle("A{$rIdx}:O{$rIdx}")->applyFromArray($borderThin);
+    $sheet1->getRowDimension($rIdx)->setRowHeight(30);
+    $rIdx++;
+} else {
+    $lastDefectCol = !empty($defectTypesMaster) ? \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($cIdx - 1) : '';
+    $firstDataRow = 6;
 
-    // A: Tanggal
-    $sheet1->setCellValue("A{$rIdx}", date('d/m/Y', strtotime($rowItem['started_at'])));
-    $sheet1->getStyle("A{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    foreach ($flatLotRows as $rowItem) {
+        $bgRowColor = ($rIdx % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
 
-    // B: Part Code
-    $sheet1->setCellValue("B{$rIdx}", $rowItem['part_code']);
+        // A: Tanggal
+        $sheet1->setCellValue("A{$rIdx}", date('d/m/Y', strtotime($rowItem['started_at'])));
 
-    // C: Part Name
-    $sheet1->setCellValue("C{$rIdx}", $rowItem['part_name']);
+        // B: Jenis (KANBAN / SAFETY STOCK)
+        $sheet1->setCellValue("B{$rIdx}", $rowItem['jenis']);
+        if ($rowItem['jenis'] === 'SAFETY STOCK') {
+            $sheet1->getStyle("B{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('7C3AED'));
+        } else {
+            $sheet1->getStyle("B{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('2563EB'));
+        }
 
-    // D: Model
-    $sheet1->setCellValue("D{$rIdx}", $rowItem['model_name'] ?: '-');
-    $sheet1->getStyle("D{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        // C: Part Code
+        $sheet1->setCellValue("C{$rIdx}", $rowItem['part_code']);
 
-    // E: Lot No
-    $sheet1->setCellValue("E{$rIdx}", $rowItem['lot_number']);
+        // D: Part Name
+        $sheet1->setCellValue("D{$rIdx}", $rowItem['part_name']);
 
-    // F: Ref No
-    $sheet1->setCellValue("F{$rIdx}", $rowItem['ref_number']);
-    $sheet1->getStyle("F{$rIdx}")->getFont()->setBold(true);
+        // E: Model
+        $sheet1->setCellValue("E{$rIdx}", $rowItem['model_name'] ?: '-');
 
-    // G: QTY Lot
-    $sheet1->setCellValue("G{$rIdx}", (int)$rowItem['qty_lot']);
-    $sheet1->getStyle("G{$rIdx}")->getNumberFormat()->setFormatCode('#,##0');
-    $sheet1->getStyle("G{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-    $sheet1->getStyle("G{$rIdx}")->getFont()->setBold(true);
+        // F: Lot No
+        $sheet1->setCellValue("F{$rIdx}", $rowItem['lot_number']);
 
-    // H: QTY Sampling
-    $sheet1->setCellValue("H{$rIdx}", (int)$rowItem['qty_sampling']);
-    $sheet1->getStyle("H{$rIdx}")->getNumberFormat()->setFormatCode('#,##0');
-    $sheet1->getStyle("H{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        // G: Ref No
+        $sheet1->setCellValue("G{$rIdx}", $rowItem['ref_number']);
 
-    // I: NG (nilai langsung yang didapat)
-    $sheet1->setCellValue("I{$rIdx}", (int)$rowItem['total_ng']);
-    $sheet1->getStyle("I{$rIdx}")->getNumberFormat()->setFormatCode('#,##0');
-    $sheet1->getStyle("I{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet1->getStyle("I{$rIdx}")->getFont()->setBold(true);
-    if ($rowItem['total_ng'] > 0) {
-        $sheet1->getStyle("I{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('DC2626'));
-    } else {
-        $sheet1->getStyle("I{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('16A34A'));
+        // H: QTY Lot
+        $sheet1->setCellValue("H{$rIdx}", (int)$rowItem['qty_lot']);
+
+        // I: QTY Sampling
+        $sheet1->setCellValue("I{$rIdx}", (int)$rowItem['qty_sampling']);
+
+        // J: NG (nilai langsung yang didapat)
+        $sheet1->setCellValue("J{$rIdx}", (int)$rowItem['total_ng']);
+        if ($rowItem['total_ng'] > 0) {
+            $sheet1->getStyle("J{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('DC2626'));
+        } else {
+            $sheet1->getStyle("J{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('16A34A'));
+        }
+
+        // K: Defect
+        $sheet1->setCellValue("K{$rIdx}", $rowItem['defect_summary']);
+
+        // L: Status
+        $statusStr = $rowItem['status_label'] ?? strtoupper(str_replace('_', ' ', $rowItem['session_status']));
+        $statusCode = $rowItem['status_code'] ?? $rowItem['session_status'];
+        $sheet1->setCellValue("L{$rIdx}", $statusStr);
+        if ($statusCode === 'passed') {
+            $sheet1->getStyle("L{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DCFCE7');
+            $sheet1->getStyle("L{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('15803D'));
+        } elseif ($statusCode === 'in_progress') {
+            $sheet1->getStyle("L{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('E0E7FF');
+            $sheet1->getStyle("L{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('3730A3'));
+        } elseif ($statusCode === 'skipped') {
+            $sheet1->getStyle("L{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F1F5F9');
+            $sheet1->getStyle("L{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
+        } else {
+            $sheet1->getStyle("L{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FFE4E6');
+            $sheet1->getStyle("L{$rIdx}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('BE123C'));
+        }
+
+        // M: Sesi
+        $sheet1->setCellValue("M{$rIdx}", "Sesi #" . $rowItem['session_id']);
+
+        // N: Shift
+        $shiftStr = getShiftName($rowItem['started_at']);
+        $sheet1->setCellValue("N{$rIdx}", $shiftStr);
+
+        // O: Inspektor
+        $sheet1->setCellValue("O{$rIdx}", $rowItem['inspector_name']);
+
+        // Zebra striping for even rows
+        if ($rIdx % 2 === 0) {
+            $sheet1->getStyle("A{$rIdx}:K{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F8FAFC');
+            $sheet1->getStyle("M{$rIdx}:O{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F8FAFC');
+        }
+
+        // Dynamic Defect Matrix (Cols U+ -> 21+)
+        if (!empty($rowItem['ng_by_type'])) {
+            foreach ($rowItem['ng_by_type'] as $dtId => $ngQtyForType) {
+                if ($ngQtyForType > 0 && isset($defectColIndexMap[$dtId])) {
+                    $colLetter = $defectColIndexMap[$dtId];
+                    $sheet1->setCellValue($colLetter . $rIdx, $ngQtyForType);
+                    $sheet1->getStyle($colLetter . $rIdx)->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
+                    $sheet1->getStyle($colLetter . $rIdx)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FEE2E2');
+                }
+            }
+        }
+
+        $sheet1->getRowDimension($rIdx)->setRowHeight(21);
+        $rIdx++;
     }
 
-    // J: Defect
-    $sheet1->setCellValue("J{$rIdx}", $rowItem['defect_summary']);
+    $lastDataRow = $rIdx - 1;
 
-    // K: Status
-    $statusStr = $rowItem['status_label'] ?? strtoupper(str_replace('_', ' ', $rowItem['session_status']));
-    $statusCode = $rowItem['status_code'] ?? $rowItem['session_status'];
-    $sheet1->setCellValue("K{$rIdx}", $statusStr);
-    $sheet1->getStyle("K{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet1->getStyle("K{$rIdx}")->getFont()->setBold(true);
-    if ($statusCode === 'passed') {
-        $sheet1->getStyle("K{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DCFCE7');
-        $sheet1->getStyle("K{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('15803D'));
-    } elseif ($statusCode === 'in_progress') {
-        $sheet1->getStyle("K{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('E0E7FF');
-        $sheet1->getStyle("K{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('3730A3'));
-    } elseif ($statusCode === 'skipped') {
-        $sheet1->getStyle("K{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F1F5F9');
-        $sheet1->getStyle("K{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
-    } else {
-        $sheet1->getStyle("K{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FFE4E6');
-        $sheet1->getStyle("K{$rIdx}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('BE123C'));
+    // ── Bulk Styling for Sheet 1 (One-Shot Call for 30x Faster Performance) ──
+    $sheet1->getStyle("A{$firstDataRow}:O{$lastDataRow}")->applyFromArray($borderThin);
+    $sheet1->getStyle("A{$firstDataRow}:O{$lastDataRow}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+    $sheet1->getStyle("A{$firstDataRow}:B{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    $sheet1->getStyle("E{$firstDataRow}:E{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    $sheet1->getStyle("G{$firstDataRow}:G{$lastDataRow}")->getFont()->setBold(true);
+    $sheet1->getStyle("H{$firstDataRow}:I{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0');
+    $sheet1->getStyle("H{$firstDataRow}:I{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+    $sheet1->getStyle("H{$firstDataRow}:H{$lastDataRow}")->getFont()->setBold(true);
+    $sheet1->getStyle("J{$firstDataRow}:J{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0');
+    $sheet1->getStyle("J{$firstDataRow}:J{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    $sheet1->getStyle("L{$firstDataRow}:N{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+
+    if (!empty($lastDefectCol)) {
+        $sheet1->getStyle("U{$firstDataRow}:{$lastDefectCol}{$lastDataRow}")->applyFromArray($borderThin);
+        $sheet1->getStyle("U{$firstDataRow}:{$lastDefectCol}{$lastDataRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $sheet1->getStyle("U{$firstDataRow}:{$lastDefectCol}{$lastDataRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT)->setVertical(Alignment::VERTICAL_CENTER);
     }
 
-    // L: Sesi
-    $sheet1->setCellValue("L{$rIdx}", "Sesi #" . $rowItem['session_id']);
-    $sheet1->getStyle("L{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    // ── Summary Grand Total Row ──────────────────────────────────────────────
+    $totRow = $rIdx;
+    $sheet1->setCellValue("A{$totRow}", 'TOTAL');
+    $sheet1->mergeCells("A{$totRow}:G{$totRow}");
+    $sheet1->getStyle("A{$totRow}")->getFont()->setBold(true)->setSize(10)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('0F172A'));
+    $sheet1->getStyle("A{$totRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+    
+    // SUM Qty Lot (Col H)
+    $sheet1->setCellValue("H{$totRow}", "=SUM(H6:H" . ($totRow - 1) . ")");
+    $sheet1->getStyle("H{$totRow}")->getNumberFormat()->setFormatCode('#,##0');
+    $sheet1->getStyle("H{$totRow}")->getFont()->setBold(true);
+    $sheet1->getStyle("H{$totRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-    // M: Shift
-    $shiftStr = getShiftName($rowItem['started_at']);
-    $sheet1->setCellValue("M{$rIdx}", $shiftStr);
-    $sheet1->getStyle("M{$rIdx}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+    // SUM Qty Sampling (Col I)
+    $sheet1->setCellValue("I{$totRow}", "=SUM(I6:I" . ($totRow - 1) . ")");
+    $sheet1->getStyle("I{$totRow}")->getNumberFormat()->setFormatCode('#,##0');
+    $sheet1->getStyle("I{$totRow}")->getFont()->setBold(true);
+    $sheet1->getStyle("I{$totRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-    // N: Inspektor
-    $sheet1->setCellValue("N{$rIdx}", $rowItem['inspector_name']);
+    // SUM NG (Col J)
+    $sheet1->setCellValue("J{$totRow}", "=SUM(J6:J" . ($totRow - 1) . ")");
+    $sheet1->getStyle("J{$totRow}")->getNumberFormat()->setFormatCode('#,##0');
+    $sheet1->getStyle("J{$totRow}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('DC2626'));
+    $sheet1->getStyle("J{$totRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
 
-    // Standard Zebra & Border for Cols A-N
-    $sheet1->getStyle("A{$rIdx}:J{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB($bgRowColor);
-    $sheet1->getStyle("L{$rIdx}:N{$rIdx}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB($bgRowColor);
-    $sheet1->getStyle("A{$rIdx}:N{$rIdx}")->applyFromArray($borderThin);
+    $sheet1->getStyle("A{$totRow}:O{$totRow}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F1F5F9');
+    $sheet1->getStyle("A{$totRow}:O{$totRow}")->applyFromArray($borderThin);
+    $sheet1->getStyle("A{$totRow}:O{$totRow}")->applyFromArray($borderBottomDouble);
 
-    // Gap Cols O to S: Blank
-    for ($gCol = 15; $gCol <= 19; $gCol++) {
-        $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($gCol);
-        $sheet1->setCellValue($colLetter . $rIdx, '');
-    }
-
-    // Dynamic Defect Matrix (Cols T+)
+    // Defect Matrix Totals (Cols U+)
     foreach ($defectTypesMaster as $dtM) {
         $dtId = (int)$dtM['id'];
         $colLetter = $defectColIndexMap[$dtId] ?? '';
         if ($colLetter !== '') {
-            $ngQtyForType = (int)($rowItem['ng_by_type'][$dtId] ?? 0);
-            if ($ngQtyForType > 0) {
-                $sheet1->setCellValue($colLetter . $rIdx, $ngQtyForType);
-                $sheet1->getStyle($colLetter . $rIdx)->getNumberFormat()->setFormatCode('#,##0');
-                $sheet1->getStyle($colLetter . $rIdx)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-                $sheet1->getStyle($colLetter . $rIdx)->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
-                $sheet1->getStyle($colLetter . $rIdx)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FEE2E2');
-            } else {
-                $sheet1->setCellValue($colLetter . $rIdx, '');
-            }
-            $sheet1->getStyle($colLetter . $rIdx)->applyFromArray($borderThin);
+            $sheet1->setCellValue("{$colLetter}{$totRow}", "=SUM({$colLetter}6:{$colLetter}" . ($totRow - 1) . ")");
         }
     }
-
-    $sheet1->getRowDimension($rIdx)->setRowHeight(21);
-    $rIdx++;
+    if (!empty($lastDefectCol)) {
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT)->setVertical(Alignment::VERTICAL_CENTER);
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FEE2E2');
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->applyFromArray($borderThin);
+        $sheet1->getStyle("U{$totRow}:{$lastDefectCol}{$totRow}")->applyFromArray($borderBottomDouble);
+    }
+    $sheet1->getRowDimension($totRow)->setRowHeight(24);
+    $sheet1->getRowDimension($totRow)->setRowHeight(24);
 }
 
-// Auto-size core columns A to N
-$sheet1->getColumnDimension('A')->setWidth(13);
-$sheet1->getColumnDimension('B')->setWidth(20);
-$sheet1->getColumnDimension('C')->setWidth(30);
-$sheet1->getColumnDimension('D')->setWidth(18); // Model
-$sheet1->getColumnDimension('E')->setWidth(18); // Lot No
-$sheet1->getColumnDimension('F')->setWidth(22); // Ref No
-$sheet1->getColumnDimension('G')->setWidth(14); // QTY Lot
-$sheet1->getColumnDimension('H')->setWidth(16); // QTY Sampling
-$sheet1->getColumnDimension('I')->setWidth(12); // NG
-$sheet1->getColumnDimension('J')->setWidth(26); // Defect
-$sheet1->getColumnDimension('K')->setWidth(24); // Status
-$sheet1->getColumnDimension('L')->setWidth(12); // Sesi
-$sheet1->getColumnDimension('M')->setWidth(12); // Shift
-$sheet1->getColumnDimension('N')->setWidth(22); // Inspektor
+// Auto-size core columns A to O
+$sheet1->getColumnDimension('A')->setWidth(13); // Tanggal
+$sheet1->getColumnDimension('B')->setWidth(16); // Jenis
+$sheet1->getColumnDimension('C')->setWidth(20); // Part Code
+$sheet1->getColumnDimension('D')->setWidth(30); // Part Name
+$sheet1->getColumnDimension('E')->setWidth(18); // Model
+$sheet1->getColumnDimension('F')->setWidth(18); // Lot No
+$sheet1->getColumnDimension('G')->setWidth(22); // Ref No
+$sheet1->getColumnDimension('H')->setWidth(14); // QTY Lot
+$sheet1->getColumnDimension('I')->setWidth(16); // QTY Sampling
+$sheet1->getColumnDimension('J')->setWidth(12); // NG
+$sheet1->getColumnDimension('K')->setWidth(26); // Defect
+$sheet1->getColumnDimension('L')->setWidth(26); // Status
+$sheet1->getColumnDimension('M')->setWidth(12); // Sesi
+$sheet1->getColumnDimension('N')->setWidth(12); // Shift
+$sheet1->getColumnDimension('O')->setWidth(22); // Inspektor
 
 
-
-// ═════════════════════════════════════════════════════════════════════════════
-// SHEET 2: KRONOLOGI SESI INSPEKSI (TIMELINE VIEW)
-// ═════════════════════════════════════════════════════════════════════════════
-$sheet2 = $spreadsheet->createSheet();
-$sheet2->setTitle('Kronologi Sesi');
-$sheet2->setShowGridLines(true);
-
-// Header Sheet 2
-$sheet2->mergeCells('A1:I1');
-$sheet2->setCellValue('A1', 'PT. SURYA TECHNOLOGY INDUSTRI — OUTGOING QUALITY CONTROL DIVISION');
-$sheet2->getStyle('A1')->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
-
-$sheet2->mergeCells('A2:I2');
-$sheet2->setCellValue('A2', 'KRONOLOGI SELURUH SESI INSPEKSI HARIAN (ACTIVITY TIMELINE)');
-$sheet2->getStyle('A2')->getFont()->setBold(true)->setSize(15)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('0F172A'));
-
-$sheet2->mergeCells('A3:I3');
-$sheet2->setCellValue('A3', "| {$dayNameId}, {$formattedDateId}  |  Total {$daySummary['total_sesi']} Sesi");
-$sheet2->getStyle('A3')->getFont()->setSize(10)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('475569'));
-$sheet2->getRowDimension(3)->setRowHeight(22);
-
-$s2Row = 5;
-
-// Table Header Row (Sheet 2)
-$headersT = ['Sesi #', 'Jam (WIB)', 'Jalur', 'Identitas Item (Kanban / Part)', 'Inspector QC', 'Qty Diperiksa', 'Status Sesi', 'Persetujuan Supervisor', 'Sampling AQL'];
-$colsT = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
-foreach ($headersT as $i => $hText) {
-    $sheet2->setCellValue($colsT[$i] . $s2Row, $hText);
-}
-$sheet2->getStyle("A{$s2Row}:I{$s2Row}")->getFont()->setBold(true)->setSize(10)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFFFFF'));
-$sheet2->getStyle("A{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('0F172A');
-$sheet2->getStyle("A{$s2Row}:I{$s2Row}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
-$sheet2->getStyle("A{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-$sheet2->getStyle("B{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-$sheet2->getStyle("C{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-$sheet2->getStyle("F{$s2Row}:I{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-$sheet2->getRowDimension($s2Row)->setRowHeight(24);
-$s2Row++;
-
-foreach ($sessionTimeline as $stIdx => $sess) {
-    $isKb = ($sess['inspection_type'] === 'kanban');
-    $isReins = ((int)$sess['is_reinspection'] === 1 || (int)$sess['parent_session_id'] > 0);
-    $sTime = !empty($sess['started_at']) ? date('H:i', strtotime($sess['started_at'])) : '-';
-    $eTime = !empty($sess['closed_at']) ? date('H:i', strtotime($sess['closed_at'])) : 'Sekarang';
-    $timeRange = "{$sTime} - {$eTime} WIB";
-
-    // Master session row
-    $sheet2->setCellValue("A{$s2Row}", "#" . $sess['session_id']);
-    $sheet2->setCellValue("B{$s2Row}", $timeRange);
-    $sheet2->setCellValue("C{$s2Row}", $isKb ? 'Kanban' : 'Safety Stock');
-    $itemDesc = $isKb ? ("Kanban #" . $sess['kanban_no'] . " | " . $sess['part_code'] . " - " . $sess['part_name']) : ($sess['part_code'] . " - " . $sess['part_name'] . " (Lot: " . $sess['did_lot_number'] . ")");
-    if ($isReins) {
-        $itemDesc .= " [Re-inspeksi]";
-    }
-    $sheet2->setCellValue("D{$s2Row}", $itemDesc);
-    $sheet2->setCellValue("E{$s2Row}", $sess['inspector_name']);
-    $sheet2->setCellValue("F{$s2Row}", number_format($sess['computed_qty']) . " pcs (" . $sess['box_count'] . " Box)");
-    
-    $sessStatusStr = strtoupper(str_replace('_', ' ', $sess['session_status']));
-    $sheet2->setCellValue("G{$s2Row}", $sessStatusStr);
-
-    // Approval status
-    $isApp = (!empty($sess['is_approved']) && (int)$sess['is_approved'] === 1);
-    if ($isApp) {
-        $appTime = !empty($sess['approved_at']) ? date('H:i', strtotime($sess['approved_at'])) : '-';
-        $sheet2->setCellValue("H{$s2Row}", "DISETUJUI ({$sess['supervisor_name']} - {$appTime})");
-        $sheet2->getStyle("H{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DCFCE7');
-        $sheet2->getStyle("H{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('15803D'))->setBold(true)->setSize(9);
-    } else {
-        $sheet2->setCellValue("H{$s2Row}", "BELUM DI-ACC");
-        $sheet2->getStyle("H{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FEF3C7');
-        $sheet2->getStyle("H{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('92400E'))->setBold(true)->setSize(9);
-    }
-
-    $sheet2->setCellValue("I{$s2Row}", $sess['sample_size'] . " pcs (NG: " . (int)($sess['ng_count'] ?? 0) . " / " . max(1, (int)$sess['reject_number']) . ")");
-
-    // Styles
-    $sheet2->getStyle("A{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet2->getStyle("B{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet2->getStyle("C{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet2->getStyle("D{$s2Row}")->getFont()->setBold(true);
-    $sheet2->getStyle("F{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-    $sheet2->getStyle("F{$s2Row}")->getFont()->setBold(true);
-    $sheet2->getStyle("G{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet2->getStyle("G{$s2Row}")->getFont()->setBold(true);
-    $sheet2->getStyle("H{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet2->getStyle("I{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-
-    // Status coloring
-    if ($sess['session_status'] === 'passed') {
-        $sheet2->getStyle("G{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DCFCE7');
-        $sheet2->getStyle("G{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('15803D'));
-    } elseif ($sess['session_status'] === 'in_progress') {
-        $sheet2->getStyle("G{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('E0E7FF');
-        $sheet2->getStyle("G{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('3730A3'));
-    } else {
-        $sheet2->getStyle("G{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FFE4E6');
-        $sheet2->getStyle("G{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('BE123C'));
-    }
-
-    $sheet2->getStyle("A{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB($stIdx % 2 === 0 ? 'F8FAFC' : 'FFFFFF');
-    $sheet2->getStyle("A{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-    $sheet2->getRowDimension($s2Row)->setRowHeight(22);
-    $s2Row++;
-
-    // Approval note if present
-    if (!empty($sess['approval_notes'])) {
-        $sheet2->mergeCells("B{$s2Row}:I{$s2Row}");
-        $sheet2->setCellValue("B{$s2Row}", "     Catatan Persetujuan Supervisor: " . $sess['approval_notes']);
-        $sheet2->getStyle("B{$s2Row}")->getFont()->setItalic(true)->setSize(9)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('065F46'));
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('ECFDF5');
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-        $sheet2->getRowDimension($s2Row)->setRowHeight(18);
-        $s2Row++;
-    }
-
-    // Sub-lots
-    if (!empty($sess['lots'])) {
-        $sheet2->setCellValue("B{$s2Row}", "     Rincian Box / Lot:");
-        $sheet2->setCellValue("C{$s2Row}", "No");
-        $sheet2->setCellValue("D{$s2Row}", "Lot Number");
-        $sheet2->setCellValue("E{$s2Row}", "Ref Number");
-        $sheet2->setCellValue("F{$s2Row}", "Qty (pcs)");
-        $sheet2->setCellValue("G{$s2Row}", "Sampel (pcs)");
-        $sheet2->setCellValue("H{$s2Row}", "NG");
-        $sheet2->setCellValue("I{$s2Row}", "Waktu Scan");
-
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->getFont()->setBold(true)->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F1F5F9');
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-        $sheet2->getStyle("C{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-        $sheet2->getStyle("F{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet2->getStyle("G{$s2Row}:I{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-        $sheet2->getRowDimension($s2Row)->setRowHeight(20);
-        $s2Row++;
-
-        foreach ($sess['lots'] as $bIdx => $bLot) {
-            $sheet2->setCellValue("C{$s2Row}", $bIdx + 1);
-
-            $lotDesc = $bLot['lot_number'] ?: '-';
-            if (!empty($bLot['is_reinspected_attempt'])) {
-                $lotDesc .= ' [Re-inspeksi]';
-            } elseif (!empty($bLot['is_initial_attempt'])) {
-                $lotDesc .= ' [Uji Awal - NG]';
-            } elseif (!empty($bLot['is_replaced'])) {
-                $lotDesc .= ' [Digantikan]';
-            } elseif (!empty($bLot['is_replacement_box'])) {
-                $lotDesc .= ' [Box Pengganti]';
-            }
-            $sheet2->setCellValue("D{$s2Row}", $lotDesc);
-            $sheet2->setCellValue("E{$s2Row}", $bLot['ref_number'] ?: '-');
-            $sheet2->setCellValue("F{$s2Row}", (int)$bLot['qty']);
-            $sheet2->setCellValue("G{$s2Row}", (int)($bLot['computed_sample_size'] ?? 0) . ' pcs');
-
-            $lotNgTotal = 0;
-            if (!empty($bLot['defects'])) {
-                foreach ($bLot['defects'] as $df) {
-                    $lotNgTotal += (int)$df['qty_ng'];
-                }
-            }
-            $sheet2->setCellValue("H{$s2Row}", $lotNgTotal);
-
-            $sheet2->setCellValue("I{$s2Row}", !empty($bLot['scanned_at']) ? date('H:i', strtotime($bLot['scanned_at'])) . ' WIB' : '-');
-
-            $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->getFont()->setSize(9);
-            $sheet2->getStyle("C{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-            $sheet2->getStyle("E{$s2Row}")->getFont()->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('0284C7'));
-            $sheet2->getStyle("F{$s2Row}")->getFont()->setBold(true);
-            $sheet2->getStyle("F{$s2Row}")->getNumberFormat()->setFormatCode('#,##0');
-            $sheet2->getStyle("F{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-            $sheet2->getStyle("G{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-            $sheet2->getStyle("H{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-            $sheet2->getStyle("H{$s2Row}")->getFont()->setBold(true);
-            if ($lotNgTotal > 0) {
-                $sheet2->getStyle("H{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('DC2626'));
-            } else {
-                $sheet2->getStyle("H{$s2Row}")->getFont()->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('16A34A'));
-            }
-            $sheet2->getStyle("I{$s2Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-            $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-            $sheet2->getRowDimension($s2Row)->setRowHeight(20);
-            $s2Row++;
-
-            // Inline defects directly under this lot row
-            if (!empty($bLot['defects'])) {
-                foreach ($bLot['defects'] as $df) {
-                    $sheet2->mergeCells("C{$s2Row}:I{$s2Row}");
-                    $inspectorText = !empty($df['inspector_name']) ? $df['inspector_name'] : 'Inspector';
-                    $timeText = !empty($df['defect_created_at']) ? date('H:i \W\I\B', strtotime($df['defect_created_at'])) : '-';
-                    $defectText = "     [DEFECT] • " . $df['defect_name'] . ": " . (int)$df['qty_ng'] . " pcs | Ditemukan oleh: " . $inspectorText . " | Jam: " . $timeText . (!empty($df['remark']) ? " | Ket: " . $df['remark'] : "");
-                    $sheet2->setCellValue("C{$s2Row}", $defectText);
-                    $sheet2->getStyle("C{$s2Row}")->getFont()->setSize(9)->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
-                    $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FFF5F5');
-                    $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-                    $sheet2->getRowDimension($s2Row)->setRowHeight(19);
-                    $s2Row++;
-                }
-            }
-
-            // Inline reinspection action notes directly under this lot row
-            if (!empty($bLot['is_reinspected_attempt'])) {
-                $sheet2->mergeCells("C{$s2Row}:I{$s2Row}");
-                $inspName = !empty($bLot['actioned_by_name']) ? $bLot['actioned_by_name'] : 'Inspector';
-                $actTime = !empty($bLot['action_at']) ? date('H:i \W\I\B', strtotime($bLot['action_at'])) : date('H:i \W\I\B', strtotime($bLot['scanned_at']));
-                $reinsText = "     [RE-INSPEKSI] Tindakan: " . ($bLot['action_notes'] ?: 'Part NG disortir dan ditukar dengan part bagus -> Dilakukan re-inspeksi sampel fisik dan lolos uji.') . " | Inspector: " . $inspName . " | Jam: " . $actTime;
-                $sheet2->setCellValue("C{$s2Row}", $reinsText);
-                $sheet2->getStyle("C{$s2Row}")->getFont()->setSize(9)->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('166534'));
-                $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F0FDF4');
-                $sheet2->getStyle("C{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-                $sheet2->getRowDimension($s2Row)->setRowHeight(19);
-                $s2Row++;
-            }
-        }
-    }
-
-    // Unmatched defects or clean status
-    if (!empty($sess['unmatched_defects'])) {
-        foreach ($sess['unmatched_defects'] as $udf) {
-            $sheet2->mergeCells("B{$s2Row}:I{$s2Row}");
-            $inspectorText = !empty($udf['inspector_name']) ? $udf['inspector_name'] : 'Inspector';
-            $timeText = !empty($udf['defect_created_at']) ? date('H:i \W\I\B', strtotime($udf['defect_created_at'])) : '-';
-            $uText = "     [DEFECT SESI TANPA MAPPING LOT] • " . $udf['defect_name'] . ": " . (int)$udf['qty_ng'] . " pcs | Ditemukan oleh: " . $inspectorText . " | Jam: " . $timeText . (!empty($udf['remark']) ? " | Ket: " . $udf['remark'] : "");
-            $sheet2->setCellValue("B{$s2Row}", $uText);
-            $sheet2->getStyle("B{$s2Row}")->getFont()->setSize(9)->setBold(true)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
-            $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FFF5F5');
-            $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-            $sheet2->getRowDimension($s2Row)->setRowHeight(19);
-            $s2Row++;
-        }
-    } elseif (empty($sess['ng_records'])) {
-        $sheet2->mergeCells("B{$s2Row}:I{$s2Row}");
-        $sheet2->setCellValue("B{$s2Row}", "     All Samples OK: Seluruh sampel memenuhi standar mutu (0 cacat ditemukan)");
-        $sheet2->getStyle("B{$s2Row}")->getFont()->setSize(8)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('166534'));
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F0FDF4');
-        $sheet2->getStyle("B{$s2Row}:I{$s2Row}")->applyFromArray($borderThin);
-        $sheet2->getRowDimension($s2Row)->setRowHeight(18);
-        $s2Row++;
-    }
-}
-
-// Auto-size columns for Sheet 2
-$sheet2->getColumnDimension('A')->setWidth(10);
-$sheet2->getColumnDimension('B')->setWidth(20);
-$sheet2->getColumnDimension('C')->setWidth(16);
-$sheet2->getColumnDimension('D')->setWidth(38);
-$sheet2->getColumnDimension('E')->setWidth(22);
-$sheet2->getColumnDimension('F')->setWidth(22);
-$sheet2->getColumnDimension('G')->setWidth(16);
-$sheet2->getColumnDimension('H')->setWidth(28);
-$sheet2->getColumnDimension('I')->setWidth(24);
-
-
-// ═════════════════════════════════════════════════════════════════════════════
-// SHEET 3: DISTRIBUSI CACAT MUTU & DIAGRAM ANALITIK
-// ═════════════════════════════════════════════════════════════════════════════
-$sheet3 = $spreadsheet->createSheet();
-$sheet3->setTitle('Distribusi Cacat Mutu');
-$sheet3->setShowGridLines(true);
-
-// Header Sheet 3
-$sheet3->mergeCells('A1:K1');
-$sheet3->setCellValue('A1', 'PT. SURYA TECHNOLOGY INDUSTRI — OUTGOING QUALITY CONTROL DIVISION');
-$sheet3->getStyle('A1')->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('64748B'));
-
-$sheet3->mergeCells('A2:K2');
-$sheet3->setCellValue('A2', 'DISTRIBUSI TEMUAN CACAT MUTU & ANALITIK HARIAN (DEFECT BREAKDOWN)');
-$sheet3->getStyle('A2')->getFont()->setBold(true)->setSize(15)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('0F172A'));
-
-$sheet3->mergeCells('A3:K3');
-$sheet3->setCellValue('A3', "Hari, Tanggal: {$dayNameId}, {$formattedDateId}  |  Total Temuan Cacat: " . number_format($daySummary['total_ng']) . " pcs NG");
-$sheet3->getStyle('A3')->getFont()->setSize(10)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('475569'));
-$sheet3->getRowDimension(3)->setRowHeight(22);
-
-if ($daySummary['total_ng'] === 0) {
-    $sheet3->mergeCells('A5:K6');
-    $sheet3->setCellValue('A5', 'KUALITAS PRODUKSI PRIMA: Seluruh pemeriksaan pada tanggal ini tidak menemukan cacat mutu (0 pcs NG / All Clean).');
-    $sheet3->getStyle('A5')->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('166534'));
-    $sheet3->getStyle('A5:K6')->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('F0FDF4');
-    $sheet3->getStyle('A5:K6')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER)->setVertical(Alignment::VERTICAL_CENTER);
-    $sheet3->getStyle('A5:K6')->applyFromArray($borderThin);
-} else {
-    $s3Row = 5;
-
-    // ── Bagian 1: Peringkat Jenis Defect (Top Defect Types) ───────────────
-    $sec1Start = $s3Row;
-    $sheet3->mergeCells("A{$s3Row}:D{$s3Row}");
-    $sheet3->setCellValue("A{$s3Row}", "1. PERINGKAT JENIS DEFECT (TOP DEFECT TYPES)");
-    $sheet3->getStyle("A{$s3Row}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFFFFF'));
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DC2626');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER)->setIndent(1);
-    $sheet3->getRowDimension($s3Row)->setRowHeight(24);
-    $s3Row++;
-
-    $sheet3->setCellValue("A{$s3Row}", "No");
-    $sheet3->setCellValue("B{$s3Row}", "Jenis Cacat (Defect Name)");
-    $sheet3->setCellValue("C{$s3Row}", "Kuantitas (pcs)");
-    $sheet3->setCellValue("D{$s3Row}", "Persentase (%)");
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFont()->setBold(true)->setSize(9)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('991B1B'));
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('FEE2E2');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("C{$s3Row}:D{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->applyFromArray($borderThin);
-    $s3Row++;
-
-    $chartStartDefectRow = $s3Row;
-    $totalDefectQty = (int)array_sum(array_column($dailyDefectRows, 'total_qty'));
-    $totalDefectDiv = max(1, $totalDefectQty);
-    $dIdx = 1;
-    foreach ($dailyDefectRows as $dRow) {
-        $pct = round(($dRow['total_qty'] / $totalDefectDiv) * 100, 1);
-        $sheet3->setCellValue("A{$s3Row}", $dIdx++);
-        $sheet3->setCellValue("B{$s3Row}", $dRow['defect_name']);
-        $sheet3->setCellValue("C{$s3Row}", (int)$dRow['total_qty']);
-        $sheet3->setCellValue("D{$s3Row}", $pct . "%");
-
-        $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-        $sheet3->getStyle("B{$s3Row}")->getFont()->setBold(true);
-        $sheet3->getStyle("C{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("C{$s3Row}")->getNumberFormat()->setFormatCode('#,##0');
-        $sheet3->getStyle("D{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->applyFromArray($borderThin);
-        $sheet3->getRowDimension($s3Row)->setRowHeight(19);
-        $s3Row++;
-    }
-    $chartEndDefectRow = $s3Row - 1;
-
-    // Native Excel Pie Chart untuk Top Defect Types
-    if (!empty($dailyDefectRows) && $chartEndDefectRow >= $chartStartDefectRow) {
-        $dataSeriesLabels1 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$C\$" . ($sec1Start + 1), null, 1),
-        ];
-        $xAxisTickValues1 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$B\${$chartStartDefectRow}:\$B\${$chartEndDefectRow}", null, count($dailyDefectRows)),
-        ];
-        $dataSeriesValues1 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Distribusi Cacat Mutu'!\$C\${$chartStartDefectRow}:\$C\${$chartEndDefectRow}", null, count($dailyDefectRows)),
-        ];
-
-        $series1 = new DataSeries(
-            DataSeries::TYPE_PIECHART,
-            null,
-            range(0, count($dataSeriesValues1) - 1),
-            $dataSeriesLabels1,
-            $xAxisTickValues1,
-            $dataSeriesValues1
-        );
-
-        $plotArea1 = new PlotArea(null, [$series1]);
-        $legend1 = new Legend(Legend::POSITION_RIGHT, null, false);
-        $title1 = new Title('Proporsi Jenis Cacat (Top Defect Types)');
-
-        $chart1 = new Chart(
-            'chart_top_defects',
-            $title1,
-            $legend1,
-            $plotArea1,
-            true,
-            DataSeries::EMPTY_AS_GAP
-        );
-
-        $chart1EndRow = $sec1Start + 13;
-        $chart1->setTopLeftPosition("F{$sec1Start}");
-        $chart1->setBottomRightPosition("K{$chart1EndRow}");
-        $sheet3->addChart($chart1);
-
-        $s3Row = max($chartEndDefectRow, $chart1EndRow) + 3;
-    } else {
-        $s3Row += 2;
-    }
-
-    // ── Bagian 2: Peringkat Model Terdampak (Top Models) ───────────────────
-    $sec2Start = $s3Row;
-    $sheet3->mergeCells("A{$s3Row}:D{$s3Row}");
-    $sheet3->setCellValue("A{$s3Row}", "2. PERINGKAT MODEL TERDAMPAK (TOP MODELS)");
-    $sheet3->getStyle("A{$s3Row}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFFFFF'));
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('2563EB');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER)->setIndent(1);
-    $sheet3->getRowDimension($s3Row)->setRowHeight(24);
-    $s3Row++;
-
-    $sheet3->setCellValue("A{$s3Row}", "No");
-    $sheet3->setCellValue("B{$s3Row}", "Nama Model");
-    $sheet3->setCellValue("C{$s3Row}", "Kuantitas Cacat (pcs)");
-    $sheet3->setCellValue("D{$s3Row}", "Persentase (%)");
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFont()->setBold(true)->setSize(9)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('1E40AF'));
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('DBEAFE');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("C{$s3Row}:D{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->applyFromArray($borderThin);
-    $s3Row++;
-
-    $chartStartModelRow = $s3Row;
-    $totalModelQty = (int)array_sum(array_column($dailyModelRows, 'total_qty'));
-    $totalModelDiv = max(1, $totalModelQty);
-    $mIdx = 1;
-    foreach ($dailyModelRows as $mRow) {
-        $pct = round(($mRow['total_qty'] / $totalModelDiv) * 100, 1);
-        $sheet3->setCellValue("A{$s3Row}", $mIdx++);
-        $sheet3->setCellValue("B{$s3Row}", $mRow['model_name']);
-        $sheet3->setCellValue("C{$s3Row}", (int)$mRow['total_qty']);
-        $sheet3->setCellValue("D{$s3Row}", $pct . "%");
-
-        $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-        $sheet3->getStyle("B{$s3Row}")->getFont()->setBold(true);
-        $sheet3->getStyle("C{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("C{$s3Row}")->getNumberFormat()->setFormatCode('#,##0');
-        $sheet3->getStyle("D{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("A{$s3Row}:D{$s3Row}")->applyFromArray($borderThin);
-        $sheet3->getRowDimension($s3Row)->setRowHeight(19);
-        $s3Row++;
-    }
-    $chartEndModelRow = $s3Row - 1;
-
-    // Native Excel Pie Chart untuk Top Models
-    if (!empty($dailyModelRows) && $chartEndModelRow >= $chartStartModelRow) {
-        $dataSeriesLabels2 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$C\$" . ($sec2Start + 1), null, 1),
-        ];
-        $xAxisTickValues2 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$B\${$chartStartModelRow}:\$B\${$chartEndModelRow}", null, count($dailyModelRows)),
-        ];
-        $dataSeriesValues2 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Distribusi Cacat Mutu'!\$C\${$chartStartModelRow}:\$C\${$chartEndModelRow}", null, count($dailyModelRows)),
-        ];
-
-        $series2 = new DataSeries(
-            DataSeries::TYPE_PIECHART,
-            null,
-            range(0, count($dataSeriesValues2) - 1),
-            $dataSeriesLabels2,
-            $xAxisTickValues2,
-            $dataSeriesValues2
-        );
-
-        $plotArea2 = new PlotArea(null, [$series2]);
-        $legend2 = new Legend(Legend::POSITION_RIGHT, null, false);
-        $title2 = new Title('Proporsi Model Terdampak (Top Models)');
-
-        $chart2 = new Chart(
-            'chart_top_models',
-            $title2,
-            $legend2,
-            $plotArea2,
-            true,
-            DataSeries::EMPTY_AS_GAP
-        );
-
-        $chart2EndRow = $sec2Start + 13;
-        $chart2->setTopLeftPosition("F{$sec2Start}");
-        $chart2->setBottomRightPosition("K{$chart2EndRow}");
-        $sheet3->addChart($chart2);
-
-        $s3Row = max($chartEndModelRow, $chart2EndRow) + 3;
-    } else {
-        $s3Row += 2;
-    }
-
-    // ── Bagian 3: Peringkat Part Terdampak (Top Parts) ─────────────────────
-    $sec3Start = $s3Row;
-    $sheet3->mergeCells("A{$s3Row}:E{$s3Row}");
-    $sheet3->setCellValue("A{$s3Row}", "3. PERINGKAT PART TERDAMPAK (TOP PARTS)");
-    $sheet3->getStyle("A{$s3Row}")->getFont()->setBold(true)->setSize(11)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('FFFFFF'));
-    $sheet3->getStyle("A{$s3Row}:E{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('059669');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setVertical(Alignment::VERTICAL_CENTER)->setIndent(1);
-    $sheet3->getRowDimension($s3Row)->setRowHeight(24);
-    $s3Row++;
-
-    $sheet3->setCellValue("A{$s3Row}", "No");
-    $sheet3->setCellValue("B{$s3Row}", "Kode Part");
-    $sheet3->setCellValue("C{$s3Row}", "Nama Part");
-    $sheet3->setCellValue("D{$s3Row}", "Kuantitas Cacat (pcs)");
-    $sheet3->setCellValue("E{$s3Row}", "Persentase (%)");
-    $sheet3->getStyle("A{$s3Row}:E{$s3Row}")->getFont()->setBold(true)->setSize(9)->setColor(new \PhpOffice\PhpSpreadsheet\Style\Color('065F46'));
-    $sheet3->getStyle("A{$s3Row}:E{$s3Row}")->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('D1FAE5');
-    $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("D{$s3Row}:E{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-    $sheet3->getStyle("A{$s3Row}:E{$s3Row}")->applyFromArray($borderThin);
-    $s3Row++;
-
-    $chartStartPartRow = $s3Row;
-    $totalPartQty = (int)array_sum(array_column($dailyPartRows, 'total_qty'));
-    $totalPartDiv = max(1, $totalPartQty);
-    $pIdx = 1;
-    foreach ($dailyPartRows as $pRow) {
-        $pct = round(($pRow['total_qty'] / $totalPartDiv) * 100, 1);
-        $sheet3->setCellValue("A{$s3Row}", $pIdx++);
-        $sheet3->setCellValue("B{$s3Row}", $pRow['part_code']);
-        $sheet3->setCellValue("C{$s3Row}", $pRow['part_name']);
-        $sheet3->setCellValue("D{$s3Row}", (int)$pRow['total_qty']);
-        $sheet3->setCellValue("E{$s3Row}", $pct . "%");
-
-        $sheet3->getStyle("A{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
-        $sheet3->getStyle("B{$s3Row}")->getFont()->setBold(true);
-        $sheet3->getStyle("D{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("D{$s3Row}")->getNumberFormat()->setFormatCode('#,##0');
-        $sheet3->getStyle("E{$s3Row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
-        $sheet3->getStyle("A{$s3Row}:E{$s3Row}")->applyFromArray($borderThin);
-        $sheet3->getRowDimension($s3Row)->setRowHeight(19);
-        $s3Row++;
-    }
-    $chartEndPartRow = $s3Row - 1;
-
-    // Native Excel Pie Chart untuk Top Parts
-    if (!empty($dailyPartRows) && $chartEndPartRow >= $chartStartPartRow) {
-        $dataSeriesLabels3 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$D\$" . ($sec3Start + 1), null, 1),
-        ];
-        $xAxisTickValues3 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Distribusi Cacat Mutu'!\$C\${$chartStartPartRow}:\$C\${$chartEndPartRow}", null, count($dailyPartRows)),
-        ];
-        $dataSeriesValues3 = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Distribusi Cacat Mutu'!\$D\${$chartStartPartRow}:\$D\${$chartEndPartRow}", null, count($dailyPartRows)),
-        ];
-
-        $series3 = new DataSeries(
-            DataSeries::TYPE_PIECHART,
-            null,
-            range(0, count($dataSeriesValues3) - 1),
-            $dataSeriesLabels3,
-            $xAxisTickValues3,
-            $dataSeriesValues3
-        );
-
-        $plotArea3 = new PlotArea(null, [$series3]);
-        $legend3 = new Legend(Legend::POSITION_RIGHT, null, false);
-        $title3 = new Title('Proporsi Part Terdampak (Top Parts)');
-
-        $chart3 = new Chart(
-            'chart_top_parts',
-            $title3,
-            $legend3,
-            $plotArea3,
-            true,
-            DataSeries::EMPTY_AS_GAP
-        );
-
-        $chart3EndRow = $sec3Start + 13;
-        $chart3->setTopLeftPosition("G{$sec3Start}");
-        $chart3->setBottomRightPosition("L{$chart3EndRow}");
-        $sheet3->addChart($chart3);
-
-        $s3Row = max($chartEndPartRow, $chart3EndRow) + 3;
-    } else {
-        $s3Row += 2;
-    }
-}
-
-// Column dimensions Sheet 3
-$sheet3->getColumnDimension('A')->setWidth(7);
-$sheet3->getColumnDimension('B')->setWidth(26);
-$sheet3->getColumnDimension('C')->setWidth(30);
-$sheet3->getColumnDimension('D')->setWidth(22);
-$sheet3->getColumnDimension('E')->setWidth(18);
-$sheet3->getColumnDimension('F')->setWidth(16);
-$sheet3->getColumnDimension('G')->setWidth(16);
-$sheet3->getColumnDimension('H')->setWidth(16);
-$sheet3->getColumnDimension('I')->setWidth(16);
-$sheet3->getColumnDimension('J')->setWidth(16);
-$sheet3->getColumnDimension('K')->setWidth(16);
-$sheet3->getColumnDimension('L')->setWidth(16);
 
 // Set Sheet 1 as active default
 $spreadsheet->setActiveSheetIndex(0);

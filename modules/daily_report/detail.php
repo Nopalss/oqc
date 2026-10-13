@@ -149,6 +149,138 @@ if (!function_exists('getLotAqlFallback')) {
     }
 }
 
+// ── Helper: Render Non-Transparent Solid Status Badge for Lot/Label ──────────
+if (!function_exists('renderLotStatusBadge')) {
+    function renderLotStatusBadge($lot) {
+        $res = strtolower($lot['lot_result'] ?? '');
+        $st = strtolower($lot['lot_status'] ?? '');
+        $remUpper = strtoupper(($lot['remarks'] ?? '') . ' ' . ($lot['action_notes'] ?? '') . ' ' . ($lot['reinspection_notes'] ?? '') . ' ' . ($lot['status_label'] ?? '') . ' ' . ($lot['status_badge'] ?? ''));
+
+        $isInitial = !empty($lot['is_initial_attempt']) 
+            || (($lot['attempt_type'] ?? '') === 'initial')
+            || (strpos($remUpper, 'AWAL') !== false && strpos($remUpper, 'RE-INSPEKSI') === false);
+
+        $isReinspect = !empty($lot['is_reinspected_attempt']) 
+            || !empty($lot['is_reinspected_lot']) 
+            || !empty($lot['is_reinspection']) 
+            || !empty($lot['has_reinspection_log'])
+            || !empty($lot['has_subst_log'])
+            || !empty($lot['has_sorted_ng'])
+            || !empty($lot['has_prev_rejected'])
+            || (($lot['attempt_type'] ?? '') === 'reinspection') 
+            || (!empty($lot['reinspection_type']) && $lot['reinspection_type'] !== '')
+            || (!empty($lot['parent_session_id']) && (int)$lot['parent_session_id'] > 0)
+            || (!empty($lot['status_label']) && strpos($lot['status_label'], 'RE-INSPEKSI') !== false)
+            || (!empty($lot['status_badge']) && strpos($lot['status_badge'], 'RE-INSPEKSI') !== false)
+            || strpos($remUpper, 'RE-INSPEKSI') !== false
+            || strpos($remUpper, 'REINSPEKSI') !== false
+            || strpos($remUpper, 'RE-INSPECT') !== false
+            || strpos($remUpper, 'REINSPECT') !== false
+            || strpos($remUpper, 'PENGGANTI') !== false
+            || strpos($remUpper, 'SORTIR') !== false
+            || $st === 'reinspected';
+
+        $currLotId = (int)($lot['lot_id'] ?? $lot['id'] ?? 0);
+        $currSessId = (int)($lot['inspection_session_id'] ?? 0);
+
+        // Fallback: Cek apakah lot (part + lot_no + ref_no) ini memiliki catatan NG/Rejected terdahulu di database
+        if (!$isReinspect && !empty($lot['lot_number']) && $currLotId > 0 && $currSessId > 0) {
+            static $prevRejectedCache = [];
+            $cacheKey = $currSessId . '_' . $currLotId;
+            if (!isset($prevRejectedCache[$cacheKey])) {
+                try {
+                    $pdoBadge = getDB();
+                    if ($pdoBadge) {
+                        $refStr = (string)($lot['ref_number'] ?? '');
+                        $currTime = (string)($lot['created_at'] ?? $lot['scanned_at'] ?? date('Y-m-d H:i:s'));
+                        $chkStmt = $pdoBadge->prepare("
+                            SELECT 1 
+                            FROM inspection_session_lots prev_isl
+                            JOIN inspection_sessions prev_s ON prev_s.id = prev_isl.inspection_session_id
+                            JOIN inspection_sessions curr_s ON curr_s.id = :curr_sid
+                            WHERE prev_isl.lot_number = :lot_num
+                              AND (
+                                  (:ref_num1 != '' AND prev_isl.ref_number = :ref_num2)
+                                  OR (:ref_num3 = '' AND (prev_isl.ref_number IS NULL OR prev_isl.ref_number = ''))
+                              )
+                              AND (
+                                  (prev_s.part_id IS NOT NULL AND curr_s.part_id IS NOT NULL AND prev_s.part_id = curr_s.part_id)
+                                  OR (prev_s.kanban_item_id IS NOT NULL AND curr_s.kanban_item_id IS NOT NULL AND prev_s.kanban_item_id = curr_s.kanban_item_id)
+                                  OR (prev_s.part_id IS NULL AND prev_s.kanban_item_id IS NULL)
+                              )
+                              AND prev_isl.id != :curr_lid
+                              AND prev_isl.created_at < :curr_created
+                              AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
+                            LIMIT 1
+                        ");
+                        $chkStmt->execute([
+                            ':curr_sid'     => $currSessId,
+                            ':lot_num'      => (string)$lot['lot_number'],
+                            ':ref_num1'     => $refStr,
+                            ':ref_num2'     => $refStr,
+                            ':ref_num3'     => $refStr,
+                            ':curr_lid'     => $currLotId,
+                            ':curr_created' => $currTime
+                        ]);
+                        $prevRejectedCache[$cacheKey] = (bool)$chkStmt->fetchColumn();
+                    } else {
+                        $prevRejectedCache[$cacheKey] = false;
+                    }
+                } catch (Exception $e) {
+                    $prevRejectedCache[$cacheKey] = false;
+                }
+            }
+            if (!empty($prevRejectedCache[$cacheKey])) {
+                $isReinspect = true;
+            }
+        }
+
+        $isKanban = (($lot['inspection_type'] ?? '') === 'kanban');
+        $isSs = !$isKanban && (!empty($lot['is_safety_stock']) || (($lot['inspection_type'] ?? '') === 'safety_stock') || $res === 'skipped');
+
+        // 1. Initial Attempt check (First NG before sort/reinspect)
+        if ($isInitial) {
+            return '<span style="background-color: #dc2626; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> REJECTED (AWAL)</span>';
+        }
+
+        // 2. Rejected check (QUALITY RESULT IS REJECTED)
+        $isRejected = ($res === 'rejected') 
+            || ($st === 'rejected') 
+            || ($st === 'replaced') 
+            || (($lot['status_code'] ?? '') === 'rejected')
+            || ((int)($lot['total_ng'] ?? 0) > 0 && $res !== 'passed' && $st !== 'reinspected')
+            || (!empty($lot['defects']) && $res !== 'passed' && $st !== 'reinspected');
+
+        if ($isRejected) {
+            if ($isReinspect) {
+                return '<span style="background-color: #dc2626; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> REJECTED (RE-INSPEKSI)</span>';
+            }
+            return '<span style="background-color: #dc2626; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(220, 38, 38, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> REJECTED</span>';
+        }
+
+        // 3. Reinspection Passed check
+        if ($isReinspect) {
+            if ($res === 'passed' || ($lot['status_code'] ?? '') === 'passed' || $st === 'passed' || $st === 'reinspected') {
+                return '<span style="background-color: #16a34a; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(22, 163, 74, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"/></svg> PASSED (RE-INSPEKSI)</span>';
+            }
+            return '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(217, 119, 6, 0.3); text-transform: uppercase; white-space: nowrap;">BERJALAN</span>';
+        }
+
+        // 4. Safety Stock Passed check
+        if ($isSs && ($res === 'passed' || $res === 'skipped' || empty($res))) {
+            return '<span style="background-color: #7c3aed; color: #ffffff; font-weight: 800; font-size: 9.5px; padding: 2.5px 8.5px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(124, 58, 237, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"/></svg> PASSED (SS)</span>';
+        }
+
+        // 5. Standard Passed check
+        if ($res === 'passed' || ($lot['status_code'] ?? '') === 'passed' || $st === 'passed') {
+            return '<span style="background-color: #16a34a; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(22, 163, 74, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"/></svg> PASSED</span>';
+        }
+
+        // 6. In Progress
+        return '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(217, 119, 6, 0.3); text-transform: uppercase; white-space: nowrap;">BERJALAN</span>';
+    }
+}
+
 // ── 1. Data Structures Initialization ──────────────────────────────────────
 $kanbanGroups   = []; // Grouped by Kanban Item
 $ssGroups       = []; // Grouped by Safety Stock (Part + Lot)
@@ -220,12 +352,14 @@ if ($pdo) {
                 did.pic AS did_pic,
                 -- Master Part details
                 COALESCE(did.part_code, ki.item_code, mp.part_code, '-') AS part_code,
-                COALESCE(did.part_name, ki.item_description, mp.part_name, '-') AS part_name
+                COALESCE(did.part_name, ki.item_description, mp.part_name, '-') AS part_name,
+                COALESCE(mm.name, mp.model, '-') AS model_name
             FROM inspection_sessions ss
             LEFT JOIN `lines` l ON l.id = ss.line_id
             LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
             LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
             LEFT JOIN master_parts mp ON (mp.id = ss.part_id OR UPPER(mp.part_code) = UPPER(COALESCE(did.part_code, ki.item_code)))
+            LEFT JOIN master_models mm ON mm.id = mp.model_id
             LEFT JOIN users u ON u.id = ss.inspector_id
             LEFT JOIN users u_app ON u_app.id = ss.approved_by
             WHERE (DATE(ss.started_at) = :tgl OR EXISTS (
@@ -258,11 +392,30 @@ if ($pdo) {
                     isl.lot_status,
                     isl.remarks,
                     isl.created_at AS scanned_at,
+                    isl.closed_at AS closed_at,
                     isl.action_noted_at,
-                    isl.replaced_by_lot_id
+                    isl.replaced_by_lot_id,
+                    (SELECT COUNT(*) FROM lot_substitution_log sub 
+                     WHERE sub.ng_session_lot_id = isl.id 
+                        OR sub.replacement_session_lot_id = isl.id) AS has_subst_log,
+                    (SELECT COUNT(*) FROM inspection_ng_records ngr 
+                     WHERE ngr.session_lot_id = isl.id 
+                       AND ngr.is_sorted = 1) AS has_sorted_ng,
+                    (SELECT COUNT(*) 
+                     FROM inspection_session_lots prev_isl
+                     JOIN inspection_sessions prev_s ON prev_s.id = prev_isl.inspection_session_id
+                     WHERE prev_isl.lot_number = isl.lot_number
+                       AND (
+                           (isl.ref_number IS NOT NULL AND prev_isl.ref_number = isl.ref_number)
+                           OR (isl.ref_number IS NULL)
+                       )
+                       AND prev_isl.id != isl.id
+                       AND prev_isl.created_at < isl.created_at
+                       AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
+                    ) AS has_prev_rejected
                 FROM inspection_session_lots isl
                 WHERE isl.inspection_session_id IN ({$inSessIds})
-                  AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE 'Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE 'Alokasi Safety Stock%'))
+                  AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE 'Sisa Kelebihan Kanban%'))
                 ORDER BY isl.id ASC
             ");
             $rawLotsList = [];
@@ -270,14 +423,20 @@ if ($pdo) {
                 $sId = (int)$lRow['inspection_session_id'];
                 $lRow['defects'] = [];
 
+                $isSafetyStock = ($lRow['lot_result'] === 'skipped') || (empty($lRow['sample_size']) && isset($lRow['remarks']) && strpos($lRow['remarks'], 'Alokasi Safety Stock') !== false);
                 $lotQty = (int)($lRow['qty'] ?? 0);
                 $lSampleSize = (int)($lRow['sample_size'] ?? 0);
                 $lRejectNum = isset($lRow['reject_number']) ? (int)$lRow['reject_number'] : 0;
-                if ($lSampleSize <= 0 || $lRejectNum <= 0) {
+                
+                if ($isSafetyStock) {
+                    $lSampleSize = 0;
+                    $lRejectNum = 0;
+                } elseif ($lSampleSize <= 0 || $lRejectNum <= 0) {
                     $aqlFb = getLotAqlFallback($lotQty, $pdo);
                     if ($lSampleSize <= 0) $lSampleSize = $aqlFb['sample_size'];
                     if ($lRejectNum <= 0) $lRejectNum = $aqlFb['reject_number'];
                 }
+                $lRow['is_safety_stock'] = $isSafetyStock;
                 $lRow['computed_sample_size'] = $lSampleSize;
                 $lRow['computed_reject_number'] = $lRejectNum;
 
@@ -301,11 +460,17 @@ if ($pdo) {
                 FROM lot_substitution_log sub
                 LEFT JOIN users u ON u.id = sub.actioned_by
                 WHERE sub.original_session_id IN ({$inSessIds})
+                   OR sub.reinspection_session_id IN ({$inSessIds})
                 ORDER BY sub.id ASC
             ");
             if ($stmtSubst) {
                 while ($sub = $stmtSubst->fetch(PDO::FETCH_ASSOC)) {
-                    $substByLot[(int)$sub['ng_session_lot_id']][] = $sub;
+                    if (!empty($sub['ng_session_lot_id'])) {
+                        $substByLot[(int)$sub['ng_session_lot_id']][] = $sub;
+                    }
+                    if (!empty($sub['replacement_session_lot_id'])) {
+                        $substByLot[(int)$sub['replacement_session_lot_id']][] = $sub;
+                    }
                 }
             }
 
@@ -331,7 +496,7 @@ if ($pdo) {
                 LEFT JOIN inspection_sessions ss ON ngr.inspection_session_id = ss.id
                 LEFT JOIN users u ON u.id = ss.inspector_id
                 WHERE ngr.inspection_session_id IN ({$inSessIds})
-                  AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                  AND ((ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0) OR ngr.is_sorted = 1)
                 ORDER BY ngr.id ASC
             ");
             foreach ($stmtNg->fetchAll(PDO::FETCH_ASSOC) as $ngRow) {
@@ -380,40 +545,33 @@ if ($pdo) {
                     $lotDefects = $lRow['defects'] ?? [];
 
                     if ($hasSubst) {
-                        $sortLog = null;
+                        $sortLogs = [];
                         foreach ($substByLot[$lotId] as $log) {
-                            if ($log['action_type'] === 'sort_reinspect') {
-                                $sortLog = $log;
-                                break;
+                            if (($log['action_type'] ?? '') === 'sort_reinspect') {
+                                $sortLogs[] = $log;
                             }
                         }
 
-                        if ($sortLog) {
-                            // Separate defects between Initial Attempt and Reinspection Attempt
-                            $initialDefects = [];
-                            $reinspectDefects = [];
+                        // Sort logs chronologically by action_at / created_at ASC
+                        usort($sortLogs, function($a, $b) {
+                            return strtotime($a['action_at'] ?: $a['created_at']) <=> strtotime($b['action_at'] ?: $b['created_at']);
+                        });
 
-                            foreach ($lotDefects as $df) {
+                        if (!empty($sortLogs)) {
+                            $numLogs = count($sortLogs);
+                            $firstLogTime = $sortLogs[0]['action_at'] ?: $sortLogs[0]['created_at'];
+
+                            // Row 1: Initial Attempt (Always Rejected/NG)
+                            $initialDefects = array_values(array_filter($lotDefects, function($df) use ($firstLogTime) {
+                                $dfTime = $df['defect_created_at'] ?? ($df['created_at'] ?? null);
                                 if (!empty($df['is_sorted'])) {
-                                    $initialDefects[] = $df;
-                                } else {
-                                    if (!empty($sortLog['action_at']) && !empty($df['defect_created_at']) && $df['defect_created_at'] < $sortLog['action_at']) {
-                                        $initialDefects[] = $df;
-                                    } else {
-                                        $reinspectDefects[] = $df;
+                                    if ($firstLogTime && $dfTime && $dfTime >= $firstLogTime) {
+                                        return false;
                                     }
+                                    return true;
                                 }
-                            }
-
-                            if (empty($initialDefects) && !empty($lotDefects)) {
-                                $actualRes = strtolower($lRow['lot_result'] ?? '');
-                                if ($actualRes === 'passed') {
-                                    $initialDefects = $lotDefects;
-                                    $reinspectDefects = [];
-                                } else {
-                                    $initialDefects = $lotDefects;
-                                }
-                            }
+                                return (!$firstLogTime || ($dfTime && $dfTime < $firstLogTime));
+                            }));
 
                             $initialNgCount = 0;
                             foreach ($initialDefects as $id) {
@@ -423,18 +581,6 @@ if ($pdo) {
                                 $initialNgCount = count($initialDefects);
                             }
 
-                            $reinspectNgCount = 0;
-                            foreach ($reinspectDefects as $rd) {
-                                $reinspectNgCount += (int)($rd['qty_ng'] ?? 1);
-                            }
-                            if ($reinspectNgCount === 0 && !empty($reinspectDefects)) {
-                                $reinspectNgCount = count($reinspectDefects);
-                            }
-
-                            $actualLotResult = strtolower($lRow['lot_result'] ?? '');
-                            $rejectLimit = (int)($lRow['computed_reject_number'] ?? 1);
-
-                            // Row 1: Initial Attempt (Always Rejected/NG)
                             $attempt1 = $lRow;
                             $attempt1['attempt_type'] = 'initial';
                             $attempt1['attempt_label'] = 'Inspeksi Awal';
@@ -445,65 +591,145 @@ if ($pdo) {
                             $attempt1['status_label'] = 'REJECTED';
                             $attempt1['is_initial_attempt'] = true;
                             $attempt1['has_subsequent_reinspect'] = true;
-
-                            // Row 2: Reinspection Attempt (Dynamic: Passed or Rejected or In Progress)
-                            $attempt2 = $lRow;
-                            $attempt2['attempt_type'] = 'reinspection';
-                            $attempt2['attempt_label'] = 'Re-inspeksi';
-                            $attempt2['scanned_at'] = $sortLog['action_at'] ?: ($lRow['action_noted_at'] ?: $lRow['scanned_at']);
-                            $attempt2['is_reinspected_attempt'] = true;
-                            $attempt2['action_type'] = 'sort_reinspect';
-                            $attempt2['actioned_by_name'] = $sortLog['actioned_by_name'];
-                            $attempt2['action_at'] = $sortLog['action_at'];
-
-                            if ($actualLotResult === 'rejected' || ($reinspectNgCount >= $rejectLimit && $rejectLimit > 0)) {
-                                $attempt2['lot_result'] = 'rejected';
-                                $attempt2['defects'] = $reinspectDefects;
-                                $attempt2['ng_count'] = $reinspectNgCount;
-                                $attempt2['status_badge'] = 'REJECTED (Re-inspeksi)';
-                                $attempt2['status_label'] = 'REJECTED (RE-INSPEKSI)';
-                                $attempt2['action_notes'] = $sortLog['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
-                            } elseif ($actualLotResult === 'passed') {
-                                $attempt2['lot_result'] = 'passed';
-                                $attempt2['defects'] = [];
-                                $attempt2['ng_count'] = 0;
-                                $attempt2['status_badge'] = 'PASSED (Re-inspeksi)';
-                                $attempt2['status_label'] = 'PASSED (RE-INSPEKSI)';
-                                $attempt2['action_notes'] = $sortLog['notes'] ?: 'Part NG disortir dan ditukar dengan part bagus -> Dilakukan re-inspeksi sampel fisik dan lolos uji.';
-                            } else {
-                                $attempt2['lot_result'] = 'in_progress';
-                                $attempt2['defects'] = $reinspectDefects;
-                                $attempt2['ng_count'] = $reinspectNgCount;
-                                $attempt2['status_badge'] = 'IN PROGRESS (Re-inspeksi)';
-                                $attempt2['status_label'] = 'IN PROGRESS (RE-INSPEKSI)';
-                                $attempt2['action_notes'] = $sortLog['notes'] ?: 'Dalam proses re-inspeksi fisik.';
-                            }
-
                             $allLotsMap[$sId][] = $attempt1;
-                            $allLotsMap[$sId][] = $attempt2;
+
+                            // Subsequent Re-inspection Attempts (Ronde 2, Ronde 3, dst.)
+                            for ($k = 0; $k < $numLogs; $k++) {
+                                $log = $sortLogs[$k];
+                                $startTime = $log['action_at'] ?: $log['created_at'];
+                                $endTime = isset($sortLogs[$k + 1]) ? ($sortLogs[$k + 1]['action_at'] ?: $sortLogs[$k + 1]['created_at']) : null;
+                                $isLatest = ($k === $numLogs - 1);
+                                $roundNum = $k + 2;
+
+                                $roundDefects = array_values(array_filter($lotDefects, function($df) use ($startTime, $endTime, $firstLogTime) {
+                                    $dfTime = $df['defect_created_at'] ?? ($df['created_at'] ?? null);
+                                    if (!empty($df['is_sorted']) && $dfTime && $dfTime < $firstLogTime) {
+                                        return false;
+                                    }
+                                    if ($startTime && $dfTime && $dfTime < $startTime) return false;
+                                    if ($endTime && $dfTime && $dfTime >= $endTime) return false;
+                                    return true;
+                                }));
+
+                                $roundNgCount = 0;
+                                foreach ($roundDefects as $rd) {
+                                    $roundNgCount += (int)($rd['qty_ng'] ?? 1);
+                                }
+                                if ($roundNgCount === 0 && !empty($roundDefects)) {
+                                    $roundNgCount = count($roundDefects);
+                                }
+
+                                $actualLotResult = strtolower($lRow['lot_result'] ?? '');
+                                $rejectLimit = (int)($lRow['computed_reject_number'] ?? 1);
+
+                                $att = $lRow;
+                                $att['attempt_type'] = 'reinspection';
+                                $att['attempt_label'] = "Re-inspeksi (Ronde {$roundNum})";
+                                $att['scanned_at'] = $startTime ?: ($lRow['action_noted_at'] ?: $lRow['scanned_at']);
+                                $att['is_reinspected_attempt'] = true;
+                                $att['is_reinspected_lot'] = true;
+                                $att['action_type'] = $log['action_type'];
+                                $att['actioned_by_name'] = $log['actioned_by_name'];
+                                $att['action_at'] = $startTime;
+                                $att['defects'] = $roundDefects;
+                                $att['ng_count'] = $roundNgCount;
+
+                                if ($isLatest) {
+                                    if ($actualLotResult === 'passed') {
+                                        $att['lot_result'] = 'passed';
+                                        $att['status_badge'] = 'PASSED (Re-inspeksi)';
+                                        $att['status_label'] = 'PASSED (RE-INSPEKSI)';
+                                        $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan ditukar dengan part bagus -> Dilakukan re-inspeksi sampel fisik dan lolos uji.';
+                                    } elseif ($actualLotResult === 'rejected' || ($roundNgCount >= $rejectLimit && $rejectLimit > 0)) {
+                                        $att['lot_result'] = 'rejected';
+                                        $att['status_badge'] = 'REJECTED (Re-inspeksi)';
+                                        $att['status_label'] = 'REJECTED (RE-INSPEKSI)';
+                                        $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
+                                    } else {
+                                        $att['lot_result'] = 'in_progress';
+                                        $att['status_badge'] = 'IN PROGRESS (Re-inspeksi)';
+                                        $att['status_label'] = 'IN PROGRESS (RE-INSPEKSI)';
+                                        $att['action_notes'] = $log['notes'] ?: 'Dalam proses re-inspeksi fisik.';
+                                    }
+                                } else {
+                                    // Earlier re-inspection attempt that failed
+                                    $att['lot_result'] = 'rejected';
+                                    $att['status_badge'] = 'REJECTED (Re-inspeksi)';
+                                    $att['status_label'] = 'REJECTED (RE-INSPEKSI)';
+                                    $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan diuji ulang fisik, namun tetap ditemukan cacat/NG.';
+                                }
+
+                                $allLotsMap[$sId][] = $att;
+                            }
                             continue;
                         }
+                    }
+
+                    // Check if safety stock
+                    if (!empty($lRow['is_safety_stock'])) {
+                        $lRow['attempt_type'] = 'safety_stock';
+                        $lRow['status_badge'] = 'PASSED (SAFETY STOCK)';
+                        $lRow['lot_result'] = 'passed';
+                        $allLotsMap[$sId][] = $lRow;
+                        continue;
                     }
 
                     // Check if replaced
                     if ($lRow['lot_status'] === 'replaced') {
                         $lRow['attempt_type'] = 'standard';
                         $lRow['is_replaced'] = true;
-                        $lRow['status_badge'] = 'DIGANTIKAN';
+                        $lRow['status_badge'] = 'REJECTED';
                         $allLotsMap[$sId][] = $lRow;
                         continue;
                     }
 
                     if (isset($lRow['remarks']) && strpos($lRow['remarks'], 'Box Pengganti') !== false) {
-                        $lRow['attempt_type'] = 'standard';
+                        $lRow['attempt_type'] = 'reinspection';
                         $lRow['is_replacement_box'] = true;
-                        $lRow['status_badge'] = 'BOX PENGGANTI';
+                        $lRow['is_reinspected_lot'] = true;
+                        $lRow['status_badge'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'BOX PENGGANTI');
+                        $lRow['status_label'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'BOX PENGGANTI');
                         $allLotsMap[$sId][] = $lRow;
                         continue;
                     }
 
-                    // Normal lot
-                    $lRow['attempt_type'] = 'standard';
+                    // Check if session or lot is a re-inspection
+                    $sess = $sessions[$sId] ?? [];
+                    $hasSortedDefects = ((int)($lRow['has_sorted_ng'] ?? 0) > 0);
+                    if (!$hasSortedDefects && !empty($lotDefects)) {
+                        foreach ($lotDefects as $df) {
+                            if (!empty($df['is_sorted'])) {
+                                $hasSortedDefects = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    $isReinspectionSess = !empty($sess['is_reinspection']) 
+                        || !empty($sess['reinspection_type']) 
+                        || !empty($sess['parent_session_id']) 
+                        || !empty($lRow['is_reinspected_attempt']) 
+                        || !empty($lRow['is_reinspected_lot'])
+                        || !empty($hasSubst)
+                        || !empty($hasSortedDefects)
+                        || ((int)($lRow['has_subst_log'] ?? 0) > 0)
+                        || ((int)($lRow['has_sorted_ng'] ?? 0) > 0)
+                        || ((int)($lRow['has_prev_rejected'] ?? 0) > 0)
+                        || (strtolower($lRow['lot_status'] ?? '') === 'reinspected')
+                        || (isset($lRow['remarks']) && (stripos($lRow['remarks'], 're-inspeksi') !== false || stripos($lRow['remarks'], 'reinspeksi') !== false || stripos($lRow['remarks'], 'pengganti') !== false || stripos($lRow['remarks'], 'sortir') !== false))
+                        || (isset($sess['reinspection_notes']) && !empty($sess['reinspection_notes']))
+                        || (isset($sess['remarks']) && (stripos($sess['remarks'], 're-inspeksi') !== false || stripos($sess['remarks'], 'reinspeksi') !== false));
+
+                    if ($isReinspectionSess) {
+                        $lRow['attempt_type'] = 'reinspection';
+                        $lRow['is_reinspected_attempt'] = true;
+                        $lRow['is_reinspected_lot'] = true;
+                        $lRow['status_badge'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'IN PROGRESS (RE-INSPEKSI)');
+                        $lRow['status_label'] = ($lRow['lot_result'] === 'passed') ? 'PASSED (RE-INSPEKSI)' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED (RE-INSPEKSI)' : 'IN PROGRESS (RE-INSPEKSI)');
+                    } else {
+                        $lRow['attempt_type'] = 'standard';
+                        $lRow['status_badge'] = ($lRow['lot_result'] === 'passed') ? 'PASSED' : (($lRow['lot_result'] === 'rejected') ? 'REJECTED' : 'BERJALAN');
+                    }
                     $allLotsMap[$sId][] = $lRow;
                 }
             }
@@ -779,8 +1005,24 @@ if ($pdo) {
                         $hasInProgress = true;
                     } elseif ($sItem['session_status'] === 'rejected') {
                         $hasReject = true;
-                    } elseif ($sItem['session_status'] === 'passed') {
-                        $passedQty += (int)$sItem['computed_qty'];
+                    }
+
+                    // Akumulasi qty dari lot yang lolos di sesi ini (passed atau safety stock)
+                    $sLots = $sItem['lots'] ?? [];
+                    if (!empty($sLots)) {
+                        foreach ($sLots as $sl) {
+                            $lRes = strtolower($sl['lot_result'] ?? '');
+                            $lSt = strtolower($sl['lot_status'] ?? '');
+                            $lQty = (int)($sl['qty'] ?? 0);
+                            $isSsLot = !empty($sl['is_safety_stock']) || (isset($sl['remarks']) && strpos($sl['remarks'], 'Alokasi Safety Stock') !== false) || $lRes === 'skipped';
+                            if (empty($sl['is_initial_attempt']) && $lSt !== 'replaced' && ($lRes === 'passed' || $isSsLot)) {
+                                $passedQty += $lQty;
+                            }
+                        }
+                    } else {
+                        if ($sItem['session_status'] === 'passed') {
+                            $passedQty += (int)$sItem['computed_qty'];
+                        }
                     }
                 }
                 unset($sItem);
@@ -791,6 +1033,8 @@ if ($pdo) {
                 $latestSess = end($kb['sessions']);
                 if ($hasInProgress) {
                     $kb['final_status'] = 'in_progress';
+                } elseif ($kb['target_qty'] > 0 && $passedQty >= $kb['target_qty']) {
+                    $kb['final_status'] = 'passed';
                 } elseif ($latestSess['session_status'] === 'rejected') {
                     $kb['final_status'] = 'rejected';
                 } elseif ($kb['target_qty'] > 0 && $passedQty < $kb['target_qty']) {
@@ -853,6 +1097,126 @@ if ($pdo) {
                 }
                 $daySummary['first_pass_yield'] = round(($firstSessionPass / $totalFirstSessions) * 100, 1);
             }
+
+            // ── E. Build Flat Lot Rows List (Mirrors Sheet 1 Export Excel) ──
+            $flatLotRows = [];
+            foreach ($sessionTimeline as $sess) {
+                $sId = (int)$sess['session_id'];
+                $sessLots = $sess['lots'] ?? [];
+                $shiftName = getShiftName($sess['started_at']);
+
+                if (!empty($sessLots)) {
+                    foreach ($sessLots as $sl) {
+                        $refNo = trim($sl['ref_number'] ?? '');
+                        $remarks = trim($sl['remarks'] ?? '');
+
+                        // Filter hanya lot yang diinspeksi secara real / fisik (hanya skip yang bypassed skipped / virtual split)
+                        $isBypassedSkipped = (($sl['lot_result'] ?? '') === 'skipped');
+                        $isVirtualOrExcluded = stripos($remarks, 'Sisa Split') !== false
+                            || stripos($remarks, 'Sisa Kelebihan') !== false
+                            || $refNo === 'DIRECT-PASS' 
+                            || stripos($refNo, 'DIRECT-PASS') !== false 
+                            || stripos($remarks, 'Direct Close') !== false;
+
+                        if ($isBypassedSkipped || $isVirtualOrExcluded) {
+                            continue;
+                        }
+
+                        $defectParts = [];
+                        $totalNg = 0;
+                        if (!empty($sl['defects'])) {
+                            foreach ($sl['defects'] as $df) {
+                                $q = (int)($df['qty_ng'] ?? 1);
+                                $totalNg += $q;
+                                $defectParts[] = htmlspecialchars($df['defect_name'] ?? 'NG') . ' (' . $q . ' pcs)';
+                            }
+                        } else {
+                            $totalNg = (int)($sl['ng_count'] ?? 0);
+                        }
+                        $defectSummary = !empty($defectParts) ? implode(', ', $defectParts) : '-';
+
+                        $isSsSess = ($sess['inspection_type'] === 'safety_stock');
+                        $inspType = $isSsSess ? 'safety_stock' : ($sess['inspection_type'] ?: 'kanban');
+
+                        $flatLotRows[] = [
+                            'session_id'        => $sId,
+                            'inspection_type'   => $inspType,
+                            'kanban_no'         => $sess['kanban_no'] ?? '',
+                            'started_at'        => $sl['scanned_at'] ?? $sess['started_at'],
+                            'closed_at'         => $sl['closed_at'] ?? null,
+                            'action_noted_at'   => $sl['action_noted_at'] ?? null,
+                            'session_closed_at' => $sess['closed_at'] ?? null,
+                            'part_code'         => $sess['part_code'] ?: '-',
+                            'part_name'      => $sess['part_name'] ?: '-',
+                            'model_name'     => !empty($sess['model_name']) ? $sess['model_name'] : '-',
+                            'lot_number'     => $sl['lot_number'] ?: '-',
+                            'ref_number'     => $sl['ref_number'] ?: '-',
+                            'qty_lot'        => (int)($sl['qty'] ?? 0),
+                            'sample_size'    => (int)($sl['computed_sample_size'] ?? $sl['sample_size'] ?? 0),
+                            'reject_number'  => (int)($sl['computed_reject_number'] ?? 1),
+                            'total_ng'       => $totalNg,
+                            'defect_summary' => $defectSummary,
+                            'lot_raw'        => $sl,
+                            'shift_name'     => $shiftName,
+                            'inspector_name' => !empty($sl['actioned_by_name']) ? $sl['actioned_by_name'] : ($sess['inspector_name'] ?: 'Inspector')
+                        ];
+                    }
+                } else {
+                    if (!empty($sess['approval_notes']) && stripos($sess['approval_notes'], 'Direct Close') !== false) {
+                        continue;
+                    }
+
+                    $defectParts = [];
+                    $totalNg = 0;
+                    if (!empty($sess['ng_records'])) {
+                        foreach ($sess['ng_records'] as $df) {
+                            $q = (int)($df['qty_ng'] ?? 1);
+                            $totalNg += $q;
+                            $defectParts[] = htmlspecialchars($df['defect_name'] ?? 'NG') . ' (' . $q . ' pcs)';
+                        }
+                    } else {
+                        $totalNg = (int)($sess['ng_count'] ?? 0);
+                    }
+                    $defectSummary = !empty($defectParts) ? implode(', ', $defectParts) : '-';
+
+                    $dummyLot = [
+                        'lot_number'             => $sess['did_lot_number'] ?: '-',
+                        'ref_number'             => '-',
+                        'qty'                    => (int)($sess['total_scanned_qty'] ?? 0),
+                        'computed_sample_size'   => (int)($sess['sample_size'] ?? 0),
+                        'computed_reject_number' => (int)($sess['reject_number'] ?? 1),
+                        'lot_result'             => $sess['session_status'] ?? 'in_progress',
+                        'lot_status'             => 'ok',
+                        'scanned_at'             => $sess['started_at']
+                    ];
+
+                    $isSsSess = ($sess['inspection_type'] === 'safety_stock');
+                    $inspType = $isSsSess ? 'safety_stock' : ($sess['inspection_type'] ?: 'kanban');
+
+                    $flatLotRows[] = [
+                        'session_id'        => $sId,
+                        'inspection_type'   => $inspType,
+                        'kanban_no'         => $sess['kanban_no'] ?? '',
+                        'started_at'        => $sess['started_at'],
+                        'closed_at'         => $sess['closed_at'] ?? null,
+                        'action_noted_at'   => null,
+                        'session_closed_at' => $sess['closed_at'] ?? null,
+                        'part_code'         => $sess['part_code'] ?: '-',
+                        'part_name'      => $sess['part_name'] ?: '-',
+                        'model_name'     => !empty($sess['model_name']) ? $sess['model_name'] : '-',
+                        'lot_number'     => $sess['did_lot_number'] ?: '-',
+                        'ref_number'     => '-',
+                        'qty_lot'        => (int)($sess['total_scanned_qty'] ?? 0),
+                        'sample_size'    => (int)($sess['sample_size'] ?? 0),
+                        'reject_number'  => (int)($sess['reject_number'] ?? 1),
+                        'total_ng'       => $totalNg,
+                        'defect_summary' => $defectSummary,
+                        'lot_raw'        => $dummyLot,
+                        'shift_name'     => $shiftName,
+                        'inspector_name' => $sess['inspector_name'] ?: 'Inspector'
+                    ];
+                }
+            }
         }
 
     } catch (PDOException $e) {
@@ -878,11 +1242,139 @@ require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 ?>
 
-<div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300">
+<style>
+/* ── Lot Flat KPI Cards & Status Styles ── */
+.lot-kpi-card {
+    border-radius: 12px !important;
+    padding: 11px 14px !important;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.lot-kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.07) !important;
+}
+.lot-kpi-card.is-active {
+    transform: translateY(-2px);
+    opacity: 1 !important;
+}
+.lot-kpi-card.is-inactive {
+    opacity: 0.52 !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+/* Card Theme Accents */
+.lot-kpi-total {
+    background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%) !important;
+    border-color: #bae6fd !important;
+    border-left: 4.5px solid #0284c7 !important;
+}
+.lot-kpi-total.is-active {
+    box-shadow: 0 0 0 2px #0284c7, 0 6px 14px rgba(2, 132, 199, 0.25) !important;
+}
+
+.lot-kpi-passed {
+    background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%) !important;
+    border-color: #bbf7d0 !important;
+    border-left: 4.5px solid #16a34a !important;
+}
+.lot-kpi-passed.is-active {
+    box-shadow: 0 0 0 2px #16a34a, 0 6px 14px rgba(22, 163, 74, 0.25) !important;
+}
+
+.lot-kpi-rejected {
+    background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 100%) !important;
+    border-color: #fecdd3 !important;
+    border-left: 4.5px solid #dc2626 !important;
+}
+.lot-kpi-rejected.is-active {
+    box-shadow: 0 0 0 2px #dc2626, 0 6px 14px rgba(220, 38, 38, 0.25) !important;
+}
+
+.lot-kpi-progress {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%) !important;
+    border-color: #fde68a !important;
+    border-left: 4.5px solid #d97706 !important;
+}
+.lot-kpi-progress.is-active {
+    box-shadow: 0 0 0 2px #d97706, 0 6px 14px rgba(217, 119, 6, 0.25) !important;
+}
+
+.lot-kpi-sample {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
+    border-color: #e2e8f0 !important;
+    border-left: 4.5px solid #64748b !important;
+    cursor: default !important;
+}
+
+/* Number & Unit Typography */
+.lot-kpi-num {
+    font-size: 22px !important;
+    font-weight: 800 !important;
+    line-height: 1 !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+    display: inline-block;
+}
+.lot-kpi-unit {
+    font-size: 11px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    margin-left: 3px;
+    display: inline-block;
+}
+.lot-kpi-pill {
+    font-size: 10px !important;
+    font-weight: 800 !important;
+    padding: 2.5px 8px !important;
+    border-radius: 9999px !important;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1.2 !important;
+}
+
+/* ── Table Row Status Backgrounds (Passed, Rejected, In Progress) ── */
+.flat-row-passed > td {
+    background-color: #f0fdf4 !important;
+}
+.flat-row-passed:hover > td {
+    background-color: #dcfce7 !important;
+}
+.flat-row-passed > td:first-child {
+    border-left: 4.5px solid #16a34a !important;
+}
+
+.flat-row-rejected > td {
+    background-color: #fff1f2 !important;
+}
+.flat-row-rejected:hover > td {
+    background-color: #fee2e2 !important;
+}
+.flat-row-rejected > td:first-child {
+    border-left: 4.5px solid #dc2626 !important;
+}
+
+.flat-row-progress > td {
+    background-color: #fffbeb !important;
+}
+.flat-row-progress:hover > td {
+    background-color: #fef3c7 !important;
+}
+.flat-row-progress > td:first-child {
+    border-left: 4.5px solid #d97706 !important;
+}
+</style>
+
+<div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300 min-w-0 max-w-full overflow-x-hidden">
 
     <?php require_once __DIR__ . '/../../layouts/navbar.php'; ?>
 
-    <main class="flex-1 p-3 md:p-5 space-y-4">
+    <main class="flex-1 p-3 md:p-5 space-y-4 min-w-0 max-w-full">
 
         <?= render_flash() ?>
 
@@ -1194,6 +1686,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <?= count($sessionTimeline) ?> Sesi
                         </span>
                     </button>
+
+                    <button type="button" id="btn-view-lot" onclick="switchReviewMode('lot')"
+                            style="padding: 7px 16px; font-size: 12px; font-weight: 800; border-radius: 9px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; transition: all 0.2s;"
+                            class="inactive-tab-btn text-slate-600 hover:text-slate-900 hover:bg-slate-200/70">
+                        <svg style="width: 15px; height: 15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                        Rincian Per Lot
+                        <span style="background: #e2e8f0; color: #475569; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
+                            <?= count($flatLotRows) ?> Lot
+                        </span>
+                    </button>
                 </div>
 
                 <!-- Search Input & Global Expand/Collapse -->
@@ -1468,12 +1972,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                         <th style="padding: 6px 10px; text-align: right; width: 85px;">Qty Box</th>
                                                                         <th style="padding: 6px 10px; text-align: center; width: 95px;">Sampel (pcs)</th>
                                                                         <th style="padding: 6px 10px; text-align: center; width: 75px;">NG</th>
+                                                                        <th style="padding: 6px 10px; text-align: center; min-width: 130px;">Status Lot</th>
                                                                         <th style="padding: 6px 10px; min-width: 100px;">Waktu Scan</th>
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
                                                                     <?php if (empty($sSub['lots'])): ?>
-                                                                        <tr><td colspan="7" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan box spesifik.</td></tr>
+                                                                        <tr><td colspan="8" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan box spesifik.</td></tr>
                                                                     <?php else: ?>
                                                                         <?php foreach ($sSub['lots'] as $lIdx => $lot): 
                                                                             $hasDefects = !empty($lot['defects']);
@@ -1500,10 +2005,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                                         <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
                                                                                             UJI AWAL (NG)
                                                                                         </span>
-                                                                                    <?php elseif ($isReplaced): ?>
-                                                                                        <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #fffbeb; color: #b45309; border: 1px solid #fde68a; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
-                                                                                            DIGANTIKAN
-                                                                                        </span>
+                                                                                    
                                                                                     <?php elseif ($isReplacementBox): ?>
                                                                                         <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
                                                                                             BOX PENGGANTI
@@ -1517,12 +2019,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                                     <?= number_format($lot['qty']) ?> pcs
                                                                                 </td>
                                                                                 <td style="padding: 6px 10px; text-align: center; font-family: monospace; font-weight: 700; color: #2563eb;">
-                                                                                    <?= (int)$lot['computed_sample_size'] ?> pcs
+                                                                                    <?= !empty($lot['is_safety_stock']) ? '<span style="color:#7c3aed;font-weight:800;">0 (Lolos SS)</span>' : ((int)$lot['computed_sample_size'] . ' pcs') ?>
                                                                                 </td>
                                                                                 <td style="padding: 6px 10px; text-align: center;">
                                                                                     <span style="font-family: monospace; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 4px; <?= $lotNgTotal > 0 ? 'background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;' : 'background: #f0fdf4; color: #16a34a; border: 1px solid #dcfce7;' ?>">
                                                                                         <?= $lotNgTotal ?> / <?= (int)$lot['computed_reject_number'] ?>
                                                                                     </span>
+                                                                                </td>
+                                                                                <td style="padding: 6px 10px; text-align: center;">
+                                                                                    <?= renderLotStatusBadge($lot) ?>
                                                                                 </td>
                                                                                 <td style="padding: 6px 10px; color: #64748b;">
                                                                                     <?= date('H:i', strtotime($lot['scanned_at'])) ?> WIB
@@ -1530,7 +2035,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                             </tr>
                                                                             <?php if ($hasDefects): ?>
                                                                                 <tr style="background: #fff5f5; border-bottom: 2px solid #fecaca;">
-                                                                                    <td colspan="7" style="padding: 6px 10px 8px 12px;">
+                                                                                    <td colspan="8" style="padding: 6px 10px 8px 12px;">
                                                                                         <div style="display: flex; flex-direction: column; gap: 4px;">
                                                                                             <div style="font-size: 10px; font-weight: 800; color: #991b1b; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
                                                                                                 <svg style="width: 12px; height: 12px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
@@ -1566,7 +2071,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                             <?php endif; ?>
                                                                             <?php if ($isReinspect): ?>
                                                                                 <tr style="background: <?= $lot['lot_result'] === 'rejected' ? '#fff1f2' : '#f0fdf4' ?>; border-bottom: 2px solid <?= $lot['lot_result'] === 'rejected' ? '#fecdd3' : '#bbf7d0' ?>;">
-                                                                                    <td colspan="7" style="padding: 6px 10px 8px 12px;">
+                                                                                    <td colspan="8" style="padding: 6px 10px 8px 12px;">
                                                                                         <div style="display: flex; flex-direction: column; gap: 4px;">
                                                                                             <div style="font-size: 10px; font-weight: 800; color: <?= $lot['lot_result'] === 'rejected' ? '#be123c' : '#166534' ?>; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
                                                                                                 <?php if ($lot['lot_result'] === 'rejected'): ?>
@@ -1837,12 +2342,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                         <th style="padding: 6px 10px; text-align: right; width: 85px;">Qty</th>
                                                                         <th style="padding: 6px 10px; text-align: center; width: 95px;">Sampel (pcs)</th>
                                                                         <th style="padding: 6px 10px; text-align: center; width: 75px;">NG</th>
+                                                                        <th style="padding: 6px 10px; text-align: center; min-width: 130px;">Status Lot</th>
                                                                         <th style="padding: 6px 10px; min-width: 100px;">Waktu Scan</th>
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody>
                                                                     <?php if (empty($sSub['lots'])): ?>
-                                                                        <tr><td colspan="7" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan box spesifik.</td></tr>
+                                                                        <tr><td colspan="8" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan box spesifik.</td></tr>
                                                                     <?php else: ?>
                                                                         <?php foreach ($sSub['lots'] as $lIdx => $lot): 
                                                                             $hasDefects = !empty($lot['defects']);
@@ -1872,13 +2378,16 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                                         <?= $lotNgTotal ?> / <?= (int)$lot['computed_reject_number'] ?>
                                                                                     </span>
                                                                                 </td>
+                                                                                <td style="padding: 6px 10px; text-align: center;">
+                                                                                    <?= renderLotStatusBadge($lot) ?>
+                                                                                </td>
                                                                                 <td style="padding: 6px 10px; color: #64748b;">
                                                                                     <?= date('H:i', strtotime($lot['scanned_at'])) ?> WIB
                                                                                 </td>
                                                                             </tr>
                                                                             <?php if ($hasDefects): ?>
                                                                                 <tr style="background: #fff5f5; border-bottom: 2px solid #fecaca;">
-                                                                                    <td colspan="7" style="padding: 6px 10px 8px 12px;">
+                                                                                    <td colspan="8" style="padding: 6px 10px 8px 12px;">
                                                                                         <div style="display: flex; flex-direction: column; gap: 4px;">
                                                                                             <div style="font-size: 10px; font-weight: 800; color: #991b1b; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
                                                                                                 <svg style="width: 12px; height: 12px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
@@ -2019,12 +2528,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     <td style="padding: 12px 16px; text-align: center;">
                                         <?php if ($isKb): ?>
-                                            <span style="display: inline-block; font-size: 10px; font-weight: 900; background: #ede9fe; color: #6b21a8; border: 1px solid #c4b5fd; padding: 2px 8px; border-radius: 6px; text-transform: uppercase;">
-                                                Kanban
+                                            <span style="display: inline-flex; align-items: center; gap: 4px; padding: 2.5px 8.5px; border-radius: 9999px; font-size: 10px; font-weight: 800; background-color: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; box-shadow: 0 1px 2px rgba(29,78,216,0.06);">
+                                                <svg width="11" height="11" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: #2563eb;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                                                <span>Kanban</span>
                                             </span>
                                         <?php else: ?>
-                                            <span style="display: inline-block; font-size: 10px; font-weight: 900; background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 2px 8px; border-radius: 6px; text-transform: uppercase;">
-                                                Safety Stock
+                                            <span style="display: inline-flex; align-items: center; gap: 4px; padding: 2.5px 8.5px; border-radius: 9999px; font-size: 10px; font-weight: 800; background-color: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; box-shadow: 0 1px 2px rgba(107,33,168,0.06);">
+                                                <svg width="11" height="11" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: #9333ea;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                                                <span>Safety Stock</span>
                                             </span>
                                         <?php endif; ?>
                                     </td>
@@ -2155,12 +2666,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                             <th style="padding: 7px 12px; text-align: right; width: 90px;">Qty</th>
                                                             <th style="padding: 7px 12px; text-align: center; width: 100px;">Sampel (pcs)</th>
                                                             <th style="padding: 7px 12px; text-align: center; width: 75px;">NG</th>
+                                                            <th style="padding: 7px 12px; text-align: center; min-width: 130px;">Status Lot</th>
                                                             <th style="padding: 7px 12px; min-width: 110px;">Waktu Scan</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody>
                                                         <?php if (empty($sess['lots'])): ?>
-                                                            <tr><td colspan="7" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan rincian box.</td></tr>
+                                                            <tr><td colspan="8" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan rincian box.</td></tr>
                                                         <?php else: ?>
                                                             <?php foreach ($sess['lots'] as $bIdx => $bLot): 
                                                                 $hasDefects = !empty($bLot['defects']);
@@ -2183,17 +2695,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                     <td style="padding: 7px 12px; font-family: monospace; font-weight: 800; color: #0284c7;">
                                                                         <?= htmlspecialchars($bLot['ref_number'] ?: '-') ?>
                                                                         <?php if ($isReinspect): ?>
-                                                                            <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
-                                                                                RE-INSPEKSI
+                                                                            <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; <?= ($bLot['lot_result'] === 'rejected') ? 'background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;' : 'background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;' ?> padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
+                                                                                <?= ($bLot['lot_result'] === 'rejected') ? 'RE-INSPEKSI (NG)' : 'RE-INSPEKSI' ?>
                                                                             </span>
                                                                         <?php elseif ($isInitial): ?>
                                                                             <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
                                                                                 UJI AWAL (NG)
                                                                             </span>
-                                                                        <?php elseif ($isReplaced): ?>
-                                                                            <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #fffbeb; color: #b45309; border: 1px solid #fde68a; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
-                                                                                DIGANTIKAN
-                                                                            </span>
+                                                                        
                                                                         <?php elseif ($isReplacementBox): ?>
                                                                             <span style="display: inline-block; margin-left: 5px; font-family: sans-serif; font-size: 9px; font-weight: 800; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 5px; border-radius: 4px; vertical-align: middle;">
                                                                                 BOX PENGGANTI
@@ -2204,12 +2713,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                         <?= number_format($bLot['qty']) ?> pcs
                                                                     </td>
                                                                     <td style="padding: 7px 12px; text-align: center; font-family: monospace; font-weight: 700; color: #2563eb;">
-                                                                        <?= (int)$bLot['computed_sample_size'] ?> pcs
+                                                                        <?= !empty($bLot['is_safety_stock']) ? '<span style="color:#7c3aed;font-weight:800;">0 (Lolos SS)</span>' : ((int)$bLot['computed_sample_size'] . ' pcs') ?>
                                                                     </td>
                                                                     <td style="padding: 7px 12px; text-align: center;">
                                                                         <span style="font-family: monospace; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 4px; <?= $lotNgTotal > 0 ? 'background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;' : 'background: #f0fdf4; color: #16a34a; border: 1px solid #dcfce7;' ?>">
                                                                             <?= $lotNgTotal ?> / <?= (int)$bLot['computed_reject_number'] ?>
                                                                         </span>
+                                                                    </td>
+                                                                    <td style="padding: 7px 12px; text-align: center;">
+                                                                        <?= renderLotStatusBadge($bLot) ?>
                                                                     </td>
                                                                     <td style="padding: 7px 12px; color: #64748b;">
                                                                         <?= date('H:i', strtotime($bLot['scanned_at'])) ?> WIB
@@ -2217,7 +2729,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                 </tr>
                                                                 <?php if ($hasDefects): ?>
                                                                     <tr style="background: #fff5f5; border-bottom: 2px solid #fecaca;">
-                                                                        <td colspan="7" style="padding: 6px 12px 8px 16px;">
+                                                                        <td colspan="8" style="padding: 6px 12px 8px 16px;">
                                                                             <div style="display: flex; flex-direction: column; gap: 4px;">
                                                                                 <div style="font-size: 10px; font-weight: 800; color: #991b1b; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
                                                                                     <svg style="width: 12px; height: 12px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
@@ -2253,7 +2765,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                 <?php endif; ?>
                                                                 <?php if ($isReinspect): ?>
                                                                     <tr style="background: #f0fdf4; border-bottom: 2px solid #bbf7d0;">
-                                                                        <td colspan="7" style="padding: 6px 12px 8px 16px;">
+                                                                        <td colspan="8" style="padding: 6px 12px 8px 16px;">
                                                                             <div style="display: flex; flex-direction: column; gap: 4px;">
                                                                                 <div style="font-size: 10px; font-weight: 800; color: #166534; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
                                                                                     <svg style="width: 13px; height: 13px; color: #16a34a;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -2324,6 +2836,357 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
             </div>
 
+            <?php
+            $initialTotalLots = count($flatLotRows);
+            $initialTotalQty = 0;
+            $initialTotalSample = 0;
+            $initialPassedLots = 0;
+            $initialPassedQty = 0;
+            $initialRejectedLots = 0;
+            $initialTotalNg = 0;
+            $initialProgressLots = 0;
+            $initialProgressQty = 0;
+
+            foreach ($flatLotRows as $rL) {
+                $qLot = (int)($rL['qty_lot'] ?? 0);
+                $sSize = (int)($rL['sample_size'] ?? 0);
+                $ngQ = (int)($rL['total_ng'] ?? 0);
+
+                $initialTotalQty += $qLot;
+                $initialTotalSample += $sSize;
+
+                $rRaw = $rL['lot_raw'] ?? [];
+                $lRes = strtolower($rRaw['lot_result'] ?? '');
+                $lStat = strtolower($rRaw['lot_status'] ?? '');
+                $isSsL = ($rL['inspection_type'] === 'safety_stock');
+                $isInitL = !empty($rRaw['is_initial_attempt']) 
+                    || (($rRaw['attempt_type'] ?? '') === 'initial')
+                    || (!empty($rRaw['status_label']) && strpos($rRaw['status_label'], 'AWAL') !== false)
+                    || (!empty($rRaw['status_badge']) && strpos($rRaw['status_badge'], 'AWAL') !== false);
+
+                if ($ngQ > 0 || $lRes === 'rejected' || $lStat === 'rejected' || $lStat === 'replaced' || $isInitL) {
+                    $initialRejectedLots++;
+                    $initialTotalNg += $ngQ;
+                } elseif ($lRes === 'in_progress' || ((empty($lRes) || $lRes === 'pending') && empty($rL['closed_at']) && empty($rL['action_noted_at']) && empty($rL['session_closed_at']) && !$isSsL)) {
+                    $initialProgressLots++;
+                    $initialProgressQty += $qLot;
+                } else {
+                    $initialPassedLots++;
+                    $initialPassedQty += $qLot;
+                }
+            }
+            ?>
+
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <!-- 5. VIEW MODE C: FLAT RINCIAN PER LOT (EXCEL SHEET 1 VIEW)      -->
+            <!-- ═══════════════════════════════════════════════════════════════ -->
+            <div id="container-view-lot" class="space-y-4 hidden" style="min-width: 0; max-width: 100%;">
+                
+                <!-- KPI SUMMARY CARDS (RINCIAN PER LOT) -->
+                <div class="kpi-grid-container" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px;">
+                    <!-- Stat 1: Total Lot -->
+                    <div id="kpi-card-lot-total" onclick="filterLotByKpi('all')" 
+                         class="lot-kpi-card lot-kpi-total is-active" 
+                         title="Klik untuk tampilkan semua lot (Reset Filter Status)">
+                        <div class="flex items-center justify-between gap-1">
+                            <div class="text-[9.5px] font-extrabold text-sky-900 uppercase tracking-wider">TOTAL LOT</div>
+                            <span class="w-5 h-5 rounded-md bg-sky-200/80 text-sky-700 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline justify-between flex-wrap gap-1">
+                            <div class="flex items-baseline gap-1">
+                                <span id="kpi-lot-val-total" class="lot-kpi-num text-sky-950"><?= number_format($initialTotalLots) ?></span>
+                                <span class="lot-kpi-unit text-sky-700">Lot/Box</span>
+                            </div>
+                            <span id="kpi-lot-qty-total" class="lot-kpi-pill bg-sky-200/70 text-sky-900 border border-sky-300/60"><?= number_format($initialTotalQty) ?> pcs</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 2: Lot Passed -->
+                    <div id="kpi-card-lot-passed" onclick="filterLotByKpi('passed')" 
+                         class="lot-kpi-card lot-kpi-passed" 
+                         title="Klik untuk filter hanya Lot Passed">
+                        <div class="flex items-center justify-between gap-1">
+                            <div class="text-[9.5px] font-extrabold text-emerald-900 uppercase tracking-wider">LOT PASSED</div>
+                            <span class="w-5 h-5 rounded-md bg-emerald-200/80 text-emerald-800 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline justify-between flex-wrap gap-1">
+                            <div class="flex items-baseline gap-1">
+                                <span id="kpi-lot-val-passed" class="lot-kpi-num text-emerald-950"><?= number_format($initialPassedLots) ?></span>
+                                <span class="lot-kpi-unit text-emerald-700">Lot</span>
+                            </div>
+                            <span id="kpi-lot-qty-passed" class="lot-kpi-pill bg-emerald-200/70 text-emerald-950 border border-emerald-300/60"><?= number_format($initialPassedQty) ?> pcs</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 3: Lot Rejected -->
+                    <div id="kpi-card-lot-rejected" onclick="filterLotByKpi('rejected')" 
+                         class="lot-kpi-card lot-kpi-rejected" 
+                         title="Klik untuk filter hanya Lot Rejected">
+                        <div class="flex items-center justify-between gap-1">
+                            <div class="text-[9.5px] font-extrabold text-rose-800 uppercase tracking-wider">LOT REJECTED</div>
+                            <span class="w-5 h-5 rounded-md bg-rose-200/80 text-rose-700 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline justify-between flex-wrap gap-1">
+                            <div class="flex items-baseline gap-1">
+                                <span id="kpi-lot-val-rejected" class="lot-kpi-num text-rose-950"><?= number_format($initialRejectedLots) ?></span>
+                                <span class="lot-kpi-unit text-rose-700">Lot</span>
+                            </div>
+                            <span id="kpi-lot-qty-rejected" class="lot-kpi-pill bg-rose-200/70 text-rose-950 border border-rose-300/60 <?= $initialTotalNg > 0 ? '' : 'hidden' ?>"><?= number_format($initialTotalNg) ?> pcs NG</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 4: Lot Belum Selesai (In Progress) -->
+                    <div id="kpi-card-lot-progress" onclick="filterLotByKpi('in_progress')" 
+                         class="lot-kpi-card lot-kpi-progress" 
+                         title="Klik untuk filter Lot yang belum selesai (Sedang Berjalan)">
+                        <div class="flex items-center justify-between gap-1">
+                            <div class="text-[9.5px] font-extrabold text-amber-900 uppercase tracking-wider">BELUM SELESAI</div>
+                            <span class="w-5 h-5 rounded-md bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline justify-between flex-wrap gap-1">
+                            <div class="flex items-baseline gap-1">
+                                <span id="kpi-lot-val-progress" class="lot-kpi-num text-amber-950"><?= number_format($initialProgressLots) ?></span>
+                                <span class="lot-kpi-unit text-amber-700">Lot</span>
+                            </div>
+                            <span id="kpi-lot-qty-progress" class="lot-kpi-pill bg-amber-200/70 text-amber-950 border border-amber-300/60 <?= $initialProgressQty > 0 ? '' : 'hidden' ?>"><?= number_format($initialProgressQty) ?> pcs</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 5: Total Sampling QTY -->
+                    <div id="kpi-card-lot-sample" 
+                         class="lot-kpi-card lot-kpi-sample">
+                        <div class="flex items-center justify-between gap-1">
+                            <div class="text-[9.5px] font-extrabold text-slate-800 uppercase tracking-wider">TOTAL SAMPLING (AQL)</div>
+                            <span class="w-5 h-5 rounded-md bg-slate-200 text-slate-700 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline gap-1">
+                            <span id="kpi-lot-val-sample" class="lot-kpi-num text-slate-900"><?= number_format($initialTotalSample) ?></span>
+                            <span class="lot-kpi-unit text-slate-600">pcs</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card p-0 bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-xs" style="min-width: 0; max-width: 100%;">
+                    <div style="padding: 14px 18px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; background: #fafafa;">
+                        <div>
+                            <h3 style="font-size: 13px; font-weight: 800; color: #0f172a; margin: 0; text-transform: uppercase; letter-spacing: 0.5px;">Rincian Per Lot (Flat Data Table)</h3>
+                            <p style="font-size: 11px; color: #64748b; margin: 2px 0 0 0;">Daftar seluruh lot / box hasil scan pada tanggal <?= date('d M Y', strtotime($dateParam)) ?> (Sheet 1 View)</p>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                            <div style="display: flex; align-items: center; gap: 6px;">
+                                <label for="filter-inspector-lot" style="font-size: 11px; font-weight: 700; color: #475569; display: flex; align-items: center; gap: 4px;">
+                                    <svg style="width: 13px; height: 13px; color: #64748b;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                                    Filter Inspektor:
+                                </label>
+                                <select id="filter-inspector-lot" onchange="filterLotTableByInspector(this.value)" style="font-size: 11px; font-weight: 700; color: #1e293b; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px 10px; cursor: pointer; outline: none;" class="hover:border-slate-400 focus:border-blue-500 shadow-2xs">
+                                    <option value="">Semua Inspektur (<?= count($flatLotRows) ?> Lot)</option>
+                                    <?php
+                                    $uniqueInspectors = array_values(array_unique(array_filter(array_column($flatLotRows, 'inspector_name'))));
+                                    sort($uniqueInspectors);
+                                    foreach ($uniqueInspectors as $insp):
+                                    ?>
+                                        <option value="<?= htmlspecialchars($insp) ?>"><?= htmlspecialchars($insp) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <span id="badge-lot-count" style="font-size: 11px; font-weight: 800; color: #4338ca; background: #e0e7ff; border: 1px solid #c7d2fe; padding: 3px 10px; border-radius: 9999px;">
+                                <?= count($flatLotRows) ?> Lot Terdata
+                            </span>
+                        </div>
+                    </div>
+                    <div style="overflow-x: auto; width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
+                        <table style="width: 100%; min-width: 1550px; border-collapse: collapse; font-size: 11px;">
+                            <thead style="background: #0f172a; color: #ffffff; font-weight: 700;">
+                                <tr>
+                                    <th style="padding: 10px 10px; width: 35px; text-align: center;">#</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 140px;">Waktu</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 115px;">Jenis</th>
+                                    <th style="padding: 10px 10px; width: 120px;">Part Code</th>
+                                    <th style="padding: 10px 10px; min-width: 150px;">Part Name</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 90px;">Model</th>
+                                    <th style="padding: 10px 10px; width: 120px;">Lot No</th>
+                                    <th style="padding: 10px 10px; width: 110px;">Ref No</th>
+                                    <th style="padding: 10px 10px; text-align: right; width: 90px;">QTY Lot</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 95px;">Sampling</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 65px;">NG</th>
+                                    <th style="padding: 10px 10px; min-width: 150px;">Defect</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 140px;">Status Lot</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 65px;">Sesi</th>
+                                    <th style="padding: 10px 10px; text-align: center; width: 75px;">Shift</th>
+                                    <th style="padding: 10px 10px; width: 120px;">Inspektor</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (empty($flatLotRows)): ?>
+                                    <tr>
+                                        <td colspan="16" style="padding: 30px; text-align: center; color: #94a3b8; font-weight: 600;">
+                                            Tidak ada catatan rincian box / lot untuk filter tanggal ini.
+                                        </td>
+                                    </tr>
+                                <?php else: ?>
+                                    <?php foreach ($flatLotRows as $idx => $rLot): 
+                                        $hasNg = ($rLot['total_ng'] > 0);
+
+                                        $rRaw = $rLot['lot_raw'] ?? [];
+                                        $lRes = strtolower($rRaw['lot_result'] ?? '');
+                                        $lStat = strtolower($rRaw['lot_status'] ?? '');
+                                        $isSs = ($rLot['inspection_type'] === 'safety_stock');
+                                        $isInitial = !empty($rRaw['is_initial_attempt']) 
+                                            || (($rRaw['attempt_type'] ?? '') === 'initial')
+                                            || (!empty($rRaw['status_label']) && strpos($rRaw['status_label'], 'AWAL') !== false)
+                                            || (!empty($rRaw['status_badge']) && strpos($rRaw['status_badge'], 'AWAL') !== false);
+
+                                        if ($rLot['total_ng'] > 0 || $lRes === 'rejected' || $lStat === 'rejected' || $lStat === 'replaced' || $isInitial) {
+                                            $rowStatus = 'rejected';
+                                            $rowStatusClass = 'flat-row-rejected';
+                                        } elseif ($lRes === 'in_progress' || ((empty($lRes) || $lRes === 'pending') && empty($rLot['closed_at']) && empty($rLot['action_noted_at']) && empty($rLot['session_closed_at']) && !$isSs)) {
+                                            $rowStatus = 'in_progress';
+                                            $rowStatusClass = 'flat-row-progress';
+                                        } else {
+                                            $rowStatus = 'passed';
+                                            $rowStatusClass = 'flat-row-passed';
+                                        }
+                                    ?>
+                                        <tr class="flat-lot-row review-row <?= $rowStatusClass ?>" 
+                                            data-inspector="<?= htmlspecialchars($rLot['inspector_name']) ?>"
+                                            data-status="<?= $rowStatus ?>"
+                                            data-type="<?= $rLot['inspection_type'] ?>"
+                                            data-qty="<?= (int)$rLot['qty_lot'] ?>"
+                                            data-sample="<?= (int)$rLot['sample_size'] ?>"
+                                            data-ng="<?= (int)$rLot['total_ng'] ?>"
+                                            style="border-bottom: 1px solid #e2e8f0; transition: background 0.15s;">
+                                            <td style="padding: 8px 10px; text-align: center; font-weight: 700; color: #94a3b8;"><?= $idx + 1 ?></td>
+                                            <td style="padding: 8px 10px; text-align: center; font-family: monospace; color: #334155; white-space: nowrap;">
+                                                <?php
+                                                $startTimeTs = !empty($rLot['started_at']) ? strtotime($rLot['started_at']) : 0;
+                                                
+                                                $endTimeTs = 0;
+                                                if (!empty($rLot['closed_at'])) {
+                                                    $endTimeTs = strtotime($rLot['closed_at']);
+                                                } elseif (!empty($rLot['action_noted_at'])) {
+                                                    $endTimeTs = strtotime($rLot['action_noted_at']);
+                                                } elseif (!empty($rLot['session_closed_at'])) {
+                                                    $endTimeTs = strtotime($rLot['session_closed_at']);
+                                                }
+
+                                                $dateDisplay = $startTimeTs ? date('d/m/Y', $startTimeTs) : '-';
+                                                $startTimeStr = $startTimeTs ? date('H:i', $startTimeTs) : '';
+                                                $endTimeStr = $endTimeTs ? date('H:i', $endTimeTs) : '';
+
+                                                $timeRangeStr = '-';
+                                                if ($startTimeStr && $endTimeStr) {
+                                                    $timeRangeStr = $startTimeStr . ' - ' . $endTimeStr . ' WIB';
+                                                } elseif ($startTimeStr) {
+                                                    $timeRangeStr = $startTimeStr . ' WIB';
+                                                }
+
+                                                // Calculate duration
+                                                $durStr = '';
+                                                if ($startTimeTs > 0 && $endTimeTs >= $startTimeTs) {
+                                                    $diffSec = $endTimeTs - $startTimeTs;
+                                                    $hrs = floor($diffSec / 3600);
+                                                    $mins = floor(($diffSec % 3600) / 60);
+                                                    $secs = $diffSec % 60;
+                                                    if ($hrs > 0) {
+                                                        $durStr = "{$hrs}j {$mins}m";
+                                                    } elseif ($mins > 0) {
+                                                        $durStr = "{$mins}m {$secs}s";
+                                                    } else {
+                                                        $durStr = "{$secs}s";
+                                                    }
+                                                }
+                                                ?>
+                                                <div style="font-weight: 800; color: #0f172a;"><?= $dateDisplay ?></div>
+                                                <div style="font-size: 9.5px; color: #64748b; font-weight: 600; font-family: sans-serif; margin-top: 1px;"><?= $timeRangeStr ?></div>
+                                                <?php if ($durStr !== ''): ?>
+                                                    <div style="margin-top: 2px;">
+                                                        <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-slate-100 text-slate-700 border border-slate-200" title="Durasi Inspeksi Lot">
+                                                            ⏱️ <?= $durStr ?>
+                                                        </span>
+                                                    </div>
+                                                <?php elseif (($rLot['lot_raw']['lot_result'] ?? '') === 'in_progress' || empty($endTimeTs)): ?>
+                                                    <div style="margin-top: 2px;">
+                                                        <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9.5px] font-bold bg-amber-50 text-amber-700 border border-amber-200" title="Inspeksi Masih Berjalan">
+                                                            ⏳ Aktif
+                                                        </span>
+                                                    </div>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
+                                                <?php if ($isSs): ?>
+                                                    <span style="display: inline-flex; align-items: center; gap: 4px; padding: 2.5px 8.5px; border-radius: 9999px; font-size: 10px; font-weight: 800; background-color: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; box-shadow: 0 1px 2px rgba(107,33,168,0.06);" title="Inspeksi Safety Stock Gudang">
+                                                        <svg width="11" height="11" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: #9333ea;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                                                        <span>Safety Stock</span>
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span style="display: inline-flex; align-items: center; gap: 4px; padding: 2.5px 8.5px; border-radius: 9999px; font-size: 10px; font-weight: 800; background-color: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; box-shadow: 0 1px 2px rgba(29,78,216,0.06);" title="<?= !empty($rLot['kanban_no']) && $rLot['kanban_no'] !== '-' ? ('Kanban #' . htmlspecialchars($rLot['kanban_no'])) : 'Inspeksi Jadwal Kanban' ?>">
+                                                        <svg width="11" height="11" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="color: #2563eb;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                                                        <span>Kanban</span>
+                                                    </span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; font-family: monospace; font-weight: 800; color: #0284c7; white-space: nowrap;">
+                                                <?= htmlspecialchars($rLot['part_code']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; font-weight: 700; color: #1e293b;">
+                                                <?= htmlspecialchars($rLot['part_name']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; font-weight: 700; color: #64748b;">
+                                                <?= htmlspecialchars($rLot['model_name']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; font-family: monospace; color: #334155; white-space: nowrap;">
+                                                <?= htmlspecialchars($rLot['lot_number']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; font-family: monospace; font-weight: 800; color: #7c3aed; white-space: nowrap;">
+                                                <?= htmlspecialchars($rLot['ref_number']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: right; font-family: monospace; font-weight: 800; color: #0f172a; white-space: nowrap;">
+                                                <?= number_format($rLot['qty_lot']) ?> pcs
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; font-family: monospace; font-weight: 700; color: #2563eb; white-space: nowrap;">
+                                                <?= (!empty($rLot['lot_raw']['is_safety_stock']) && $rLot['inspection_type'] === 'safety_stock') ? '<span style="color:#7c3aed;font-weight:800;">0 (Lolos SS)</span>' : ((int)$rLot['sample_size'] . ' pcs') ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
+                                                <span style="font-family: monospace; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 4px; <?= $rLot['total_ng'] > 0 ? 'background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;' : 'background: #f0fdf4; color: #16a34a; border: 1px solid #dcfce7;' ?>">
+                                                    <?= $rLot['total_ng'] ?>
+                                                </span>
+                                            </td>
+                                            <td style="padding: 8px 10px; color: <?= $hasNg ? '#dc2626' : '#94a3b8' ?>; font-weight: <?= $hasNg ? '700' : '400' ?>;">
+                                                <?= $rLot['defect_summary'] ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
+                                                <?= renderLotStatusBadge($rLot['lot_raw']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; font-family: monospace; font-weight: 800; white-space: nowrap;">
+                                                <a href="<?= base_url('modules/inspection/session.php?id=' . $rLot['session_id']) ?>" target="_blank" style="color: #2563eb; text-decoration: underline;" title="Buka Detail Sesi">
+                                                    #<?= $rLot['session_id'] ?>
+                                                </a>
+                                            </td>
+                                            <td style="padding: 8px 10px; text-align: center; font-weight: 600; color: #64748b; white-space: nowrap;">
+                                                <?= htmlspecialchars($rLot['shift_name']) ?>
+                                            </td>
+                                            <td style="padding: 8px 10px; font-weight: 700; color: #334155; white-space: nowrap;">
+                                                <?= htmlspecialchars($rLot['inspector_name']) ?>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
         <?php endif; ?>
 
     </main>
@@ -2335,31 +3198,42 @@ var isAllExpanded = false;
 function switchReviewMode(mode) {
     var btnK = document.getElementById('btn-view-kanban');
     var btnS = document.getElementById('btn-view-session');
+    var btnL = document.getElementById('btn-view-lot');
     var conK = document.getElementById('container-view-kanban');
     var conS = document.getElementById('container-view-session');
+    var conL = document.getElementById('container-view-lot');
+    var btnToggleAll = document.getElementById('btn-toggle-all');
+
+    // Reset all tabs
+    [btnK, btnS, btnL].forEach(function(b) {
+        if (!b) return;
+        b.className = 'inactive-tab-btn text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
+        b.style.background = 'transparent';
+        b.style.color = '#475569';
+    });
+    [conK, conS, conL].forEach(function(c) {
+        if (!c) return;
+        c.classList.add('hidden');
+    });
 
     if (mode === 'kanban') {
         btnK.className = 'active-tab-btn bg-blue-600 text-white shadow-xs';
         btnK.style.background = '#2563eb';
         btnK.style.color = '#ffffff';
-
-        btnS.className = 'inactive-tab-btn text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
-        btnS.style.background = 'transparent';
-        btnS.style.color = '#475569';
-
         conK.classList.remove('hidden');
-        conS.classList.add('hidden');
-    } else {
+        if (btnToggleAll) btnToggleAll.style.display = 'inline-flex';
+    } else if (mode === 'session') {
         btnS.className = 'active-tab-btn bg-blue-600 text-white shadow-xs';
         btnS.style.background = '#2563eb';
         btnS.style.color = '#ffffff';
-
-        btnK.className = 'inactive-tab-btn text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
-        btnK.style.background = 'transparent';
-        btnK.style.color = '#475569';
-
         conS.classList.remove('hidden');
-        conK.classList.add('hidden');
+        if (btnToggleAll) btnToggleAll.style.display = 'inline-flex';
+    } else if (mode === 'lot') {
+        btnL.className = 'active-tab-btn bg-blue-600 text-white shadow-xs';
+        btnL.style.background = '#2563eb';
+        btnL.style.color = '#ffffff';
+        conL.classList.remove('hidden');
+        if (btnToggleAll) btnToggleAll.style.display = 'none';
     }
 }
 
@@ -2411,6 +3285,185 @@ function toggleAllAccordions() {
     }
 }
 
+// ── Interactive Logic for Flat Rincian Per Lot (KPI Filters & Inspector Synchronization) ──
+var currentLotKpiFilter = 'all'; // 'all', 'passed', 'rejected', 'in_progress'
+var currentLotInspector = '';
+
+function filterLotByKpi(status) {
+    if (currentLotKpiFilter === status && status !== 'all') {
+        currentLotKpiFilter = 'all';
+    } else {
+        currentLotKpiFilter = status;
+    }
+    updateLotKpiCardStyles();
+    applyLotTableFilters();
+}
+
+function filterLotTableByInspector(selectedInspector) {
+    currentLotInspector = (selectedInspector || '').trim();
+    applyLotTableFilters();
+}
+
+function updateLotKpiCardStyles() {
+    var cardTotal = document.getElementById('kpi-card-lot-total');
+    var cardPassed = document.getElementById('kpi-card-lot-passed');
+    var cardRejected = document.getElementById('kpi-card-lot-rejected');
+    var cardProgress = document.getElementById('kpi-card-lot-progress');
+
+    var cardList = [
+        { el: cardTotal, key: 'all' },
+        { el: cardPassed, key: 'passed' },
+        { el: cardRejected, key: 'rejected' },
+        { el: cardProgress, key: 'in_progress' }
+    ];
+
+    cardList.forEach(function(item) {
+        if (!item.el) return;
+        if (currentLotKpiFilter === 'all') {
+            item.el.classList.remove('is-inactive');
+            if (item.key === 'all') {
+                item.el.classList.add('is-active');
+            } else {
+                item.el.classList.remove('is-active');
+            }
+        } else {
+            if (item.key === currentLotKpiFilter) {
+                item.el.classList.add('is-active');
+                item.el.classList.remove('is-inactive');
+            } else {
+                item.el.classList.remove('is-active');
+                item.el.classList.add('is-inactive');
+            }
+        }
+    });
+}
+
+function applyLotTableFilters() {
+    var rows = document.querySelectorAll('.flat-lot-row');
+    var searchInput = document.getElementById('review-search');
+    var searchTerm = searchInput ? (searchInput.value || '').trim().toLowerCase() : '';
+    var selectedInspLower = currentLotInspector.toLowerCase();
+
+    // Re-calculate KPI stats specifically for the selected inspector
+    var kpiTotalLots = 0;
+    var kpiTotalQty = 0;
+    var kpiPassedLots = 0;
+    var kpiPassedQty = 0;
+    var kpiRejectedLots = 0;
+    var kpiTotalNg = 0;
+    var kpiProgressLots = 0;
+    var kpiProgressQty = 0;
+    var kpiTotalSample = 0;
+
+    var visibleRowsCount = 0;
+
+    rows.forEach(function(row) {
+        var rowInsp = (row.getAttribute('data-inspector') || '').trim().toLowerCase();
+        var rowStatus = (row.getAttribute('data-status') || '').trim().toLowerCase();
+        var rowQty = parseInt(row.getAttribute('data-qty') || '0', 10);
+        var rowSample = parseInt(row.getAttribute('data-sample') || '0', 10);
+        var rowNg = parseInt(row.getAttribute('data-ng') || '0', 10);
+        var rowText = (row.textContent || '').toLowerCase();
+
+        // 1. Inspector Filter Match
+        var matchInspector = (!selectedInspLower || rowInsp === selectedInspLower);
+
+        // Accumulate KPI metrics for this inspector
+        if (matchInspector) {
+            kpiTotalLots++;
+            kpiTotalQty += rowQty;
+            kpiTotalSample += rowSample;
+
+            if (rowStatus === 'rejected' || rowNg > 0) {
+                kpiRejectedLots++;
+                kpiTotalNg += rowNg;
+            } else if (rowStatus === 'in_progress') {
+                kpiProgressLots++;
+                kpiProgressQty += rowQty;
+            } else {
+                kpiPassedLots++;
+                kpiPassedQty += rowQty;
+            }
+        }
+
+        // 2. KPI Status Filter Match
+        var matchStatus = true;
+        if (currentLotKpiFilter === 'passed') {
+            matchStatus = (rowStatus === 'passed' && rowNg === 0);
+        } else if (currentLotKpiFilter === 'rejected') {
+            matchStatus = (rowStatus === 'rejected' || rowNg > 0);
+        } else if (currentLotKpiFilter === 'in_progress') {
+            matchStatus = (rowStatus === 'in_progress');
+        }
+
+        // 3. Search Filter Match
+        var matchSearch = (!searchTerm || rowText.indexOf(searchTerm) !== -1);
+
+        if (matchInspector && matchStatus && matchSearch) {
+            row.style.display = '';
+            visibleRowsCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+
+    // Update KPI Card Displays
+    var elValTotal = document.getElementById('kpi-lot-val-total');
+    var elQtyTotal = document.getElementById('kpi-lot-qty-total');
+    var elValPassed = document.getElementById('kpi-lot-val-passed');
+    var elQtyPassed = document.getElementById('kpi-lot-qty-passed');
+    var elValRejected = document.getElementById('kpi-lot-val-rejected');
+    var elQtyRejected = document.getElementById('kpi-lot-qty-rejected');
+    var elValProgress = document.getElementById('kpi-lot-val-progress');
+    var elQtyProgress = document.getElementById('kpi-lot-qty-progress');
+    var elValSample = document.getElementById('kpi-lot-val-sample');
+
+    if (elValTotal) elValTotal.innerText = kpiTotalLots.toLocaleString('id-ID');
+    if (elQtyTotal) elQtyTotal.innerText = kpiTotalQty.toLocaleString('id-ID') + ' pcs';
+    if (elValPassed) elValPassed.innerText = kpiPassedLots.toLocaleString('id-ID');
+    if (elQtyPassed) elQtyPassed.innerText = kpiPassedQty.toLocaleString('id-ID') + ' pcs';
+    if (elValRejected) elValRejected.innerText = kpiRejectedLots.toLocaleString('id-ID');
+    if (elQtyRejected) {
+        if (kpiTotalNg > 0) {
+            elQtyRejected.innerText = kpiTotalNg.toLocaleString('id-ID') + ' pcs NG';
+            elQtyRejected.classList.remove('hidden');
+        } else {
+            elQtyRejected.classList.add('hidden');
+        }
+    }
+    if (elValProgress) elValProgress.innerText = kpiProgressLots.toLocaleString('id-ID');
+    if (elQtyProgress) {
+        if (kpiProgressQty > 0) {
+            elQtyProgress.innerText = kpiProgressQty.toLocaleString('id-ID') + ' pcs';
+            elQtyProgress.classList.remove('hidden');
+        } else {
+            elQtyProgress.classList.add('hidden');
+        }
+    }
+    if (elValSample) elValSample.innerText = kpiTotalSample.toLocaleString('id-ID');
+
+    // Update Badge Count
+    var badge = document.getElementById('badge-lot-count');
+    if (badge) {
+        var statusLabel = '';
+        if (currentLotKpiFilter === 'passed') statusLabel = ' (Passed)';
+        else if (currentLotKpiFilter === 'rejected') statusLabel = ' (Rejected)';
+        else if (currentLotKpiFilter === 'in_progress') statusLabel = ' (Belum Selesai)';
+
+        if (!currentLotInspector) {
+            badge.innerText = visibleRowsCount + ' dari ' + rows.length + ' Lot Terdata' + statusLabel;
+            badge.style.background = '#e0e7ff';
+            badge.style.color = '#4338ca';
+            badge.style.borderColor = '#c7d2fe';
+        } else {
+            badge.innerText = visibleRowsCount + ' dari ' + rows.length + ' Lot (' + currentLotInspector + ')' + statusLabel;
+            badge.style.background = '#dbeafe';
+            badge.style.color = '#1e40af';
+            badge.style.borderColor = '#93c5fd';
+        }
+    }
+}
+
 // Universal Search Filter
 document.addEventListener('DOMContentLoaded', function () {
     var searchInput = document.getElementById('review-search');
@@ -2419,8 +3472,8 @@ document.addEventListener('DOMContentLoaded', function () {
     searchInput.addEventListener('input', function () {
         var term = this.value.toLowerCase().trim();
 
-        var rows = document.querySelectorAll('.review-row');
-        rows.forEach(function (r) {
+        var nonFlatRows = document.querySelectorAll('.review-row:not(.flat-lot-row)');
+        nonFlatRows.forEach(function (r) {
             var text = r.textContent.toLowerCase();
             var nextAcc = r.nextElementSibling;
             if (nextAcc && nextAcc.classList.contains('accordion-sub-row')) {
@@ -2437,6 +3490,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             }
         });
+
+        // Trigger flat lot rows filter coordinated
+        applyLotTableFilters();
     });
 });
 </script>
@@ -2465,6 +3521,108 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+// ── Universal Doughnut Floating Tooltip ───────────────────────────────────────
+var windowMouseX = 0;
+var windowMouseY = 0;
+window.addEventListener('mousemove', function(e) {
+    windowMouseX = e.clientX;
+    windowMouseY = e.clientY;
+}, { passive: true });
+
+function hideDailyDonutTooltip() {
+    var tooltipEl = document.getElementById('chartjs-daily-donut-tooltip');
+    if (tooltipEl) {
+        tooltipEl.style.opacity = '0';
+        tooltipEl.style.display = 'none';
+    }
+}
+
+function dailyDonutTooltipHandler(context) {
+    var tooltipEl = document.getElementById('chartjs-daily-donut-tooltip');
+
+    if (!tooltipEl) {
+        tooltipEl = document.createElement('div');
+        tooltipEl.id = 'chartjs-daily-donut-tooltip';
+        tooltipEl.style.position = 'fixed';
+        tooltipEl.style.zIndex = '99999';
+        tooltipEl.style.pointerEvents = 'none';
+        tooltipEl.style.background = 'rgba(15, 23, 42, 0.94)';
+        tooltipEl.style.backdropFilter = 'blur(6px)';
+        tooltipEl.style.color = '#ffffff';
+        tooltipEl.style.borderRadius = '8px';
+        tooltipEl.style.padding = '7px 12px';
+        tooltipEl.style.fontSize = '11px';
+        tooltipEl.style.boxShadow = '0 10px 25px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2)';
+        tooltipEl.style.border = '1px solid rgba(255, 255, 255, 0.16)';
+        tooltipEl.style.transition = 'opacity 0.08s ease-out';
+        tooltipEl.style.whiteSpace = 'nowrap';
+        document.body.appendChild(tooltipEl);
+    }
+
+    var tooltipModel = context.tooltip;
+    if (!tooltipModel || tooltipModel.opacity === 0) {
+        tooltipEl.style.opacity = '0';
+        tooltipEl.style.display = 'none';
+        return;
+    }
+
+    if (tooltipModel.body) {
+        var bodyLines = tooltipModel.body.map(function(b) { return b.lines; });
+        var colors = (tooltipModel.labelColors && tooltipModel.labelColors[0]) ? tooltipModel.labelColors[0] : null;
+        var bgColor = colors ? (colors.backgroundColor || '#2563eb') : '#2563eb';
+
+        var html = '';
+        bodyLines.forEach(function(body) {
+            var text = Array.isArray(body) ? body.join(' ') : String(body);
+            html += '<div style="display:flex;align-items:center;gap:7px;">' +
+                    '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + bgColor + ';box-shadow:0 0 0 1.5px rgba(255,255,255,0.4);flex-shrink:0;"></span>' +
+                    '<span style="font-weight:800;color:#f8fafc;letter-spacing:0.2px;">' + escapeHtml(text.trim()) + '</span>' +
+                    '</div>';
+        });
+        tooltipEl.innerHTML = html;
+    }
+
+    var canvas = context.chart.canvas;
+    var rect = canvas.getBoundingClientRect();
+
+    tooltipEl.style.display = 'block';
+    tooltipEl.style.opacity = '1';
+
+    var centerX = rect.left + rect.width / 2;
+    var centerY = rect.top + rect.height / 2;
+
+    if (windowMouseX > 0 && windowMouseX >= rect.left && windowMouseX <= rect.right && windowMouseY >= rect.top && windowMouseY <= rect.bottom) {
+        var dy = windowMouseY - centerY;
+        if (dy < 0) {
+            tooltipEl.style.transform = 'translate(-50%, -115%)';
+            tooltipEl.style.top = (windowMouseY - 8) + 'px';
+        } else {
+            tooltipEl.style.transform = 'translate(-50%, 18%)';
+            tooltipEl.style.top = (windowMouseY + 8) + 'px';
+        }
+        tooltipEl.style.left = windowMouseX + 'px';
+    } else {
+        var posX = rect.left + tooltipModel.caretX;
+        var posY = rect.top + tooltipModel.caretY;
+        var dx = posX - centerX;
+        var dy = posY - centerY;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 70) {
+            var angle = Math.atan2(dy, dx);
+            if (dist === 0) angle = -Math.PI / 2;
+            posX = centerX + Math.cos(angle) * 75;
+            posY = centerY + Math.sin(angle) * 75;
+        }
+        if (dy < 0) {
+            tooltipEl.style.transform = 'translate(-50%, -115%)';
+        } else {
+            tooltipEl.style.transform = 'translate(-50%, 18%)';
+        }
+        tooltipEl.style.left = posX + 'px';
+        tooltipEl.style.top = posY + 'px';
+    }
 }
 
 function switchDailyTopRank(rank) {
@@ -2561,16 +3719,19 @@ function switchDailyTopRank(rank) {
                         plugins: {
                             legend: { display: false },
                             tooltip: {
+                                enabled: false,
+                                external: dailyDonutTooltipHandler,
                                 callbacks: {
                                     label: function(c) {
                                         var t = c.dataset.data.reduce(function(a, b) { return a + b; }, 0) || 1;
-                                        return ' ' + c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
+                                        return c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
                                     }
                                 }
                             }
                         }
                     }
                 });
+                canvasD.onmouseleave = hideDailyDonutTooltip;
             }
         }
 
@@ -2640,16 +3801,19 @@ function switchDailyTopRank(rank) {
                         plugins: {
                             legend: { display: false },
                             tooltip: {
+                                enabled: false,
+                                external: dailyDonutTooltipHandler,
                                 callbacks: {
                                     label: function(c) {
                                         var t = c.dataset.data.reduce(function(a, b) { return a + b; }, 0) || 1;
-                                        return ' Model ' + c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
+                                        return 'Model ' + c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
                                     }
                                 }
                             }
                         }
                     }
                 });
+                canvasM.onmouseleave = hideDailyDonutTooltip;
             }
         }
 
@@ -2719,16 +3883,19 @@ function switchDailyTopRank(rank) {
                         plugins: {
                             legend: { display: false },
                             tooltip: {
+                                enabled: false,
+                                external: dailyDonutTooltipHandler,
                                 callbacks: {
                                     label: function(c) {
                                         var t = c.dataset.data.reduce(function(a, b) { return a + b; }, 0) || 1;
-                                        return ' Part ' + c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
+                                        return 'Part ' + c.label + ': ' + Number(c.raw).toLocaleString() + ' pcs (' + Math.round((c.raw / t) * 100) + '%)';
                                     }
                                 }
                             }
                         }
                     }
                 });
+                canvasP.onmouseleave = hideDailyDonutTooltip;
             }
         }
 

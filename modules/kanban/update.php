@@ -6,9 +6,13 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('kanban');
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/kanban/index.php');
 }
+
+csrf_verify();
 
 $id = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
 $kanbanNo = strtoupper(trim(sanitize($_POST['kanban_no'] ?? '')));

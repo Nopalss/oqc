@@ -10,6 +10,17 @@ require_once __DIR__ . '/../../../config/app.php';
 require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Metode permintaan tidak valid']);
     exit;
@@ -38,7 +49,7 @@ try {
 
     // 1. Cari data lot target
     $stmtFind = $pdo->prepare("
-        SELECT isl.*, s.id as session_id, s.status as session_status
+        SELECT isl.*, s.id as session_id, s.status as session_status, s.inspector_id
         FROM inspection_session_lots isl
         JOIN inspection_sessions s ON s.id = isl.inspection_session_id
         WHERE isl.id = :id
@@ -50,6 +61,21 @@ try {
     if (!$targetLot) {
         $pdo->rollBack();
         echo json_encode(['success' => false, 'message' => 'Data lot tidak ditemukan']);
+        exit;
+    }
+
+    // Ownership check (IDOR protection)
+    $isSessionOwner = (!empty($targetLot['inspector_id']) && (int)$targetLot['inspector_id'] === $currentUserId);
+    if (!$isSessionOwner && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk memodifikasi sesi inspektur lain.']);
+        exit;
+    }
+
+    // Closed session check
+    if (in_array($targetLot['session_status'], ['passed', 'rejected'], true) && !$isSessionOwner && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Sesi inspeksi telah selesai/ditutup dan tidak dapat dimodifikasi.']);
         exit;
     }
 

@@ -10,6 +10,17 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 require_once __DIR__ . '/../../../config/summary_helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 $pdo = getDB();
 if (!$pdo) {
     echo json_encode(['success' => false, 'message' => 'Koneksi database gagal']);
@@ -64,6 +75,14 @@ try {
             exit;
         }
 
+        // Ownership check
+        $isSessionOwner = empty($sessRow['inspector_id']) || ((int)$sessRow['inspector_id'] === $currentUserId);
+        if (!$isSessionOwner && !$isPrivilegedUser) {
+            $pdo->rollBack();
+            echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk memodifikasi sesi inspektur lain.']);
+            exit;
+        }
+
         // Tandai seluruh lot yang masih in_progress sebagai passed
         $stmtPassAllLots = $pdo->prepare("
             UPDATE inspection_session_lots
@@ -85,7 +104,7 @@ try {
     } else {
         // 1. Ambil data lot dan sesi terkait
         $stmtLot = $pdo->prepare("
-            SELECT isl.*, s.id as session_id, s.part_id, s.kanban_item_id, s.flow_version, s.status as session_status
+            SELECT isl.*, s.id as session_id, s.part_id, s.kanban_item_id, s.flow_version, s.status as session_status, s.inspector_id
             FROM inspection_session_lots isl
             JOIN inspection_sessions s ON s.id = isl.inspection_session_id
             WHERE isl.id = :id
@@ -100,35 +119,68 @@ try {
             exit;
         }
 
+        // Ownership check
+        $isSessionOwner = empty($lot['inspector_id']) || ((int)$lot['inspector_id'] === $currentUserId);
+        if (!$isSessionOwner && !$isPrivilegedUser) {
+            $pdo->rollBack();
+            echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk memodifikasi sesi inspektur lain.']);
+            exit;
+        }
+
         $sessionId = (int)$lot['session_id'];
         $partId = (int)($lot['part_id'] ?? 0);
         $rejectNumber = max(1, (int)$lot['reject_number']);
 
         // 2. Pemrosesan Aksi
         if ($action === 'passed') {
-            // Validasi: Pastikan tidak ada defect
+            // Validasi: Cek apakah lot ini merupakan hasil re-inspeksi, sortir, atau box pengganti
+            $isReinspLot = (strtolower($lot['lot_status'] ?? '') === 'reinspected')
+                || !empty($lot['parent_session_id'])
+                || !empty($lot['is_reinspection'])
+                || (stripos($lot['remarks'] ?? '', 'Pengganti') !== false)
+                || (stripos($lot['remarks'] ?? '', 'Re-inspeksi') !== false)
+                || (stripos($lot['remarks'] ?? '', 'Reinspeksi') !== false)
+                || (stripos($lot['remarks'] ?? '', 'Sortir') !== false);
+
+            if (!$isReinspLot) {
+                $stmtChkSort = $pdo->prepare("SELECT 1 FROM inspection_ng_records WHERE session_lot_id = :lid AND is_sorted = 1 LIMIT 1");
+                $stmtChkSort->execute([':lid' => $sessionLotId]);
+                if ($stmtChkSort->fetchColumn()) {
+                    $isReinspLot = true;
+                }
+            }
+            if (!$isReinspLot) {
+                $stmtChkSub = $pdo->prepare("SELECT 1 FROM lot_substitution_log WHERE (ng_session_lot_id = :lid1 OR replacement_session_lot_id = :lid2) LIMIT 1");
+                $stmtChkSub->execute([':lid1' => $sessionLotId, ':lid2' => $sessionLotId]);
+                if ($stmtChkSub->fetchColumn()) {
+                    $isReinspLot = true;
+                }
+            }
+
+            $newLotStatus = $isReinspLot ? 'reinspected' : 'ok';
+
             $stmtUpdLot = $pdo->prepare("
                 UPDATE inspection_session_lots
                 SET lot_result = 'passed',
                     ng_count = 0,
-                    lot_status = 'ok',
+                    lot_status = :new_status,
                     closed_at = NOW()
                 WHERE id = :id
             ");
-            $stmtUpdLot->execute([':id' => $sessionLotId]);
+            $stmtUpdLot->execute([':new_status' => $newLotStatus, ':id' => $sessionLotId]);
 
-            // Batalkan seluruh record NG sebelumnya jika ada (misal lot diubah dari rejected ke passed)
-            // KECUALI record NG yang berstatus disortir (is_sorted = 1) agar temuan cacat historis tetap terekam di analitik & dashboard
-            $stmtDelNg = $pdo->prepare("
+            // Tandai temuan NG sebelumnya untuk lot ini sebagai disortir (is_sorted = 1, is_cancelled = 0)
+            // agar temuan cacat historis dari inspeksi sebelumnya tetap terekam di analitik, dashboard, dan Total NG Pcs.
+            $stmtSortNg = $pdo->prepare("
                 UPDATE inspection_ng_records
-                SET is_cancelled = 1,
-                    cancel_reason = 'Diubah menjadi PASSED oleh operator',
-                    cancelled_at = NOW()
+                SET is_sorted = 1,
+                    sort_notes = COALESCE(NULLIF(sort_notes, ''), 'Telah disortir & lulus pada re-inspeksi'),
+                    sorted_at = COALESCE(sorted_at, NOW()),
+                    is_cancelled = 0
                 WHERE session_lot_id = :slot_id 
                   AND (is_cancelled IS NULL OR is_cancelled = 0)
-                  AND (is_sorted IS NULL OR is_sorted = 0)
             ");
-            $stmtDelNg->execute([':slot_id' => $sessionLotId]);
+            $stmtSortNg->execute([':slot_id' => $sessionLotId]);
         } elseif ($action === 'rejected') {
             if (!is_array($defects) || empty($defects)) {
                 $pdo->rollBack();
@@ -136,15 +188,18 @@ try {
                 exit;
             }
 
-            // Batalkan record NG aktif sebelumnya untuk lot ini agar tidak duplikat saat edit
-            $stmtDelNg = $pdo->prepare("
+            // Tandai temuan NG sebelumnya untuk lot ini sebagai disortir (is_sorted = 1, is_cancelled = 0)
+            // agar temuan cacat dari ronde inspeksi sebelumnya tidak terhapus dari histori & Total NG Pcs
+            $stmtSortNg = $pdo->prepare("
                 UPDATE inspection_ng_records
-                SET is_cancelled = 1,
-                    cancel_reason = 'Diedit / diperbarui operator',
-                    cancelled_at = NOW()
-                WHERE session_lot_id = :slot_id AND (is_cancelled IS NULL OR is_cancelled = 0)
+                SET is_sorted = 1,
+                    sort_notes = COALESCE(NULLIF(sort_notes, ''), 'Temuan NG dari inspeksi sebelumnya'),
+                    sorted_at = COALESCE(sorted_at, NOW()),
+                    is_cancelled = 0
+                WHERE session_lot_id = :slot_id 
+                  AND (is_cancelled IS NULL OR is_cancelled = 0)
             ");
-            $stmtDelNg->execute([':slot_id' => $sessionLotId]);
+            $stmtSortNg->execute([':slot_id' => $sessionLotId]);
 
             $totalNgQty = 0;
             $stmtInsNg = $pdo->prepare("
@@ -237,7 +292,9 @@ try {
             SET is_cancelled = 1,
                 cancel_reason = 'Direset operator ke in_progress',
                 cancelled_at = NOW()
-            WHERE session_lot_id = :slot_id AND (is_cancelled IS NULL OR is_cancelled = 0)
+            WHERE session_lot_id = :slot_id 
+              AND (is_cancelled IS NULL OR is_cancelled = 0)
+              AND (is_sorted IS NULL OR is_sorted = 0)
         ");
         $stmtDelNg->execute([':slot_id' => $sessionLotId]);
     }

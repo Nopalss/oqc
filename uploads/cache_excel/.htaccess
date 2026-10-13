@@ -1,0 +1,3 @@
+# Deny direct access to cached excel spreadsheets
+Order deny,allow
+Deny from all

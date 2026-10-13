@@ -6,6 +6,8 @@ $pageSubtitle = "Pratinjau acuan gambar teknik 2D (PDF) dan Tampilan Interactive
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_drawings');
+
 $part_id = (int)($_GET['part_id'] ?? 0);
 $pdo = getDB();
 $part = null;
@@ -222,5 +224,8 @@ if (!$part) {
     </script>
     <?php endif; ?>
 
-<?php require_once __DIR__ . '/../../layouts/footer.php'; ?>
+<?php 
+$loadCadViewer = true;
+require_once __DIR__ . '/../../layouts/footer.php'; 
+?>
 

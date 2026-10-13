@@ -13,7 +13,7 @@ $roles = [];
 
 if ($pdo) {
     try {
-        $stmtRoles = $pdo->query("SELECT role_name, display_name FROM roles ORDER BY id ASC");
+        $stmtRoles = $pdo->query("SELECT id, role_name, display_name FROM roles ORDER BY id ASC");
         $roles = $stmtRoles->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
         $roles = [];
@@ -68,14 +68,15 @@ if ($pdo) {
 
                     <!-- Role Akses (Dynamic from roles table) -->
                     <div>
-                        <label for="role" class="form-label text-xs font-semibold text-slate-700">Role Akses <span class="text-rose-500">*</span></label>
-                        <select id="role" name="role" required class="form-input text-xs">
+                        <label for="role_id" class="form-label text-xs font-semibold text-slate-700">Role Akses <span class="text-rose-500">*</span></label>
+                        <select id="role_id" name="role_id" required class="form-input text-xs">
+                            <option value="">-- Pilih Role --</option>
                             <?php if (empty($roles)): ?>
-                                <option value="admin">Administrator</option>
+                                <option value="1">Administrator</option>
                             <?php else: ?>
                                 <?php foreach ($roles as $r): ?>
-                                    <option value="<?= htmlspecialchars($r['role_name']) ?>">
-                                        <?= htmlspecialchars($r['display_name']) ?>
+                                    <option value="<?= (int)$r['id'] ?>">
+                                        <?= htmlspecialchars($r['display_name']) ?> (<?= htmlspecialchars($r['role_name']) ?>)
                                     </option>
                                 <?php endforeach; ?>
                             <?php endif; ?>

@@ -6,6 +6,8 @@ $pageSubtitle = "Unggah file gambar 2D (PDF) atau 3D (.STP) untuk part pilihan";
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('master_drawings');
+
 $part_id = (int)($_GET['part_id'] ?? 0);
 $pdo = getDB();
 $part = null;
@@ -73,6 +75,7 @@ $expectedFolder = 'uploads/drawings/' . $modelClean . '/' . trim($part['part_cod
 
         <div class="card p-4 md:p-6 bg-white border border-slate-200/80 rounded-xl shadow-xs">
             <form action="<?= base_url('modules/master_drawings/store.php') ?>" method="POST" enctype="multipart/form-data" class="space-y-5">
+                <?= csrf_field() ?>
                 
                 <input type="hidden" name="part_id" value="<?= htmlspecialchars($part['id']) ?>">
 

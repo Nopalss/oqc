@@ -11,6 +11,11 @@ require_once __DIR__ . '/xlsx_parser.php';
 
 header('Content-Type: application/json');
 
+if (!is_logged_in()) {
+    echo json_encode(['error' => 'Unauthorized. Silakan login terlebih dahulu.', 'sheets' => []]);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['error' => 'Method not allowed', 'sheets' => []]);
     exit;

@@ -6,6 +6,8 @@ $pageSubtitle       = "Peringkat cacat mutu, analisis dominasi Pareto (Top 3 / 5
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
+require_menu_access('defect_analysis');
+
 $pdo = getDB();
 
 // ── Filter Resolvers (Unit, Leaderboard Rank, Date, & Customer) ─────────────

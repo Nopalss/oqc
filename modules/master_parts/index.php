@@ -9,6 +9,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 require_menu_access('master_parts');
 
 $pdo = getDB();
+$csrfToken = generate_csrf_token();
 $parts = [];
 $search = sanitize($_GET['search'] ?? '');
 $sourceFilter = sanitize($_GET['source'] ?? '');
@@ -247,9 +248,9 @@ if ($pdo) {
                                             </svg>
                                         </a>
 
-                                        <!-- Delete Part Button -->
+                                        <!-- Delete Part Button (Secure POST with CSRF) -->
                                         <button type="button" 
-                                                onclick="confirmDelete('<?= base_url('modules/master_parts/delete.php?id=' . $part['id']) ?>', '<?= htmlspecialchars($part['part_code'], ENT_QUOTES) ?>')"
+                                                onclick="confirmPostDelete('<?= base_url('modules/master_parts/delete.php') ?>', '<?= $part['id'] ?>', '<?= htmlspecialchars($part['part_code'], ENT_QUOTES) ?>', '<?= $csrfToken ?>')"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Part">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

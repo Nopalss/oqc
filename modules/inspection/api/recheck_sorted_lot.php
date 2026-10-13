@@ -11,6 +11,17 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 require_once __DIR__ . '/../../../config/summary_helper.php';
 
+if (!is_logged_in()) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)$currentUser['id'];
+$currentUserRole = $currentUser['role'];
+$isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Metode permintaan tidak valid']);
     exit;
@@ -38,7 +49,7 @@ try {
 
     // 1. Ambil data lot & sesi
     $stmtLot = $pdo->prepare("
-        SELECT isl.*, s.id as session_id, s.status as session_status
+        SELECT isl.*, s.id as session_id, s.status as session_status, s.inspector_id
         FROM inspection_session_lots isl
         JOIN inspection_sessions s ON s.id = isl.inspection_session_id
         WHERE isl.id = :id
@@ -50,6 +61,14 @@ try {
     if (!$lot) {
         $pdo->rollBack();
         echo json_encode(['success' => false, 'message' => 'Data lot tidak ditemukan']);
+        exit;
+    }
+
+    // Ownership check (IDOR protection)
+    $isSessionOwner = empty($lot['inspector_id']) || ((int)$lot['inspector_id'] === $currentUserId);
+    if (!$isSessionOwner && !$isPrivilegedUser) {
+        $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Anda tidak memiliki hak untuk memodifikasi sesi inspektur lain.']);
         exit;
     }
 
@@ -79,17 +98,29 @@ try {
         ':slot_id' => $sessionLotId
     ]);
 
-    // 3. Kembalikan status lot ke 'in_progress' dan lot_status ke 'reinspected'
+    // 3. Kembalikan status lot ke 'in_progress' dan lot_status ke 'reinspected' & reset approval Chief untuk ronde re-inspeksi
     $stmtUpdLot = $pdo->prepare("
         UPDATE inspection_session_lots
         SET lot_result = 'in_progress',
             lot_status = 'reinspected',
             ng_count = 0,
             closed_at = NULL,
-            action_noted_at = NOW()
+            action_noted_at = NOW(),
+            is_chief_approved = 0,
+            chief_approved_by = NULL,
+            chief_approved_at = NULL
         WHERE id = :slot_id
     ");
     $stmtUpdLot->execute([':slot_id' => $sessionLotId]);
+
+    $stmtUpdSess = $pdo->prepare("
+        UPDATE inspection_sessions
+        SET is_chief_approved = 0,
+            chief_approved_by = NULL,
+            chief_approved_at = NULL
+        WHERE id = :sid
+    ");
+    $stmtUpdSess->execute([':sid' => $sessionId]);
 
     // 4. Catat ke lot_substitution_log
     $userId = (int)($_SESSION['user_id'] ?? ($_SESSION['user']['id'] ?? 0)) ?: null;

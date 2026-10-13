@@ -3,10 +3,24 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+require_menu_access('did');
+
 // Use $_GET directly — PDO prepared statements prevent SQL injection, sanitize only for display
 $batch_id = isset($_GET['batch_id']) ? (int)$_GET['batch_id'] : 0;
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $statusFilter = isset($_GET['status']) ? trim($_GET['status']) : '';
+
+// Dynamic Limit for Server-Side Pagination
+$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 25;
+if (!in_array($limit, [10, 25, 50, 100, 250])) {
+    $limit = 25;
+}
+
+$page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1;
+if ($page < 1) $page = 1;
+$offset = ($page - 1) * $limit;
+$totalItems = 0;
+$totalPages = 1;
 
 $pdo = getDB();
 $batch = null;
@@ -22,31 +36,51 @@ if ($batch_id > 0 && $pdo) {
         $batch = null;
     }
 
-    // Step 2: fetch items (separate try-catch — failure here must NOT null $batch)
+    // Step 2: fetch paginated items using indexed B-Tree range
     if ($batch) {
         try {
-            $sql = "SELECT * FROM daily_inspection_data WHERE batch_id = :batch_id";
+            $whereClauses = ["batch_id = :batch_id"];
             $params = [':batch_id' => $batch_id];
 
             if ($search !== '') {
-                // Use :search1 and :search2 — PDO does NOT allow same named param twice
-                $sql .= " AND (part_code LIKE :search1 OR part_name LIKE :search2)";
+                $whereClauses[] = "(part_code LIKE :search1 OR part_name LIKE :search2 OR lot_number LIKE :search3)";
                 $params[':search1'] = '%' . $search . '%';
                 $params[':search2'] = '%' . $search . '%';
+                $params[':search3'] = '%' . $search . '%';
             }
 
             if ($statusFilter !== '') {
-                $sql .= " AND status_inspect = :status";
+                $whereClauses[] = "status_inspect = :status";
                 $params[':status'] = $statusFilter;
             }
 
-            $sql .= " ORDER BY id ASC";
+            $whereSql = implode(' AND ', $whereClauses);
+
+            // Count total items matching filter
+            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM daily_inspection_data WHERE {$whereSql}");
+            $countStmt->execute($params);
+            $totalItems = (int)$countStmt->fetchColumn();
+
+            $totalPages = max(1, ceil($totalItems / $limit));
+            if ($page > $totalPages) $page = $totalPages;
+            $offset = ($page - 1) * $limit;
+
+            // Fetch current page items
+            $sql = "SELECT id, batch_id, part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, remark 
+                    FROM daily_inspection_data 
+                    WHERE {$whereSql} 
+                    ORDER BY id ASC 
+                    LIMIT :limit OFFSET :offset";
 
             $stmtItems = $pdo->prepare($sql);
-            $stmtItems->execute($params);
+            foreach ($params as $k => $v) {
+                $stmtItems->bindValue($k, $v);
+            }
+            $stmtItems->bindValue(':limit', (int)$limit, PDO::PARAM_INT);
+            $stmtItems->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+            $stmtItems->execute();
             $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
         } catch (PDOException $e) {
-            // Items query failed — show empty table, do NOT redirect
             $items = [];
         }
     }
@@ -91,7 +125,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <?php endif; ?>
                         </div>
                         <p class="text-xs text-slate-500 mt-0.5">
-                            Waktu Input: <b><?= date('d M Y, H:i', strtotime($batch['created_at'])) ?> WIB</b> • Total: <b><?= count($items) ?> Lot Item</b>
+                            Waktu Input: <b><?= date('d M Y, H:i', strtotime($batch['created_at'])) ?> WIB</b> • Total: <b><?= number_format($totalItems) ?> Lot Item</b>
                         </p>
                     </div>
                 </div>
@@ -127,6 +161,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <option value="">-- Status --</option>
                     <option value="OK" <?= ($statusFilter === 'OK') ? 'selected' : '' ?>>Status OK</option>
                     <option value="NG" <?= ($statusFilter === 'NG') ? 'selected' : '' ?>>Status NG</option>
+                </select>
+
+                <!-- Limit Selector -->
+                <select id="limit-filter" class="form-input py-1 text-xs font-semibold text-slate-700" style="width: 100px;">
+                    <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10 / hal</option>
+                    <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25 / hal</option>
+                    <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50 / hal</option>
+                    <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100 / hal</option>
+                    <option value="250" <?= ($limit == 250) ? 'selected' : '' ?>>250 / hal</option>
                 </select>
 
                 <button type="button" onclick="doFilter()" class="btn-secondary py-1 px-3 text-xs font-bold cursor-pointer">Cari</button>
@@ -176,7 +219,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <?php else: ?>
                             <?php foreach ($items as $index => $row): ?>
                                 <tr class="hover:bg-slate-50/80 transition-colors">
-                                    <td class="px-4 py-3 font-semibold text-slate-400"><?= $index + 1 ?></td>
+                                    <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
                                     <td class="px-4 py-3 font-extrabold text-blue-700 font-mono tracking-tight">
                                         <?= htmlspecialchars($row['part_code']) ?>
                                     </td>
@@ -206,9 +249,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <?= htmlspecialchars($row['remark'] ?? '-') ?>
                                     </td>
                                     <td class="px-4 py-3 text-right">
-                                        <!-- Delete Item -->
+                                        <!-- Delete Item (POST + CSRF Protected) -->
                                         <button type="button" 
-                                                onclick="confirmDelete('<?= base_url('modules/did/delete.php?id=' . $row['id']) ?>', 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?> (Part Code: <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>)')"
+                                                onclick="confirmPostDelete('<?= base_url('modules/did/delete.php') ?>', <?= (int)$row['id'] ?>, 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?> (Part: <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>)', '<?= generate_csrf_token() ?>')"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item Ini">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
@@ -221,6 +264,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </tbody>
                 </table>
             </div>
+
+            <!-- Single Line Pagination Footer -->
+            <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
+
         </div>
 
     </main>
@@ -232,10 +279,16 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
     function doFilter() {
         var search = document.getElementById('search-input').value;
         var status = document.getElementById('status-filter').value;
+        var limit = document.getElementById('limit-filter') ? document.getElementById('limit-filter').value : 25;
         var url = BASE + '?batch_id=' + BATCH_ID;
         if (search.trim() !== '') url += '&search=' + encodeURIComponent(search.trim());
         if (status !== '') url += '&status=' + encodeURIComponent(status);
+        if (limit) url += '&limit=' + encodeURIComponent(limit);
         window.location.href = url;
+    }
+
+    if (document.getElementById('limit-filter')) {
+        document.getElementById('limit-filter').addEventListener('change', doFilter);
     }
     </script>
 
