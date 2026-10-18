@@ -1146,7 +1146,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                         <!-- Tombol ACC All (Setujui Semua Sesi Pending) -->
                         <?php if ($dailySummary['total_pending_sessions'] > 0): ?>
-                            <button type="button" onclick="confirmApproveAllVisible()"
+                            <button type="button" id="btnApproveAllVisible" onclick="confirmApproveAllVisible()"
                                     style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; background: linear-gradient(135deg, #16a34a 0%, #15803d 100%); color: #ffffff; border: 1px solid #166534; border-radius: 8px; font-size: 11px; font-weight: 800; cursor: pointer; box-shadow: 0 1px 3px rgba(22, 163, 74, 0.35); transition: all 0.2s;"
                                     title="Setujui seluruh sesi inspeksi yang belum di-ACC pada filter saat ini">
                                 <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1185,7 +1185,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <table class="w-full text-left" style="border-collapse: collapse; font-size: 12px; min-width: 960px;">
                         <thead style="background: #f8fafc; border-bottom: 2px solid #cbd5e1; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase; letter-spacing: 0.5px;">
                             <tr>
-                                <th style="padding: 11px 14px; width: 65px; text-align: center;">Sesi #</th>
+                                <!-- Kolom Ceklis & Sesi # -->
+                                <th style="padding: 11px 10px; width: 85px; text-align: center;">
+                                    <div style="display: flex; align-items: center; justify-content: center; gap: 6px;">
+                                        <input type="checkbox" id="checkAllSessions" onchange="toggleSelectAllSessionRows(this.checked)"
+                                               title="Pilih Semua Sesi yang Belum di-ACC"
+                                               style="cursor: pointer; width: 15px; height: 15px; accent-color: #2563eb; border-radius: 3px;">
+                                        <span>Sesi #</span>
+                                    </div>
+                                </th>
                                 
                                 <!-- Kolom WAKTU & TANGGAL -->
                                 <th style="padding: 11px 14px; width: 145px; position: relative;">
@@ -1351,11 +1359,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     </div>
                                 </th>
 
-                                <!-- KOLOM GABUNGAN: LOT & SAMPLING -->
-                                <th style="padding: 11px 14px; text-align: center; width: 115px;">Lot & Sampling</th>
+                                <!-- KOLOM 1: LOT & QTY (BARANG) -->
+                                <th style="padding: 11px 14px; text-align: center; width: 120px;">Lot & Qty</th>
 
-                                <!-- KOLOM QTY (BERSIH DARI TEKS BOX) -->
-                                <th style="padding: 11px 14px; text-align: right; width: 100px;">Qty</th>
+                                <!-- KOLOM 2: SAMPLING (PEMERIKSAAN QC) -->
+                                <th style="padding: 11px 14px; text-align: center; width: 95px;">Sampling</th>
 
                                 <!-- Kolom STATUS -->
                                 <th style="padding: 11px 14px; text-align: center; width: 95px; position: relative;">
@@ -1479,10 +1487,25 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     data-filter-approval="<?= htmlspecialchars($fApproval) ?>"
                                     style="border-bottom: 1px solid #f1f5f9; cursor: pointer; <?= $isApp ? 'display: none;' : '' ?>"
                                     onclick="toggleAccordion('acc-timeline-<?= $sess['session_id'] ?>')">
-                                    <td style="padding: 11px 14px; text-align: center;">
-                                        <span style="font-family: monospace; font-weight: 900; font-size: 12px; color: #0f172a; background: #f1f5f9; padding: 2px 7px; border-radius: 5px; border: 1px solid #e2e8f0;">
-                                            #<?= $sess['session_id'] ?>
-                                        </span>
+                                    
+                                    <!-- Ceklis & Sesi # -->
+                                    <td style="padding: 11px 10px; text-align: center;" onclick="event.stopPropagation();">
+                                        <div style="display: flex; align-items: center; justify-content: center; gap: 6px;">
+                                            <?php if (!$isApp): ?>
+                                                <input type="checkbox" class="bulk-session-cb" value="<?= $sess['session_id'] ?>"
+                                                       data-qty="<?= (int)$sess['computed_qty'] ?>"
+                                                       onchange="onSessionCheckChange()"
+                                                       title="Pilih sesi #<?= $sess['session_id'] ?> untuk disetujui"
+                                                       style="cursor: pointer; width: 15px; height: 15px; accent-color: #2563eb; border-radius: 3px;">
+                                            <?php else: ?>
+                                                <span title="Sesi sudah disetujui (ACC)" style="width: 15px; height: 15px; display: inline-flex; align-items: center; justify-content: center; color: #16a34a;">
+                                                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                                                </span>
+                                            <?php endif; ?>
+                                            <span style="font-family: monospace; font-weight: 900; font-size: 11px; color: #0f172a; background: #f1f5f9; padding: 2px 6px; border-radius: 5px; border: 1px solid #e2e8f0;">
+                                                #<?= $sess['session_id'] ?>
+                                            </span>
+                                        </div>
                                     </td>
 
                                     <td style="padding: 11px 14px;">
@@ -1542,22 +1565,22 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         </div>
                                     </td>
 
-                                    <!-- KOLOM GABUNGAN: LOT & SAMPLING -->
+                                    <!-- KOLOM 1: LOT & QTY (BARANG) -->
                                     <td style="padding: 11px 14px; text-align: center;">
                                         <div style="display: flex; flex-direction: column; align-items: center; gap: 3px;">
                                             <span style="display: inline-block; background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; font-weight: 800; font-size: 11px; padding: 1.5px 8px; border-radius: 9999px; line-height: 1.2;">
                                                 <?= (int)$sess['box_count'] ?> Lot
                                             </span>
-                                            <span style="font-family: monospace; font-weight: 800; font-size: 11px; color: #0284c7;">
-                                                <?= number_format((int)($sess['effective_sample_size'] ?? $sess['sample_size'])) ?> pcs
+                                            <span style="font-family: monospace; font-weight: 900; color: #0f172a; font-size: 11.5px;">
+                                                <?= number_format($sess['computed_qty']) ?> pcs
                                             </span>
                                         </div>
                                     </td>
 
-                                    <!-- KOLOM QTY (BERSIH DARI TEKS BOX) -->
-                                    <td style="padding: 11px 14px; text-align: right;">
-                                        <span style="font-family: monospace; font-weight: 900; color: #0f172a; font-size: 12px;">
-                                            <?= number_format($sess['computed_qty']) ?> pcs
+                                    <!-- KOLOM 2: SAMPLING (PEMERIKSAAN QC) -->
+                                    <td style="padding: 11px 14px; text-align: center;">
+                                        <span style="font-family: monospace; font-weight: 800; font-size: 12px; color: #0284c7; background: #f0f9ff; border: 1px solid #e0f2fe; padding: 3px 8px; border-radius: 6px; display: inline-block;">
+                                            <?= number_format((int)($sess['effective_sample_size'] ?? $sess['sample_size'])) ?> pcs
                                         </span>
                                     </td>
 
@@ -1921,6 +1944,34 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
 
                 <?php if ($totalPages > 1): echo render_pagination($page, $totalPages, $totalItems, $limit); endif; ?>
+            </div>
+        </div>
+
+        <!-- FLOATING BULK ACTION BOTTOM BAR (SOLID STYLING - CENTER BOTTOM) -->
+        <div id="bulk-session-action-bar" 
+             style="display: none; position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9998; background-color: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 14px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3); padding: 10px 18px;"
+             class="items-center gap-4">
+            <div class="flex items-center space-x-3">
+                <span style="background-color: #2563eb; color: #ffffff; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 9999px;" class="tracking-wide">
+                    <span id="bulk-session-selected-count">0</span> SESI TERPILIH
+                </span>
+                <div class="text-xs text-slate-300 font-medium">
+                    Total Qty: <span id="bulk-session-selected-qty" class="text-white font-mono font-bold text-sm">0 pcs</span>
+                </div>
+            </div>
+            <div class="h-5 w-px bg-slate-700"></div>
+            <div class="flex items-center space-x-2">
+                <button type="button" onclick="clearBulkSessionSelection()" 
+                        style="background-color: #334155; color: #cbd5e1; border: 1px solid #475569; font-size: 11px; font-weight: 700; padding: 7px 12px; border-radius: 8px;"
+                        class="hover:bg-slate-600 hover:text-white cursor-pointer transition-colors">
+                    Batal Pilih
+                </button>
+                <button type="button" onclick="confirmApproveSelected()" 
+                        style="background-color: #059669; color: #ffffff; border: 1px solid #047857; font-size: 12px; font-weight: 800; padding: 7px 16px; border-radius: 8px; box-shadow: 0 2px 4px rgba(5,150,105,0.4);"
+                        class="hover:opacity-95 active:scale-95 inline-flex items-center gap-1.5 cursor-pointer transition-all">
+                    <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                    <span>Setujui Terpilih Sekaligus (ACC)</span>
+                </button>
             </div>
         </div>
 
@@ -2299,7 +2350,135 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             }
         });
     }
-    // ══════════════════════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════════════
+    // BULK CHECKBOX APPROVAL HANDLERS (FLOATING BOTTOM BAR)
+    // ═══════════════════════════════════════════════════════════════════
+    function onSessionCheckChange() {
+        const checkboxes = document.querySelectorAll('.bulk-session-cb');
+        const checkedBoxes = document.querySelectorAll('.bulk-session-cb:checked');
+        const count = checkedBoxes.length;
+
+        let totalQty = 0;
+        checkedBoxes.forEach(function(cb) {
+            totalQty += parseInt(cb.getAttribute('data-qty') || 0, 10);
+        });
+
+        const actionBar = document.getElementById('bulk-session-action-bar');
+        const countSpan = document.getElementById('bulk-session-selected-count');
+        const qtySpan   = document.getElementById('bulk-session-selected-qty');
+        const checkAll  = document.getElementById('checkAllSessions');
+
+        if (countSpan) countSpan.textContent = count;
+        if (qtySpan) qtySpan.textContent = totalQty.toLocaleString('id-ID') + ' pcs';
+
+        if (actionBar) {
+            actionBar.style.display = (count > 0) ? 'inline-flex' : 'none';
+        }
+
+        if (checkAll) {
+            // Cek hanya checkbox yang sedang tampak (visible)
+            const visibleCheckboxes = Array.from(checkboxes).filter(function(cb) {
+                const tr = cb.closest('tr.session-data-row');
+                return tr && tr.style.display !== 'none';
+            });
+            const visibleChecked = visibleCheckboxes.filter(function(cb) { return cb.checked; });
+            
+            checkAll.checked = (visibleCheckboxes.length > 0 && visibleChecked.length === visibleCheckboxes.length);
+            checkAll.indeterminate = (visibleChecked.length > 0 && visibleChecked.length < visibleCheckboxes.length);
+        }
+    }
+
+    function clearBulkSessionSelection() {
+        const checkboxes = document.querySelectorAll('.bulk-session-cb');
+        checkboxes.forEach(function(cb) {
+            cb.checked = false;
+        });
+        const checkAll = document.getElementById('checkAllSessions');
+        if (checkAll) {
+            checkAll.checked = false;
+            checkAll.indeterminate = false;
+        }
+        onSessionCheckChange();
+    }
+
+    function toggleSelectAllSessionRows(checkState) {
+        const checkboxes = document.querySelectorAll('.bulk-session-cb');
+        checkboxes.forEach(function(cb) {
+            const tr = cb.closest('tr.session-data-row');
+            // Hanya centang baris yang saat ini terlihat (lolos filter)
+            if (tr && tr.style.display !== 'none') {
+                cb.checked = checkState;
+            }
+        });
+        onSessionCheckChange();
+    }
+
+    function confirmApproveSelected() {
+        const checkedBoxes = document.querySelectorAll('.bulk-session-cb:checked');
+        const selectedIds = [];
+        let totalQty = 0;
+        checkedBoxes.forEach(function(cb) {
+            if (cb.value) {
+                selectedIds.push(cb.value);
+                totalQty += parseInt(cb.getAttribute('data-qty') || 0, 10);
+            }
+        });
+
+        if (selectedIds.length === 0) {
+            if (typeof Swal !== 'undefined') {
+                Swal.fire({
+                    icon: 'info',
+                    title: 'Pilih Sesi Terlebih Dahulu',
+                    text: 'Silakan beri centang pada kotak ceklis sesi yang ingin disetujui (ACC).'
+                });
+            } else {
+                alert('Pilih sesi terlebih dahulu.');
+            }
+            return;
+        }
+
+        const count = selectedIds.length;
+
+        if (typeof Swal === 'undefined') {
+            if (confirm('Apakah Anda yakin ingin menyetujui (' + count + ') sesi inspeksi terpilih (Total Qty: ' + totalQty + ' pcs)?')) {
+                submitApproval({
+                    action: 'approve_all_filtered',
+                    session_ids: selectedIds.join(','),
+                    start_date: '<?= htmlspecialchars($startDate) ?>',
+                    end_date: '<?= htmlspecialchars($endDate) ?>',
+                    notes: 'Disetujui secara bersamaan oleh supervisor'
+                });
+            }
+            return;
+        }
+
+        Swal.fire({
+            title: 'Setujui Sesi Terpilih (ACC Bulk)',
+            html: 'Anda akan memberikan persetujuan (ACC) sekaligus untuk <b>' + count + ' sesi inspeksi</b> yang Anda centang.<br>' +
+                  '<div style="margin-top: 8px; font-size: 13px; font-weight: 700; color: #1e40af; background: #eff6ff; padding: 6px 12px; border-radius: 8px; border: 1px solid #bfdbfe;">Total Barang: ' + totalQty.toLocaleString('id-ID') + ' pcs</div>' +
+                  '<br><span style="font-size: 12px; color: #64748b;">Pastikan seluruh hasil pemeriksaan dan lot dari sesi terpilih telah Anda tinjau.</span>',
+            icon: 'question',
+            input: 'text',
+            inputLabel: 'Catatan Persetujuan (Opsional)',
+            inputPlaceholder: 'Tuliskan catatan supervisor bila diperlukan...',
+            showCancelButton: true,
+            confirmButtonColor: '#059669',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Ya, Setujui (' + count + ' Sesi)',
+            cancelButtonText: 'Batal'
+        }).then(function(result) {
+            if (result.isConfirmed) {
+                submitApproval({
+                    action: 'approve_all_filtered',
+                    session_ids: selectedIds.join(','),
+                    start_date: '<?= htmlspecialchars($startDate) ?>',
+                    end_date: '<?= htmlspecialchars($endDate) ?>',
+                    notes: result.value || 'Disetujui secara bersamaan oleh supervisor'
+                });
+            }
+        });
+    }
     // EXCEL-STYLE COLUMN HEADER FILTERS ENGINE (DAILY REPORT SESSION TIMELINE)
     // ══════════════════════════════════════════════════════════════════════════
     var ExcelFilterState = {
@@ -2592,6 +2771,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     badgeCount.innerText = 'Total ' + totalRows + ' Sesi';
                 }
             }
+        }
+
+        // Sinkronisasi status checkbox dan tombol approve terpilih saat tabel disaring
+        if (typeof onSessionCheckChange === 'function') {
+            onSessionCheckChange();
         }
     }
 

@@ -167,7 +167,14 @@ if ($pdo) {
             <table class="w-full text-xs text-left text-slate-700">
                 <thead class="bg-slate-50 text-slate-600 font-extrabold uppercase text-[10px] tracking-wider border-b border-slate-200">
                     <tr>
-                        <th class="px-4 py-3 text-center w-12">No</th>
+                        <th class="px-3 py-3 text-center w-16">
+                            <div class="flex items-center justify-center gap-1.5">
+                                <input type="checkbox" id="bulk-did-check-all" onchange="toggleSelectAllDidRequests(this.checked)"
+                                       title="Pilih Semua Request Pending"
+                                       class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-xs">
+                                <span>No</span>
+                            </div>
+                        </th>
                         <th class="px-4 py-3">Waktu Request</th>
                         <th class="px-4 py-3">Pemohon</th>
                         <th class="px-4 py-3">Part Code & Nama</th>
@@ -188,11 +195,32 @@ if ($pdo) {
                     <?php else: ?>
                         <?php foreach ($requests as $idx => $r): ?>
                             <?php
+                            $isPending = ($r['status'] === 'pending');
                             $reqTimeFormatted = date('d M Y H:i:s', strtotime($r['requested_at']));
                             $revTimeFormatted = !empty($r['reviewed_at']) ? date('d M Y H:i:s', strtotime($r['reviewed_at'])) : '-';
                             ?>
-                            <tr class="hover:bg-slate-50/80 transition-colors">
-                                <td class="px-4 py-3 text-center font-mono font-bold text-slate-400"><?= $idx + 1 ?></td>
+                            <tr class="hover:bg-slate-50/80 transition-colors did-request-row <?= $isPending ? 'row-pending-did' : 'row-completed-did' ?>">
+                                <td class="px-3 py-3 text-center">
+                                    <div class="flex items-center justify-center gap-1.5">
+                                        <?php if ($isPending): ?>
+                                            <input type="checkbox" class="bulk-did-cb w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-xs"
+                                                   value="<?= (int)$r['id'] ?>"
+                                                   data-part="<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code']) ?>"
+                                                   data-lot="<?= htmlspecialchars($r['lot_number']) ?>"
+                                                   onchange="onDidCheckChange()"
+                                                   title="Pilih request #<?= (int)$r['id'] ?> untuk disetujui">
+                                        <?php else: ?>
+                                            <span style="width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: <?= $r['status'] === 'approved' ? '#16a34a' : '#e11d48' ?>;">
+                                                <?php if ($r['status'] === 'approved'): ?>
+                                                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                                                <?php else: ?>
+                                                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"/></svg>
+                                                <?php endif; ?>
+                                            </span>
+                                        <?php endif; ?>
+                                        <span class="font-mono font-bold text-slate-700 text-xs"><?= $idx + 1 ?></span>
+                                    </div>
+                                </td>
                                 <td class="px-4 py-3 whitespace-nowrap font-mono text-[11px] font-semibold text-slate-600">
                                     <?= htmlspecialchars($reqTimeFormatted) ?>
                                 </td>
@@ -256,6 +284,34 @@ if ($pdo) {
                     <?php endif; ?>
                 </tbody>
             </table>
+        </div>
+    </div>
+
+    <!-- FLOATING BULK ACTION BOTTOM BAR (SOLID STYLING - CENTER BOTTOM) -->
+    <div id="bulk-did-action-bar" 
+         style="display: none; position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9998; background-color: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 14px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3); padding: 10px 18px;"
+         class="items-center gap-4">
+        <div class="flex items-center space-x-3">
+            <span style="background-color: #2563eb; color: #ffffff; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 9999px;" class="tracking-wide">
+                <span id="bulk-did-selected-count">0</span> REQUEST TERPILIH
+            </span>
+            <div class="text-xs text-slate-300 font-medium">
+                Persetujuan Massal Pembukaan DID
+            </div>
+        </div>
+        <div class="h-5 w-px bg-slate-700"></div>
+        <div class="flex items-center space-x-2">
+            <button type="button" onclick="clearBulkDidSelection()" 
+                    style="background-color: #334155; color: #cbd5e1; border: 1px solid #475569; font-size: 11px; font-weight: 700; padding: 7px 12px; border-radius: 8px;"
+                    class="hover:bg-slate-600 hover:text-white cursor-pointer transition-colors">
+                Batal Pilih
+            </button>
+            <button type="button" onclick="confirmBulkApproveDidRequests()" 
+                    style="background-color: #059669; color: #ffffff; border: 1px solid #047857; font-size: 12px; font-weight: 800; padding: 7px 16px; border-radius: 8px; box-shadow: 0 2px 4px rgba(5,150,105,0.4);"
+                    class="hover:opacity-95 active:scale-95 inline-flex items-center gap-1.5 cursor-pointer transition-all">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                <span>Setujui Terpilih Sekaligus (ACC)</span>
+            </button>
         </div>
     </div>
 
@@ -394,6 +450,138 @@ function rejectDidRequest(id, partCode, partName, lotNumber) {
                         icon: 'error',
                         title: 'Gagal',
                         text: data.message || 'Terjadi kesalahan saat menolak request.'
+                    });
+                }
+            })
+            .catch(function(err) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Error Server',
+                    text: 'Gagal terhubung ke server.'
+                });
+            });
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BULK CHECKBOX APPROVAL HANDLERS (FLOATING BOTTOM BAR)
+// ═══════════════════════════════════════════════════════════════════
+function onDidCheckChange() {
+    const checkboxes = document.querySelectorAll('.bulk-did-cb');
+    const checkedBoxes = document.querySelectorAll('.bulk-did-cb:checked');
+    const count = checkedBoxes.length;
+
+    const actionBar = document.getElementById('bulk-did-action-bar');
+    const countSpan = document.getElementById('bulk-did-selected-count');
+    const checkAll  = document.getElementById('bulk-did-check-all');
+
+    if (countSpan) countSpan.textContent = count;
+
+    if (actionBar) {
+        actionBar.style.display = (count > 0) ? 'inline-flex' : 'none';
+    }
+
+    if (checkAll) {
+        const visibleCheckboxes = Array.from(checkboxes).filter(function(cb) {
+            const tr = cb.closest('tr.did-request-row');
+            return tr && tr.style.display !== 'none';
+        });
+        const visibleChecked = visibleCheckboxes.filter(function(cb) { return cb.checked; });
+        
+        checkAll.checked = (visibleCheckboxes.length > 0 && visibleChecked.length === visibleCheckboxes.length);
+        checkAll.indeterminate = (visibleChecked.length > 0 && visibleChecked.length < visibleCheckboxes.length);
+    }
+}
+
+function clearBulkDidSelection() {
+    const checkboxes = document.querySelectorAll('.bulk-did-cb');
+    checkboxes.forEach(function(cb) {
+        cb.checked = false;
+    });
+    const checkAll = document.getElementById('bulk-did-check-all');
+    if (checkAll) {
+        checkAll.checked = false;
+        checkAll.indeterminate = false;
+    }
+    onDidCheckChange();
+}
+
+function toggleSelectAllDidRequests(checkState) {
+    const checkboxes = document.querySelectorAll('.bulk-did-cb');
+    checkboxes.forEach(function(cb) {
+        const tr = cb.closest('tr.did-request-row');
+        if (tr && tr.style.display !== 'none') {
+            cb.checked = checkState;
+        }
+    });
+    onDidCheckChange();
+}
+
+function confirmBulkApproveDidRequests() {
+    const checkedBoxes = document.querySelectorAll('.bulk-did-cb:checked');
+    const selectedIds = [];
+    checkedBoxes.forEach(function(cb) {
+        if (cb.value) selectedIds.push(cb.value);
+    });
+
+    if (selectedIds.length === 0) {
+        Swal.fire({
+            icon: 'info',
+            title: 'Pilih Request Terlebih Dahulu',
+            text: 'Silakan beri centang pada kotak ceklis request yang ingin disetujui (ACC).'
+        });
+        return;
+    }
+
+    const count = selectedIds.length;
+
+    Swal.fire({
+        title: 'Setujui Request Terpilih (ACC Bulk)',
+        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
+              'Anda akan menyetujui sekaligus <b>' + count + ' pengajuan persetujuan DID</b> yang dicentang.<br><br>' +
+              '<p style="font-size: 11px; color: #047857; background-color: #ecfdf5; padding: 8px 10px; border-radius: 6px; border: 1px solid #a7f3d0;">' +
+              'Seluruh data lot terpilih akan otomatis di-insert ke tabel Daily Inspection Data (DID) dengan status OK.' +
+              '</p>' +
+              '</div>',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#059669',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Setujui Semua (' + count + ' Request)',
+        cancelButtonText: 'Batal'
+    }).then(function(result) {
+        if (result.isConfirmed) {
+            Swal.fire({
+                title: 'Memproses...',
+                text: 'Menyetujui ' + count + ' request dan memperbarui basis data DID...',
+                allowOutsideClick: false,
+                didOpen: function() { Swal.showLoading(); }
+            });
+
+            var formData = new FormData();
+            formData.append('ids', selectedIds.join(','));
+
+            fetch('approve.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Disetujui!',
+                        text: data.message || (count + ' request DID berhasil disetujui.'),
+                        confirmButtonColor: '#059669'
+                    }).then(function() {
+                        window.location.reload();
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal',
+                        text: data.message || 'Terjadi kesalahan saat menyetujui request massal.'
                     });
                 }
             })
