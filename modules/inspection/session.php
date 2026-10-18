@@ -3801,6 +3801,34 @@ function renderScanHistoryDrawer() {
         '</div>';
 }
 
+function resetLiveScanAlertPanel() {
+    var panel = document.getElementById('scan-live-status-panel');
+    var neutralEl = document.getElementById('live-status-content-neutral');
+    var successEl = document.getElementById('live-status-content-success');
+    var rejectedEl = document.getElementById('live-status-content-rejected');
+    var historyEl = document.getElementById('live-status-content-history');
+
+    if (!panel) return;
+    panel.style.backgroundColor = '#ffffff';
+    panel.style.borderColor = '#e2e8f0';
+
+    if (successEl) {
+        successEl.classList.add('hidden');
+        successEl.innerHTML = '';
+    }
+    if (rejectedEl) {
+        rejectedEl.classList.add('hidden');
+        rejectedEl.innerHTML = '';
+    }
+    if (historyEl) {
+        historyEl.classList.add('hidden');
+        historyEl.innerHTML = '';
+    }
+    if (neutralEl) {
+        neutralEl.classList.remove('hidden');
+    }
+}
+
 function showLiveScanAlert(type, title, message, extraData) {
     var panel = document.getElementById('scan-live-status-panel');
     var neutralEl = document.getElementById('live-status-content-neutral');
@@ -4490,12 +4518,14 @@ function clearAllScannedLabels() {
         }).then(function(res) {
             if (res.isConfirmed) {
                 scannedLabelsList = [];
+                if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
                 renderScannedLabelsTable();
             }
         });
     } else {
         if (confirm('Yakin ingin mereset semua label terverifikasi?')) {
             scannedLabelsList = [];
+            if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
             renderScannedLabelsTable();
         }
     }
@@ -5172,6 +5202,7 @@ function resetScanModalState() {
     // 4. Update UI tables & cards
     setPlanningTypeTab('kanban');
 
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
     if (typeof renderScannedLabelsTable === 'function') renderScannedLabelsTable();
     if (typeof updateSafetyStockDeductionUI === 'function') updateSafetyStockDeductionUI();
 }
@@ -6041,6 +6072,7 @@ function formatEtaDate(etaRaw) {
 
 function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, planType, availSsQty, totalPassedQty, targetTotalQty, kanbanNo, etaRaw) {
     clearAllScannedLabels();
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
     selectedSsLotIds = [];
     selectedSsSessionIds = [];
 
@@ -6240,6 +6272,8 @@ function doBackToStep1() {
     var btnChangeItem = document.getElementById('btn-change-item-header');
     if (btnChangeItem) btnChangeItem.style.display = 'none';
 
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
+
     // Render data tabel planning (gunakan cache yang ada jika sudah dimuat, atau refresh via AJAX)
     if (cachedPlanningItems && cachedPlanningItems.length > 0) {
         renderPlanningTableRows(cachedPlanningItems);
@@ -6317,6 +6351,7 @@ function goToStep2IfSelected() {
 
 function skipPlanningSelection() {
     clearAllScannedLabels();
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
     selectedSsLotIds = [];
 
     selectedPlanningId = 0;
@@ -6352,6 +6387,7 @@ function skipPlanningSelection() {
 
 function startDirectSafetyStockScan(presetPartCode, presetLotNum, presetRefNum) {
     clearAllScannedLabels();
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
     selectedSsLotIds = [];
 
     selectedPlanningId = 0;
