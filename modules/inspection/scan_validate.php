@@ -431,6 +431,74 @@ try {
                 $ngDefects = $stmtNg->fetchAll(PDO::FETCH_ASSOC);
             }
 
+            // Ambil data disposisi / penutupan karantina administratif jika ada
+            $dispositionInfo = null;
+            if ($slotId > 0) {
+                $stmtClosure = $pdo->prepare("
+                    SELECT lqc.*, u.name AS closed_by_name
+                    FROM lot_quarantine_closures lqc
+                    LEFT JOIN users u ON u.id = lqc.closed_by
+                    WHERE lqc.session_lot_id = :slot_id
+                    ORDER BY lqc.id DESC LIMIT 1
+                ");
+                $stmtClosure->execute([':slot_id' => $slotId]);
+                $closureRow = $stmtClosure->fetch(PDO::FETCH_ASSOC);
+
+                if ($closureRow) {
+                    $dispositionInfo = [
+                        'has_disposition' => true,
+                        'notes'           => $closureRow['notes'],
+                        'closed_by'       => $closureRow['closed_by_name'] ?: 'Admin / Supervisor',
+                        'closed_at'       => !empty($closureRow['closed_at']) ? date('d M Y, H:i', strtotime($closureRow['closed_at'])) . ' WIB' : '-'
+                    ];
+                } elseif (!empty($latestRecord['chief_notes'])) {
+                    $dispositionInfo = [
+                        'has_disposition' => true,
+                        'notes'           => $latestRecord['chief_notes'],
+                        'closed_by'       => $latestRecord['chief_name'] ?: 'Chief QC / Supervisor',
+                        'closed_at'       => !empty($latestRecord['closed_at']) ? date('d M Y, H:i', strtotime($latestRecord['closed_at'])) . ' WIB' : '-'
+                    ];
+                }
+            }
+
+            // Fallback: Jika slotId tidak langsung cocok, cari berdasarkan Part Code + Lot Number (+ Ref jika ada)
+            if (!$dispositionInfo) {
+                $refFilterSql = !empty($latestRecord['ref_number']) ? "AND UPPER(isl2.ref_number) = UPPER(:ref2)" : "";
+                $stmtClosureFallback = $pdo->prepare("
+                    SELECT lqc.*, u.name AS closed_by_name
+                    FROM lot_quarantine_closures lqc
+                    JOIN inspection_session_lots isl2 ON isl2.id = lqc.session_lot_id
+                    JOIN inspection_sessions s2 ON s2.id = isl2.inspection_session_id
+                    LEFT JOIN daily_inspection_data did2 ON did2.id = s2.did_id
+                    LEFT JOIN kanban_items ki2 ON ki2.id = s2.kanban_item_id
+                    LEFT JOIN master_parts mp2 ON mp2.id = s2.part_id
+                    LEFT JOIN users u ON u.id = lqc.closed_by
+                    WHERE UPPER(isl2.lot_number) = UPPER(:lot2)
+                      AND (UPPER(did2.part_code) = UPPER(:p1) OR UPPER(ki2.item_code) = UPPER(:p2) OR UPPER(mp2.part_code) = UPPER(:p3))
+                      {$refFilterSql}
+                    ORDER BY lqc.id DESC LIMIT 1
+                ");
+                $paramsFallback = [
+                    ':lot2' => $lotNumber,
+                    ':p1'   => $partCode,
+                    ':p2'   => $partCode,
+                    ':p3'   => $partCode
+                ];
+                if (!empty($latestRecord['ref_number'])) {
+                    $paramsFallback[':ref2'] = $latestRecord['ref_number'];
+                }
+                $stmtClosureFallback->execute($paramsFallback);
+                $fbClosureRow = $stmtClosureFallback->fetch(PDO::FETCH_ASSOC);
+                if ($fbClosureRow) {
+                    $dispositionInfo = [
+                        'has_disposition' => true,
+                        'notes'           => $fbClosureRow['notes'],
+                        'closed_by'       => $fbClosureRow['closed_by_name'] ?: 'Admin / Supervisor',
+                        'closed_at'       => !empty($fbClosureRow['closed_at']) ? date('d M Y, H:i', strtotime($fbClosureRow['closed_at'])) . ' WIB' : '-'
+                    ];
+                }
+            }
+
             if (ob_get_length()) ob_clean();
             echo json_encode([
                 'success' => true,
@@ -447,7 +515,8 @@ try {
                     'lot_number' => $latestRecord['lot_number'],
                     'qty' => (int)($latestRecord['qty'] ?? 0),
                     'remarks' => $latestRecord['remarks'] ?: '-',
-                    'ng_defects' => $ngDefects
+                    'ng_defects' => $ngDefects,
+                    'disposition' => $dispositionInfo
                 ],
                 'did' => [
                     'id' => $didRow['id'],

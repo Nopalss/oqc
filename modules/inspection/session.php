@@ -3138,6 +3138,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (prefilledScannedLot && document.getElementById('scan-lot-number')) {
             document.getElementById('scan-lot-number').value = prefilledScannedLot;
         }
+        if (prefilledScannedRef && document.getElementById('scan-ref-number')) {
+            document.getElementById('scan-ref-number').value = prefilledScannedRef;
+        }
     }, 100);
 });
 <?php else: ?>
@@ -3187,7 +3190,7 @@ function toggleAutoStartMode() {
         if (typeof Toast !== 'undefined' && typeof Toast.fire === 'function') {
             Toast.fire({
                 icon: 'info',
-                title: 'Pengecekan Safety Stock khusus 1 lot per inspeksi (Single Lot).'
+                title: 'Safety Stock dalam Mode Multi-Lot (scan seluruh box lalu klik Mulai Inspeksi).'
             });
         }
         return;
@@ -3211,10 +3214,10 @@ function updateAutoStartToggleUI() {
     if (!btn) return;
     if (selectedPlanningType === 'safety_stock') {
         btn.className = "px-2.5 py-1 rounded-lg text-[10px] font-extrabold bg-purple-600 text-white border border-purple-700 shadow-2xs cursor-default flex items-center space-x-1";
-        btn.innerHTML = '<span>⚡ Mode Single Lot (Safety Stock)</span>';
-        btn.title = "Pengecekan Safety Stock selalu 1 Lot per inspeksi (langsung mulai inspeksi workbench).";
+        btn.innerHTML = '<span>📦 Mode Multi-Lot (Safety Stock)</span>';
+        btn.title = "Mode Multi-Lot Safety Stock: scan box fisik satu per satu lalu klik tombol Mulai Inspeksi.";
         if (helpText) {
-            helpText.innerHTML = 'Sistem membaca label Safety Stock secara otomatis. 1 Label / Lot langsung diproses ke Workbench.';
+            helpText.innerHTML = 'Scan label barcode box Safety Stock bertahap (Multi-Lot). Klik tombol Mulai Inspeksi jika seluruh box selesai discan.';
         }
     } else if (selectedPlanningType === 'kanban' || selectedPlanningType === 'partial') {
         btn.className = "px-2.5 py-1 rounded-lg text-[10px] font-extrabold bg-slate-200 text-slate-700 border border-slate-300 shadow-2xs flex items-center space-x-1 cursor-default";
@@ -3847,6 +3850,50 @@ function showLiveScanAlert(type, title, message, extraData) {
                 defectsHtml = '<div style="font-size: 10.5px; color: #92400e; font-style: italic; padding: 2px 4px;">• Defect Eks-NG / Perbaikan Tercatat</div>';
             }
 
+            // Catatan Disposisi Admin / Divisi jika ada
+            var disp = info.disposition || null;
+            var dispositionHtml = '';
+            if (disp && disp.has_disposition && disp.notes) {
+                dispositionHtml = 
+                    '<div style="background-color: #f0f9ff; border: 1.5px solid #bae6fd; border-radius: 6px; padding: 6px 9px; margin-top: 5px;">' +
+                        '<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">' +
+                            '<span style="font-size: 9.5px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.03em; display: inline-flex; align-items: center; gap: 4px;">' +
+                                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+                                'CATATAN DISPOSISI ADMIN / DIVISI:' +
+                            '</span>' +
+                            '<span style="font-size: 8.5px; font-weight: 800; color: #0284c7; background: #e0f2fe; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px;">Disposisi Selesai</span>' +
+                        '</div>' +
+                        '<div style="font-size: 11px; font-weight: 700; color: #0c4a6e; line-height: 1.35; background: #ffffff; border: 1px solid #e0f2fe; border-radius: 5px; padding: 5px 8px;">' +
+                            '"' + escapeHtml(disp.notes) + '"' +
+                        '</div>' +
+                        '<div style="font-size: 9px; font-weight: 600; color: #0284c7; margin-top: 3px; display: flex; justify-content: space-between;">' +
+                            '<span>Oleh: <b>' + escapeHtml(disp.closed_by || 'Admin') + '</b></span>' +
+                            '<span>Waktu: <b>' + escapeHtml(disp.closed_at || '-') + '</b></span>' +
+                        '</div>' +
+                    '</div>';
+            } else {
+                dispositionHtml = 
+                    '<div style="background-color: #fefce8; border: 1px solid #fef08a; border-radius: 6px; padding: 4px 8px; margin-top: 5px; display: flex; align-items: center; justify-content: space-between;">' +
+                        '<span style="font-size: 9.5px; font-weight: 700; color: #854d0e;">' +
+                            'ℹ <b>STATUS DISPOSISI:</b> Belum ada catatan disposisi resmi dari Admin / Divisi terkait.' +
+                        '</span>' +
+                        '<span style="font-size: 8.5px; font-weight: 800; color: #a16207; background: #fef9c3; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px;">Pending Disposisi</span>' +
+                    '</div>';
+            }
+
+            // Panduan & Kepastian untuk Inspektur (Bisa Re-inspeksi)
+            var guidanceHtml = 
+                '<div style="background-color: #ecfdf5; border: 1.5px solid #a7f3d0; border-radius: 6px; padding: 5px 8px; margin-top: 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">' +
+                    '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        '<span style="background-color: #059669; color: #ffffff; font-size: 9px; font-weight: 900; padding: 2px 6px; border-radius: 4px; text-transform: uppercase; white-space: nowrap;">' +
+                            '✓ BISA DI-REINSPEKSI' +
+                        '</span>' +
+                        '<span style="font-size: 10px; font-weight: 700; color: #065f46; line-height: 1.25;">' +
+                            'Box diizinkan masuk ke sesi inspeksi. Harap fokus memeriksa ulang titik defect sebelumnya saat sampling AQL.' +
+                        '</span>' +
+                    '</div>' +
+                '</div>';
+
             successEl.innerHTML = 
                 '<!-- Header Warning Eks-NG -->' +
                 '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #fde68a; padding-bottom: 5px; margin-bottom: 6px;">' +
@@ -3878,7 +3925,9 @@ function showLiveScanAlert(type, title, message, extraData) {
                 '<div style="background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; padding: 4px 8px;">' +
                     '<span style="font-size: 9px; font-weight: 800; color: #9f1239; text-transform: uppercase; display: block; margin-bottom: 2px;">RIWAYAT DEFECT / NG SEBELUMNYA:</span>' +
                     defectsHtml +
-                '</div>';
+                '</div>' +
+                dispositionHtml +
+                guidanceHtml;
         } else {
             // Tampilan Standar Normal / Safety Stock
             panel.style.backgroundColor = '#f0fdf4';
@@ -4190,11 +4239,7 @@ function addScannedLabelFromObj(lbl) {
 function proceedAddLabelToList(lbl) {
     var isSafetyStock = (typeof selectedPlanningType !== 'undefined' && selectedPlanningType === 'safety_stock') || (typeof currentPlanTypeTab !== 'undefined' && currentPlanTypeTab === 'safety_stock');
 
-    if (isSafetyStock) {
-        scannedLabelsList = [lbl]; // Safety Stock strictly 1 Lot only!
-    } else {
-        scannedLabelsList.push(lbl);
-    }
+    scannedLabelsList.push(lbl);
 
     var physicalScanned = 0;
     scannedLabelsList.forEach(function(l) {
@@ -4212,7 +4257,6 @@ function proceedAddLabelToList(lbl) {
     var usedSsQty = (typeof isSafetyStockDeducted !== 'undefined' && isSafetyStockDeducted && typeof selectedSsLotIds !== 'undefined' && selectedSsLotIds.length > 0) ? Math.min(selectedPlanningQty || 0, totalSsCheckedQty) : 0;
     var effectiveTotalScanned = physicalScanned + usedSsQty;
 
-    var isSafetyStock = (typeof selectedPlanningType !== 'undefined' && selectedPlanningType === 'safety_stock') || (typeof currentPlanTypeTab !== 'undefined' && currentPlanTypeTab === 'safety_stock');
     var targetQty = isSafetyStock ? 0 : (selectedPlanningQty || 0);
 
     var refDisp = lbl.Z5 ? escapeHtml(lbl.Z5) : '-';
@@ -4290,7 +4334,8 @@ function proceedAddLabelToList(lbl) {
             progressHtml +
         '</div>';
 
-    var isAutoStartActive = isSafetyStock || (autoStartSingleLabel && selectedPlanningType !== 'kanban');
+    // Safety Stock sekarang Multi-Lot (tidak auto-start langsung ke workbench, kumpulkan seluruh box terlebih dahulu)
+    var isAutoStartActive = !isSafetyStock && (autoStartSingleLabel && selectedPlanningType !== 'kanban');
 
     // Update in-place persistent live scan status panel (Zero-popup)
     showLiveScanAlert('success', 'BOX #' + boxIndex + ' BERHASIL DISCAN', 'Box fisik berhasil diverifikasi dan ditambahkan ke daftar kuota.', {
@@ -4306,7 +4351,7 @@ function proceedAddLabelToList(lbl) {
         if (typeof Toast !== 'undefined' && typeof Toast.fire === 'function') {
             Toast.fire({
                 icon: 'success',
-                title: isSafetyStock ? 'Label Discan (1 Lot Safety Stock) - Memuat Inspeksi...' : 'Label Discan (1 Box) - Memuat Inspeksi...'
+                title: 'Label Discan (1 Box) - Memuat Inspeksi...'
             });
         }
     }
@@ -6214,8 +6259,16 @@ function doBackToStep1() {
 
 function goToStep2IfSelected() {
     if (selectedPlanningId || selectedPlanningPartCode) {
-        document.getElementById('wizard-step-1-content').classList.add('hidden');
-        document.getElementById('wizard-step-2-content').classList.remove('hidden');
+        var step1El = document.getElementById('wizard-step-1-content');
+        var step2El = document.getElementById('wizard-step-2-content');
+        if (step1El) {
+            step1El.classList.add('hidden');
+            step1El.style.display = 'none';
+        }
+        if (step2El) {
+            step2El.classList.remove('hidden');
+            step2El.style.display = 'flex';
+        }
 
         var btnChangeItem = document.getElementById('btn-change-item-header');
         if (btnChangeItem) btnChangeItem.style.display = 'inline-flex';
@@ -6276,8 +6329,19 @@ function skipPlanningSelection() {
     document.getElementById('selected-plan-qty').textContent = '-';
     document.getElementById('selected-plan-tag').classList.add('hidden');
 
-    document.getElementById('wizard-step-1-content').classList.add('hidden');
-    document.getElementById('wizard-step-2-content').classList.remove('hidden');
+    var step1El = document.getElementById('wizard-step-1-content');
+    var step2El = document.getElementById('wizard-step-2-content');
+    if (step1El) {
+        step1El.classList.add('hidden');
+        step1El.style.display = 'none';
+    }
+    if (step2El) {
+        step2El.classList.remove('hidden');
+        step2El.style.display = 'flex';
+    }
+
+    var btnChangeItem = document.getElementById('btn-change-item-header');
+    if (btnChangeItem) btnChangeItem.style.display = 'inline-flex';
 
     var rawInput = document.getElementById('scan-qr-raw');
     if (rawInput) {
@@ -6313,7 +6377,7 @@ function startDirectSafetyStockScan(presetPartCode, presetLotNum, presetRefNum) 
     tagEl.className = 'text-[9px] bg-purple-100 text-purple-800 border border-purple-300 px-1.5 py-0.2 rounded font-sans font-extrabold';
     tagEl.classList.remove('hidden');
 
-    document.getElementById('selected-plan-qty').textContent = 'Single Lot (1 Lot Langsung)';
+    document.getElementById('selected-plan-qty').textContent = 'Multi-Lot (Akumulasi Stok Bebas)';
 
     document.getElementById('scan-part-code').value = presetPartCode || '';
     document.getElementById('scan-lot-number').value = presetLotNum || '064';
@@ -6341,11 +6405,19 @@ function startDirectSafetyStockScan(presetPartCode, presetLotNum, presetRefNum) 
     }
     var titleEl = document.getElementById('wizard-modal-title');
     if (titleEl) titleEl.textContent = 'OQC Inspection Workbench';
-    var subEl = document.getElementById('wizard-modal-subtitle');
-    if (subEl) subEl.textContent = 'Scan QR Barcode atau input data label box Safety Stock Gudang';
+    var step1El = document.getElementById('wizard-step-1-content');
+    var step2El = document.getElementById('wizard-step-2-content');
+    if (step1El) {
+        step1El.classList.add('hidden');
+        step1El.style.display = 'none';
+    }
+    if (step2El) {
+        step2El.classList.remove('hidden');
+        step2El.style.display = 'flex';
+    }
 
-    document.getElementById('wizard-step-1-content').classList.add('hidden');
-    document.getElementById('wizard-step-2-content').classList.remove('hidden');
+    var btnChangeItem = document.getElementById('btn-change-item-header');
+    if (btnChangeItem) btnChangeItem.style.display = 'inline-flex';
 
     renderScannedLabelsTable();
     updateAutoStartToggleUI();
@@ -6362,11 +6434,14 @@ if (!['safety_stock', 'kanban', 'partial'].includes(currentPlanTypeTab)) {
     currentPlanTypeTab = 'kanban';
 }
 
-function setPlanningTypeTab(type) {
+function setPlanningTypeTab(type, presetPartCode, presetLotNum, presetRefNum) {
     currentPlanTypeTab = type;
     updateAutoStartToggleUI();
     if (type === 'safety_stock') {
-        startDirectSafetyStockScan();
+        var pCode = presetPartCode || (typeof prefilledPartCode !== 'undefined' ? prefilledPartCode : '');
+        var lNum = presetLotNum || (typeof prefilledScannedLot !== 'undefined' ? prefilledScannedLot : '');
+        var rNum = presetRefNum || (typeof prefilledScannedRef !== 'undefined' ? prefilledScannedRef : '');
+        startDirectSafetyStockScan(pCode, lNum, rNum);
         return;
     }
 
@@ -6435,8 +6510,8 @@ function processPlanningSearchSubmit() {
         }
     }
 
-    // 2. Jika hanya ada 1 baris yang cocok terlihat di tabel
-    if (res.visibleCount === 1 && res.lastVisibleRow) {
+    // 2. Jika hanya ada 1 baris yang cocok terlihat di tabel (HANYA untuk ketik manual, BUKAN untuk scan QR box)
+    if (!isQr && res.visibleCount === 1 && res.lastVisibleRow) {
         var actionBtn = res.lastVisibleRow.querySelector('button');
         if (actionBtn) {
             inputEl.value = '';
@@ -6456,13 +6531,13 @@ function processPlanningSearchSubmit() {
         .then(function(data) {
             inputEl.removeAttribute('disabled');
             if (data && data.success && Array.isArray(data.items) && data.items.length > 0) {
-                // Temukan item yang exact match
+                // Temukan item yang benar-benar exact match (Part Code atau No Kanban)
                 var matchedPlan = data.items.find(function(item) {
                     var c = (item.item_code || '').trim().toLowerCase();
                     var kb = (item.kanban_no || '').trim().toLowerCase();
                     var targetLower = targetCode.toLowerCase();
                     return (c === targetLower || kb === targetLower || ('#' + kb) === targetLower);
-                }) || data.items[0];
+                });
 
                 if (matchedPlan) {
                     inputEl.value = '';
@@ -6502,9 +6577,10 @@ function processPlanningSearchSubmit() {
 
 function handlePartNotFoundInKanban(targetCode, rawVal, qrParsed) {
     var isQr = !!(qrParsed && qrParsed.Z1);
-    var pCode = isQr ? qrParsed.Z1.trim() : targetCode;
-    var lNum  = (qrParsed && qrParsed.Z2) ? qrParsed.Z2.trim() : '';
-    var rNum  = (qrParsed && qrParsed.Z5) ? qrParsed.Z5.trim() : '';
+    var pCode = isQr ? String(qrParsed.Z1 || '').trim() : String(targetCode || '').trim();
+    var lNum  = (qrParsed && qrParsed.Z2 != null) ? String(qrParsed.Z2).trim() : '';
+    var rNum  = (qrParsed && qrParsed.Z5 != null) ? String(qrParsed.Z5).trim() : '';
+    var qQty  = (qrParsed && qrParsed.Z3 != null) ? String(qrParsed.Z3).trim() : '';
 
     var inputEl = document.getElementById('planning-search-input');
     if (inputEl) inputEl.value = '';
@@ -6512,6 +6588,15 @@ function handlePartNotFoundInKanban(targetCode, rawVal, qrParsed) {
     // Smart Auto-Route: Part tidak ada di jadwal Kanban delivery,
     // langsung alihkan otomatis ke kamar Safety Stock Gudang!
     startDirectSafetyStockScan(pCode, lNum, rNum);
+
+    if (qQty && document.getElementById('scan-label-qty')) {
+        document.getElementById('scan-label-qty').value = qQty;
+    }
+
+    // Jika discan berupa QR lengkap, isikan juga ke scan-qr-raw agar siap dieksekusi
+    if (isQr && rawVal && document.getElementById('scan-qr-raw')) {
+        document.getElementById('scan-qr-raw').value = rawVal;
+    }
 
     // Tampilkan toast notifikasi pintar non-intrusif di pojok atas (tanpa menghalangi fokus scan)
     if (typeof Swal !== 'undefined') {
@@ -6561,9 +6646,10 @@ function filterPlanningItems() {
         var rowKbNo = (row.getAttribute('data-kanban-no') || '').trim().toLowerCase();
         var rowCust = (row.getAttribute('data-customer') || '').trim().toLowerCase();
 
-        var queryNum = parseInt(query, 10);
-        var rowCodeNum = parseInt(rowCode, 10);
-        var isNumericMatch = (!isNaN(queryNum) && !isNaN(rowCodeNum) && queryNum === rowCodeNum && query.length <= 10 && rowCode.length <= 10);
+        // Cek strictly digits untuk numeric match (hindari parseInt "1A..." yang terpotong menjadi 1)
+        var isQueryPureDigits = /^[0-9]+$/.test(query);
+        var isRowCodePureDigits = /^[0-9]+$/.test(rowCode);
+        var isNumericMatch = (isQueryPureDigits && isRowCodePureDigits && parseInt(query, 10) === parseInt(rowCode, 10));
 
         var isExact = (query !== '' && (rowCode === query || rowKbNo === query || ('#' + rowKbNo) === query || isNumericMatch));
         
@@ -8029,31 +8115,59 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                 '</div>';
         } else {
             // Skenario: Belum pernah ada re-inspeksi yang passed (baru kali ini di-reinspeksi lagi)
-            var dispInfo = (lot.rejected_info && lot.rejected_info.is_disposed && lot.rejected_info.chief_notes) ? lot.rejected_info : null;
-            if (dispInfo) {
+            var dInfo = lot.disposition_info || (lot.rejected_info && lot.rejected_info.disposition) || null;
+            var dispNotes = '';
+            var dispBy = '';
+            var dispAt = '';
+
+            if (dInfo && dInfo.has_disposition && dInfo.notes) {
+                dispNotes = dInfo.notes;
+                dispBy = dInfo.closed_by || 'Admin / Supervisor';
+                dispAt = dInfo.closed_at || '-';
+            } else if (lot.rejected_info && lot.rejected_info.chief_notes) {
+                dispNotes = lot.rejected_info.chief_notes;
+                dispBy = lot.rejected_info.chief_name || 'Chief QC';
+                dispAt = lot.rejected_info.chief_approved_at || '-';
+            }
+
+            if (dispNotes) {
                 reinspectionStatusCard = 
-                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #f0f9ff; border: 1.5px solid #7dd3fc; border-radius: 8px; display: flex; flex-direction: column; gap: 3px;">' +
+                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #f0f9ff; border: 1.5px solid #7dd3fc; border-radius: 8px; display: flex; flex-direction: column; gap: 4px;">' +
                         '<div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">' +
                             '<div style="display: flex; align-items: center; gap: 5px;">' +
-                                '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #0284c7; flex-shrink: 0;"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
-                                '<span style="font-size: 9.5px; font-weight: 900; color: #0369a1; text-transform: uppercase;">Disposisi Chief:</span>' +
-                                '<span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 8.5px; font-weight: 800;">' + escapeHtml(dispInfo.chief_name) + '</span>' +
+                                '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #0284c7; flex-shrink: 0;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
+                                '<span style="font-size: 9.5px; font-weight: 900; color: #0369a1; text-transform: uppercase;">Catatan Disposisi Admin / Divisi:</span>' +
                             '</div>' +
-                            '<span style="font-family: monospace; font-size: 8.5px; font-weight: 700; color: #0284c7;">' + escapeHtml(dispInfo.chief_approved_at || '-') + '</span>' +
+                            '<span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 8.5px; font-weight: 800;">Disposisi Selesai</span>' +
                         '</div>' +
-                        '<div style="font-size: 9px; color: #0c4a6e; font-weight: 600; line-height: 1.3; background: #ffffff; padding: 4px 7px; border-radius: 6px; border: 1px solid #e0f2fe;">' +
-                            '<b>Catatan:</b> ' + escapeHtml(dispInfo.chief_notes) +
+                        '<div style="font-size: 9.5px; color: #0c4a6e; font-weight: 700; line-height: 1.35; background: #ffffff; padding: 5px 8px; border-radius: 6px; border: 1px solid #e0f2fe;">' +
+                            '"' + escapeHtml(dispNotes) + '"' +
+                        '</div>' +
+                        '<div style="display: flex; align-items: center; justify-content: space-between; font-size: 8.5px; color: #0369a1; margin-top: 2px;">' +
+                            '<span>Oleh: <b>' + escapeHtml(dispBy) + '</b></span>' +
+                            '<span>Waktu: <b>' + escapeHtml(dispAt) + '</b></span>' +
+                        '</div>' +
+                        '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 5px; padding: 3px 6px; display: flex; align-items: center; gap: 5px; margin-top: 2px;">' +
+                            '<span style="background-color: #059669; color: #ffffff; font-size: 8px; font-weight: 900; padding: 1px 5px; border-radius: 3px;">✓ SIAP RE-INSPEKSI</span>' +
+                            '<span style="font-size: 8.5px; font-weight: 700; color: #065f46;">Box telah disortir/didisposisi. Fokus uji ulang pada titik defect sebelumnya.</span>' +
                         '</div>' +
                     '</div>';
             } else {
                 reinspectionStatusCard = 
-                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; display: flex; align-items: flex-start; gap: 6px;">' +
-                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #d97706; flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
-                        '<div>' +
-                            '<div style="font-size: 9.5px; font-weight: 800; color: #92400e; margin-bottom: 2px;">Belum Dinyatakan Lulus Re-Inspeksi</div>' +
-                            '<div style="font-size: 9px; color: #b45309; font-weight: 600; line-height: 1.3;">' +
-                                'Lot ini belum pernah melalui pemeriksaan ulang yang berstatus lulus. Pemeriksaan pada sesi ini merupakan pemeriksaan ulang pertama kali setelah tercatat riwayat penolakan.' +
+                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; display: flex; flex-direction: column; gap: 3px;">' +
+                        '<div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">' +
+                            '<div style="display: flex; align-items: center; gap: 5px;">' +
+                                '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #d97706; flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+                                '<span style="font-size: 9.5px; font-weight: 800; color: #92400e;">Status Disposisi & Re-Inspeksi</span>' +
                             '</div>' +
+                            '<span style="background-color: #fef9c3; color: #a16207; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px; font-size: 8px; font-weight: 800;">Pending Disposisi</span>' +
+                        '</div>' +
+                        '<div style="font-size: 9px; color: #b45309; font-weight: 600; line-height: 1.3;">' +
+                            'Belum ada catatan disposisi resmi dari Admin/Divisi. Lot tetap dapat diperiksa ulang pada sesi ini.' +
+                        '</div>' +
+                        '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 5px; padding: 3px 6px; display: flex; align-items: center; gap: 5px; margin-top: 2px;">' +
+                            '<span style="background-color: #059669; color: #ffffff; font-size: 8px; font-weight: 900; padding: 1px 5px; border-radius: 3px;">✓ BISA RE-INSPEKSI</span>' +
+                            '<span style="font-size: 8.5px; font-weight: 700; color: #065f46;">Lakukan pemeriksaan ulang dengan teliti sebelum memutuskan PASSED/REJECTED.</span>' +
                         '</div>' +
                     '</div>';
             }
@@ -8129,10 +8243,9 @@ function handleSessionFinishedModalFlow(data) {
         Swal.close();
     }
 
-    // Langsung buka Modal Step 1 (Pilih Item Planning Aktif) secara instan
+    // Langsung buka Modal Step 1 (Pilih Item Planning Aktif) secara instan agar smart scanner dapat mendeteksi apakah lot berikutnya Kanban atau Safety Stock
     setTimeout(function() {
-        var sessType = (s && s.inspection_type) ? s.inspection_type : '';
-        openScanModal(0, sessType);
+        openScanModal(0, 'kanban');
     }, 60);
 }
 

@@ -220,6 +220,52 @@ try {
             if (!empty($prevRows)) {
                 $slRef['was_rejected_before'] = true;
                 $slRef['previous_ng_defects'] = $prevRows;
+
+                // Ambil info disposisi karantina jika ada
+                try {
+                    $sqlClosure = "
+                        SELECT lqc.*, u.name AS closed_by_name
+                        FROM lot_quarantine_closures lqc
+                        JOIN inspection_session_lots isl ON isl.id = lqc.session_lot_id
+                        JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                        LEFT JOIN users u ON u.id = lqc.closed_by
+                        WHERE " . implode(' AND ', $whereRej) . "
+                        ORDER BY lqc.id DESC LIMIT 1
+                    ";
+                    $stmtCl = $pdo->prepare($sqlClosure);
+                    $stmtCl->execute($paramsRej);
+                    $clRow = $stmtCl->fetch(PDO::FETCH_ASSOC);
+                    if ($clRow) {
+                        $slRef['disposition_info'] = [
+                            'has_disposition' => true,
+                            'notes'           => $clRow['notes'],
+                            'closed_by'       => $clRow['closed_by_name'] ?: 'Admin / Supervisor',
+                            'closed_at'       => !empty($clRow['closed_at']) ? date('d M Y, H:i', strtotime($clRow['closed_at'])) . ' WIB' : '-'
+                        ];
+                    } else {
+                        // Fallback jika tidak ada di closures, cek catatan approval chief
+                        $sqlChief = "
+                            SELECT s.chief_notes, s.closed_at, u.name AS chief_name, isl.chief_notes AS lot_chief_notes
+                            FROM inspection_session_lots isl
+                            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                            LEFT JOIN users u ON u.id = s.chief_approved_by
+                            WHERE " . implode(' AND ', $whereRej) . "
+                              AND ((s.chief_notes IS NOT NULL AND s.chief_notes != '') OR (isl.chief_notes IS NOT NULL AND isl.chief_notes != ''))
+                            ORDER BY isl.id DESC, s.id DESC LIMIT 1
+                        ";
+                        $stmtChief = $pdo->prepare($sqlChief);
+                        $stmtChief->execute($paramsRej);
+                        $chRow = $stmtChief->fetch(PDO::FETCH_ASSOC);
+                        if ($chRow) {
+                            $slRef['disposition_info'] = [
+                                'has_disposition' => true,
+                                'notes'           => !empty($chRow['lot_chief_notes']) ? $chRow['lot_chief_notes'] : $chRow['chief_notes'],
+                                'closed_by'       => $chRow['chief_name'] ?: 'Chief QC',
+                                'closed_at'       => !empty($chRow['closed_at']) ? date('d M Y, H:i', strtotime($chRow['closed_at'])) . ' WIB' : '-'
+                            ];
+                        }
+                    }
+                } catch (Exception $eCl) {}
             }
 
             // 2. Fetch info sesi yang PASSED sebelumnya untuk lot spesifik ini
