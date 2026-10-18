@@ -34,6 +34,16 @@ if (empty($user['id'])) {
     exit;
 }
 
+// Hanya role Admin/Supervisor/Chief/Manager yang boleh Direct Close
+$isAdminOrSupervisor = in_array($user['role'] ?? '', ['supervisor', 'admin', 'superadmin', 'chief', 'manager'], true);
+if (!$isAdminOrSupervisor) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'Akses ditolak. Fitur Direct Close Kanban hanya untuk Administrator / Supervisor / Chief.'
+    ]);
+    exit;
+}
+
 $pdo = getDB();
 if (!$pdo) {
     echo json_encode([

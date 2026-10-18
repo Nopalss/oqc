@@ -226,7 +226,32 @@ if (!function_exists('getLotRowClass')) {
 // -------------------------------------------------------------------------
 $currentUser = current_user();
 $currentUserId = (int)$currentUser['id'];
-$isAdminOrSupervisor = in_array($currentUser['role'] ?? '', ['supervisor', 'admin', 'superadmin', 'chief', 'manager'], true);
+
+// Normalize role: cek role session maupun roles table agar tahan terhadap perbedaan huruf besar/kecil
+$rawRole = strtolower(trim($currentUser['role'] ?? ''));
+$roleNamesList = [$rawRole];
+
+if ($pdo && !empty($currentUser['role_id'])) {
+    try {
+        $stmtRoleCheck = $pdo->prepare("SELECT role_name, display_name FROM roles WHERE id = :rid LIMIT 1");
+        $stmtRoleCheck->execute([':rid' => (int)$currentUser['role_id']]);
+        $rRow = $stmtRoleCheck->fetch(PDO::FETCH_ASSOC);
+        if ($rRow) {
+            $roleNamesList[] = strtolower(trim($rRow['role_name'] ?? ''));
+            $roleNamesList[] = strtolower(trim($rRow['display_name'] ?? ''));
+        }
+    } catch (Exception $eRCheck) {}
+}
+
+$adminRoles = ['admin', 'superadmin', 'supervisor', 'chief', 'manager', 'lead', 'leader'];
+$isAdminOrSupervisor = false;
+foreach ($roleNamesList as $rCheck) {
+    if ($rCheck !== '' && in_array($rCheck, $adminRoles, true)) {
+        $isAdminOrSupervisor = true;
+        break;
+    }
+}
+
 $inspectorFilterId = (isset($_GET['inspector_id']) && (int)$_GET['inspector_id'] > 0 && $isAdminOrSupervisor) ? (int)$_GET['inspector_id'] : 0;
 
 $allowedTabs = ['kanban', 'safety_stock', 'my_inspections', 'my_lots', 'lot_details'];
@@ -314,13 +339,155 @@ if ($qrScan['is_qr'] && $pdo) {
 $search = $rawSearch;
 
 $statusFilter = isset($_GET['status']) ? trim(sanitize($_GET['status'])) : 'all';
+$sourceFilter = isset($_GET['source']) ? trim(sanitize($_GET['source'])) : 'all';
+if (!in_array($sourceFilter, ['all', 'manual', 'import'], true)) {
+    $sourceFilter = 'all';
+}
+
+// Inisialisasi tanggal & range periode
+$todayStart = date('Y-m-d 00:00:00');
+$todayEnd   = date('Y-m-d 23:59:59');
+$dayOfWeek  = (int)date('w');
+$wStart     = date('Y-m-d 00:00:00', strtotime("-{$dayOfWeek} days"));
+$wEnd       = date('Y-m-d 23:59:59', strtotime("+" . (6 - $dayOfWeek) . " days"));
+$mStart     = date('Y-m-01 00:00:00');
+$mEnd       = date('Y-m-t 23:59:59');
+
+$periodDates = [];
+$todayBatches = [];
+$pendingYesterdayCount = 0;
+$selectedDate = isset($_GET['selected_date']) ? trim(sanitize($_GET['selected_date'])) : '';
+
+if ($pdo) {
+    // 1. Ambil daftar tanggal aktif yang memiliki aktivitas Kanban dalam periode terpilih
+    try {
+        $dateCond = "1=1";
+        $dateParams = [];
+        if ($period === 'today') {
+            $dateCond = "DATE(COALESCE(b.imported_at, k.created_at)) = CURDATE()";
+        } elseif ($period === 'this_week') {
+            $dateCond = "DATE(COALESCE(b.imported_at, k.created_at)) BETWEEN :p_w_start AND :p_w_end";
+            $dateParams[':p_w_start'] = date('Y-m-d', strtotime($wStart));
+            $dateParams[':p_w_end']   = date('Y-m-d', strtotime($wEnd));
+        } elseif ($period === 'this_month') {
+            $dateCond = "DATE(COALESCE(b.imported_at, k.created_at)) BETWEEN :p_m_start AND :p_m_end";
+            $dateParams[':p_m_start'] = date('Y-m-d', strtotime($mStart));
+            $dateParams[':p_m_end']   = date('Y-m-d', strtotime($mEnd));
+        } elseif ($period === 'custom' && !empty($startDate) && !empty($endDate)) {
+            $dateCond = "DATE(COALESCE(b.imported_at, k.created_at)) BETWEEN :p_c_start AND :p_c_end";
+            $dateParams[':p_c_start'] = $startDate;
+            $dateParams[':p_c_end']   = $endDate;
+        }
+
+        $dateSql = "
+            SELECT DATE(COALESCE(b.imported_at, k.created_at)) as work_date,
+                   COUNT(k.id) as item_count,
+                   SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count
+            FROM kanban_items k
+            LEFT JOIN kanban_batches b ON b.id = k.batch_id
+            WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+              AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+              AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+              AND {$dateCond}
+            GROUP BY work_date
+            ORDER BY work_date DESC
+        ";
+        $stmtD = $pdo->prepare($dateSql);
+        $stmtD->execute($dateParams);
+        $periodDates = $stmtD->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $eDates) {
+        $periodDates = [];
+    }
+
+    // Tentukan tanggal terpilih default: jika kosong, ambil tanggal pertama yang ada (terbaru), atau hari ini
+    if (empty($selectedDate)) {
+        if (!empty($periodDates)) {
+            $selectedDate = $periodDates[0]['work_date'];
+        } else {
+            $selectedDate = date('Y-m-d');
+        }
+    }
+
+    // 2. Ambil daftar batch khusus untuk tanggal terpilih ($selectedDate)
+    try {
+        $batchSql = "
+            SELECT b.id, b.document_number, b.vendor, b.imported_at, b.import_method,
+                   COUNT(k.id) as item_count,
+                   SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                   SUM(CASE WHEN k.status IN ('in_progress', 'partial', 'rejected') THEN 1 ELSE 0 END) as in_progress_count
+            FROM kanban_batches b
+            JOIN kanban_items k ON k.batch_id = b.id
+            WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+              AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+              AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+              AND (
+                  DATE(b.imported_at) = :b_sel_date 
+                  OR DATE(k.created_at) = :b_sel_date2
+              )
+            GROUP BY b.id, b.document_number, b.vendor, b.imported_at, b.import_method
+            ORDER BY b.imported_at ASC, b.id ASC
+        ";
+        $stmtB = $pdo->prepare($batchSql);
+        $stmtB->execute([
+            ':b_sel_date'  => $selectedDate,
+            ':b_sel_date2' => $selectedDate
+        ]);
+        $todayBatches = $stmtB->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $eBatches) {
+        $todayBatches = [];
+    }
+
+    // 3. Hitung sisa/tunggakan sebelum tanggal terpilih yang belum selesai
+    try {
+        $stmtPy = $pdo->prepare("
+            SELECT COUNT(DISTINCT k.id)
+            FROM kanban_items k
+            WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+              AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+              AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+              AND DATE(k.created_at) < :py_date
+              AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')
+        ");
+        $stmtPy->execute([':py_date' => $selectedDate]);
+        $pendingYesterdayCount = (int)$stmtPy->fetchColumn();
+    } catch (Exception $ePy) {
+        $pendingYesterdayCount = 0;
+    }
+}
+
+// Default penentuan batch: jika belum ada parameter batch_id di URL dan ada batch di tanggal ini, default ke batch pertama
+$scopeFilter = isset($_GET['scope']) ? trim(sanitize($_GET['scope'])) : '';
+if (!in_array($scopeFilter, ['all', 'today', 'pending_yesterday'], true)) {
+    $scopeFilter = '';
+}
+
+if (isset($_GET['batch_id'])) {
+    $batchFilter = trim(sanitize($_GET['batch_id']));
+} else {
+    if (!empty($scopeFilter) && $scopeFilter === 'pending_yesterday') {
+        $batchFilter = 'all';
+    } elseif (!empty($todayBatches)) {
+        $batchFilter = (string)$todayBatches[0]['id'];
+    } else {
+        $batchFilter = 'all';
+    }
+}
+
+if (empty($scopeFilter)) {
+    $scopeFilter = 'today';
+}
+
+$orderFilter = isset($_GET['order_by']) ? trim(sanitize($_GET['order_by'])) : 'paper';
+if (!in_array($orderFilter, ['paper', 'priority'], true)) {
+    $orderFilter = 'paper';
+}
 $typeFilter = isset($_GET['inspection_type']) ? trim(sanitize($_GET['inspection_type'])) : 'all';
 if (!in_array($typeFilter, ['all', 'kanban', 'safety_stock'], true)) {
     $typeFilter = 'all';
 }
 $sort = (isset($_GET['sort']) && $_GET['sort'] === 'asc') ? 'ASC' : 'DESC';
 $page = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-$limit = isset($_GET['limit']) ? max(5, min(200, (int)$_GET['limit'])) : 25;
+$limit = isset($_GET['limit']) ? max(5, min(500, (int)$_GET['limit'])) : 200;
 $offset = ($page - 1) * $limit;
 
 if (!empty($startDate) || !empty($endDate)) {
@@ -341,6 +508,7 @@ $myLotsTabCount = 0;
 $substitutionsBySession = [];
 $ngRecordsByLot = [];
 $defectsByLot = [];
+$itemPositionInBatch = [];
 
 // Stats default
 $stats = [
@@ -401,25 +569,35 @@ if ($pdo) {
 
         if ($period === 'today') {
             $kbBaseWhere[] = "(
-                (COALESCE(k.eta, k.req_date) BETWEEN :kb_t_start1 AND :kb_t_end1)
-                OR (k.created_at BETWEEN :kb_t_start2 AND :kb_t_end2)
-                OR EXISTS (
-                    SELECT 1 FROM inspection_sessions s_today 
-                    WHERE s_today.kanban_item_id = k.id 
-                      AND s_today.started_at BETWEEN :kb_t_start3 AND :kb_t_end3
-                )
+                (k.created_at BETWEEN :kb_t_start1 AND :kb_t_end1)
                 OR (
-                    k.status NOT IN ('completed', 'rejected')
-                    AND COALESCE(k.eta, k.req_date, k.created_at) < :kb_t_start4
+                    k.created_at < :kb_t_start2
+                    AND (
+                        k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')
+                        OR EXISTS (
+                            SELECT 1 FROM inspection_sessions s_today 
+                            WHERE s_today.kanban_item_id = k.id 
+                              AND s_today.started_at BETWEEN :kb_t_start3 AND :kb_t_end3
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM inspection_sessions s_act
+                            WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                        )
+                    )
+                    AND (
+                        k.status != 'completed'
+                        OR EXISTS (
+                            SELECT 1 FROM inspection_sessions s_act
+                            WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                        )
+                    )
                 )
             )";
             $kbBaseParams[':kb_t_start1'] = $todayStart;
             $kbBaseParams[':kb_t_end1']   = $todayEnd;
             $kbBaseParams[':kb_t_start2'] = $todayStart;
-            $kbBaseParams[':kb_t_end2']   = $todayEnd;
             $kbBaseParams[':kb_t_start3'] = $todayStart;
             $kbBaseParams[':kb_t_end3']   = $todayEnd;
-            $kbBaseParams[':kb_t_start4'] = $todayStart;
         } elseif ($period === 'this_week') {
             $kbBaseWhere[] = "(
                 (COALESCE(k.eta, k.req_date) BETWEEN :kb_w_start1 AND :kb_w_end1)
@@ -651,15 +829,12 @@ if ($pdo) {
         $myLotsBaseWhere = ["s.inspector_id = :mylot_uid"];
         $myLotsBaseParams = [':mylot_uid' => ($inspectorFilterId > 0 ? $inspectorFilterId : $currentUserId)];
         
-        // Exclude virtual overflow and direct-pass lots
+        // Exclude virtual overflow and sisa excess lots (tetap sertakan lot hasil penutupan kanban)
         $myLotsBaseWhere[] = "(isl.remarks IS NULL OR (
             isl.remarks NOT LIKE '%Alokasi Safety Stock%' 
             AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%' 
             AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' 
-            AND isl.remarks NOT LIKE '%Direct Close%'
         ))";
-        $myLotsBaseWhere[] = "(isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))";
-        $myLotsBaseWhere[] = "(s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')";
         $myLotsBaseWhere[] = "NOT EXISTS (
             SELECT 1 FROM inspection_session_lots isl_sisa 
             WHERE isl_sisa.inspection_session_id = s.id 
@@ -707,29 +882,158 @@ if ($pdo) {
                 $kbBaseParams[':kb_s5'] = '%' . $search . '%';
             }
 
-            // Calculate Kanban KPI Statistics
-            $kbStatsWhereClause = implode(" AND ", $kbBaseWhere);
+            // Sumber Pembuatan Filter (Manual / Import) untuk Kanban
+            if ($sourceFilter === 'manual') {
+                $kbBaseWhere[] = "(b.import_method = 'manual' OR b.import_method IS NULL OR b.import_method = '')";
+            } elseif ($sourceFilter === 'import') {
+                $kbBaseWhere[] = "b.import_method = 'excel_import'";
+            }
+
+            // Calculate Kanban KPI Statistics (Sinkron dengan Gelombang Tanggal & Batch yang dipilih)
+            $kbStatsWhere = [
+                "1=1",
+                "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+                "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+                "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')",
+                "(k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))"
+            ];
+            $kbStatsParams = [];
+
+            // Sinkronisasi filter tanggal / gelombang terpilih
+            if ($scopeFilter === 'today') {
+                $kbStatsWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kpi_sel_date";
+                $kbStatsParams[':kpi_sel_date'] = $selectedDate;
+            } elseif ($scopeFilter === 'pending_yesterday') {
+                $kbStatsWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :kpi_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                $kbStatsParams[':kpi_py_date'] = $selectedDate;
+            }
+
+            // Sinkronisasi filter batch terpilih
+            if ($batchFilter !== 'all' && (int)$batchFilter > 0) {
+                $kbStatsWhere[] = "k.batch_id = :kpi_batch_id";
+                $kbStatsParams[':kpi_batch_id'] = (int)$batchFilter;
+            }
+
+            // Search filter
+            if ($search !== '') {
+                $kbStatsWhere[] = "(k.kanban_no LIKE :kpi_s1 OR k.item_code LIKE :kpi_s2 OR k.item_description LIKE :kpi_s3 OR k.customer LIKE :kpi_s4 OR mp.part_name LIKE :kpi_s5)";
+                $kbStatsParams[':kpi_s1'] = '%' . $search . '%';
+                $kbStatsParams[':kpi_s2'] = '%' . $search . '%';
+                $kbStatsParams[':kpi_s3'] = '%' . $search . '%';
+                $kbStatsParams[':kpi_s4'] = '%' . $search . '%';
+                $kbStatsParams[':kpi_s5'] = '%' . $search . '%';
+            }
+
+            // Sumber Pembuatan Filter
+            if ($sourceFilter === 'manual') {
+                $kbStatsWhere[] = "(b.import_method = 'manual' OR b.import_method IS NULL OR b.import_method = '')";
+            } elseif ($sourceFilter === 'import') {
+                $kbStatsWhere[] = "b.import_method = 'excel_import'";
+            }
+
+            $kbStatsWhereClause = implode(" AND ", $kbStatsWhere);
             $statsSql = "
                 SELECT 
                     COUNT(DISTINCT k.id) as total_kanban,
-                    SUM(CASE WHEN k.status = 'uninspected' THEN 1 ELSE 0 END) as uninspected_count,
-                    SUM(CASE WHEN k.status IN ('in_progress', 'partial') THEN 1 ELSE 0 END) as in_progress_count,
-                    SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-                    SUM(CASE WHEN k.status = 'rejected' THEN 1 ELSE 0 END) as rejected_count
+                    SUM(CASE WHEN k.status = 'uninspected' AND NOT EXISTS (
+                        SELECT 1 FROM inspection_sessions s_chk WHERE s_chk.kanban_item_id = k.id AND s_chk.status IN ('in_progress', 'rejected')
+                    ) THEN 1 ELSE 0 END) as uninspected_count,
+                    SUM(CASE 
+                        WHEN (k.status != 'completed')
+                             AND NOT (COALESCE((
+                                 SELECT SUM(CASE 
+                                     WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                         COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                   FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                     WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                     ELSE 0
+                                 END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                             ), 0) >= k.qty AND k.qty > 0)
+                             AND (
+                                 k.status IN ('in_progress', 'partial') 
+                                 OR EXISTS (SELECT 1 FROM inspection_sessions s_chk WHERE s_chk.kanban_item_id = k.id AND s_chk.status = 'in_progress')
+                                 OR (k.status = 'rejected' OR EXISTS (SELECT 1 FROM inspection_sessions s_rej WHERE s_rej.kanban_item_id = k.id AND s_rej.status = 'rejected'))
+                             )
+                        THEN 1 ELSE 0 END) as in_progress_count,
+                    SUM(CASE 
+                        WHEN (k.status = 'completed' OR (COALESCE((
+                            SELECT SUM(CASE 
+                                WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                    COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                              FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                ELSE 0
+                            END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                        ), 0) >= k.qty AND k.qty > 0))
+                        AND NOT EXISTS (
+                            SELECT 1 FROM inspection_sessions s_chk WHERE s_chk.kanban_item_id = k.id AND s_chk.status = 'in_progress'
+                        ) THEN 1 ELSE 0 END) as completed_count,
+                    SUM(CASE 
+                        WHEN (k.status != 'completed')
+                             AND NOT (COALESCE((
+                                 SELECT SUM(CASE 
+                                     WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                         COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                   FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                     WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                     ELSE 0
+                                 END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                             ), 0) >= k.qty AND k.qty > 0)
+                             AND (
+                                 k.status = 'rejected' OR EXISTS (
+                                     SELECT 1 FROM inspection_sessions s_rej WHERE s_rej.kanban_item_id = k.id AND s_rej.status = 'rejected'
+                                 ) OR EXISTS (
+                                     SELECT 1 FROM inspection_sessions s_lot
+                                     JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
+                                     WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status = 'rejected')
+                                 )
+                             ) THEN 1 ELSE 0 END) as rejected_count,
+                    SUM(CASE WHEN DATE(k.created_at) = CURDATE() THEN 1 ELSE 0 END) as kanban_today_count,
+                    SUM(CASE WHEN DATE(k.created_at) < CURDATE() THEN 1 ELSE 0 END) as kanban_carryover_count,
+                    SUM(CASE WHEN DATE(k.created_at) = CURDATE() AND k.status = 'uninspected' THEN 1 ELSE 0 END) as kanban_today_uninspected,
+                    SUM(CASE WHEN DATE(k.created_at) = CURDATE() AND k.status = 'completed' THEN 1 ELSE 0 END) as kanban_today_completed
                 FROM kanban_items k
+                LEFT JOIN kanban_batches b ON b.id = k.batch_id
                 LEFT JOIN master_parts mp ON mp.part_code = k.item_code
                 WHERE {$kbStatsWhereClause}
             ";
             $stmtStats = $pdo->prepare($statsSql);
-            $stmtStats->execute($kbBaseParams);
+            $stmtStats->execute($kbStatsParams);
             $statRow = $stmtStats->fetch(PDO::FETCH_ASSOC);
             if ($statRow) {
-                $stats['total_kanban']      = (int)($statRow['total_kanban'] ?? 0);
-                $stats['uninspected_count'] = (int)($statRow['uninspected_count'] ?? 0);
-                $stats['in_progress_count'] = (int)($statRow['in_progress_count'] ?? 0);
-                $stats['completed_count']   = (int)($statRow['completed_count'] ?? 0);
-                $stats['rejected_count']    = (int)($statRow['rejected_count'] ?? 0);
+                $stats['total_kanban']            = (int)($statRow['total_kanban'] ?? 0);
+                $stats['uninspected_count']       = (int)($statRow['uninspected_count'] ?? 0);
+                $stats['in_progress_count']       = (int)($statRow['in_progress_count'] ?? 0);
+                $stats['completed_count']         = (int)($statRow['completed_count'] ?? 0);
+                $stats['rejected_count']          = (int)($statRow['rejected_count'] ?? 0);
+                $stats['kanban_today_count']      = (int)($statRow['kanban_today_count'] ?? 0);
+                $stats['kanban_carryover_count']  = (int)($statRow['kanban_carryover_count'] ?? 0);
+                $stats['kanban_today_uninspected']= (int)($statRow['kanban_today_uninspected'] ?? 0);
+                $stats['kanban_today_completed']  = (int)($statRow['kanban_today_completed'] ?? 0);
             }
+
+            // Hitung total Lot NG pada Kanban yang terfilter
+            $ngLotsSql = "
+                SELECT COUNT(DISTINCT isl.id) 
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                JOIN kanban_items k ON k.id = s.kanban_item_id
+                LEFT JOIN kanban_batches b ON b.id = k.batch_id
+                LEFT JOIN master_parts mp ON mp.part_code = k.item_code
+                WHERE {$kbStatsWhereClause}
+                  AND (
+                      isl.lot_result = 'rejected'
+                      OR isl.lot_status IN ('rejected', 'ng_quarantine', 'ng_found', 'replaced')
+                      OR EXISTS (
+                          SELECT 1 FROM inspection_ng_records ngr 
+                          WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                      )
+                  )
+            ";
+            $stmtNgLots = $pdo->prepare($ngLotsSql);
+            $stmtNgLots->execute($kbStatsParams);
+            $stats['ng_lots_count'] = (int)$stmtNgLots->fetchColumn();
+
             $kanbanTabCount = $stats['total_kanban'];
 
             // Check overall in-progress sessions for shift handover alert
@@ -770,27 +1074,82 @@ if ($pdo) {
                 ];
             }
 
-            // Build Table Filters for Kanban
-            $tableWhere = $kbBaseWhere;
-            $tableParams = $kbBaseParams;
+            // Build Table Filters for Kanban (Bersih dari carry-over clause sisa hari lampau agar urutan baris murni)
+            $tableWhere = [
+                "1=1",
+                "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+                "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+                "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')",
+                "(k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))"
+            ];
+            $tableParams = [];
+
+            // Scope filter: today vs pending_yesterday berdasarkan $selectedDate
+            if ($scopeFilter === 'today') {
+                $tableWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kb_filter_sel_date";
+                $tableParams[':kb_filter_sel_date'] = $selectedDate;
+            } elseif ($scopeFilter === 'pending_yesterday') {
+                $tableWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :kb_filter_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                $tableParams[':kb_filter_py_date'] = $selectedDate;
+            }
+
+            // Batch ID Filter
+            if ($batchFilter !== 'all' && (int)$batchFilter > 0) {
+                $tableWhere[] = "k.batch_id = :kb_filter_batch_id";
+                $tableParams[':kb_filter_batch_id'] = (int)$batchFilter;
+            }
 
             if ($statusFilter === 'uninspected') {
                 $tableWhere[] = "k.status = 'uninspected' AND NOT EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress')";
             } elseif ($statusFilter === 'in_progress') {
-                $tableWhere[] = "(k.status IN ('in_progress', 'partial') OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'))";
+                $tableWhere[] = "(
+                    k.status IN ('in_progress', 'partial', 'rejected') 
+                    OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status IN ('in_progress', 'rejected'))
+                    OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_lot
+                        JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
+                        WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status IN ('rejected', 'ng_quarantine', 'ng_found'))
+                    )
+                )";
             } elseif ($statusFilter === 'partial') {
-                $tableWhere[] = "k.status = 'partial'";
+                $tableWhere[] = "k.status = 'partial' AND k.status != 'completed' AND NOT (COALESCE((
+                    SELECT SUM(CASE 
+                        WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                            COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                      FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                        WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                        ELSE 0
+                    END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                ), 0) >= k.qty AND k.qty > 0)";
             } elseif ($statusFilter === 'completed') {
-                $tableWhere[] = "k.status = 'completed'";
+                $tableWhere[] = "(k.status = 'completed' OR (COALESCE((
+                    SELECT SUM(CASE 
+                        WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                            COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                      FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                        WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                        ELSE 0
+                    END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                ), 0) >= k.qty AND k.qty > 0))";
             } elseif ($statusFilter === 'rejected') {
-                $tableWhere[] = "(k.status = 'rejected' OR EXISTS (
-                    SELECT 1 FROM inspection_sessions s_rej 
-                    WHERE s_rej.kanban_item_id = k.id AND s_rej.status = 'rejected'
-                ) OR EXISTS (
-                    SELECT 1 FROM inspection_sessions s_lot
-                    JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
-                    WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status = 'rejected')
-                ))";
+                $tableWhere[] = "k.status != 'completed' 
+                    AND NOT (COALESCE((
+                        SELECT SUM(CASE 
+                            WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                          FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                            WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                            ELSE 0
+                        END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                    ), 0) >= k.qty AND k.qty > 0)
+                    AND (k.status = 'rejected' OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_rej 
+                        WHERE s_rej.kanban_item_id = k.id AND s_rej.status = 'rejected'
+                    ) OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_lot
+                        JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
+                        WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status = 'rejected')
+                    ))";
             }
 
             $tableWhereClause = implode(" AND ", $tableWhere);
@@ -799,6 +1158,7 @@ if ($pdo) {
             $countSql = "
                 SELECT COUNT(DISTINCT k.id) 
                 FROM kanban_items k
+                LEFT JOIN kanban_batches b ON b.id = k.batch_id
                 LEFT JOIN master_parts mp ON mp.part_code = k.item_code
                 WHERE {$tableWhereClause}
             ";
@@ -810,10 +1170,35 @@ if ($pdo) {
             if ($page > $totalPages) $page = $totalPages;
             $offset = ($page - 1) * $limit;
 
+            // Ordering Logic: 'paper' (Default urutan cetak kertas) vs 'priority'
+            if ($orderFilter === 'priority') {
+                $kanbanOrderBy = "
+                    CASE 
+                        WHEN k.status = 'completed' OR total_passed_qty >= k.qty 
+                        THEN 2 
+                        WHEN DATE(COALESCE(k.eta, k.req_date, k.created_at)) < CURDATE()
+                        THEN 0 
+                        ELSE 1 
+                    END ASC,
+                    CASE WHEN k.eta IS NULL AND k.req_date IS NULL THEN 1 ELSE 0 END ASC,
+                    COALESCE(k.eta, k.req_date, k.created_at) ASC,
+                    k.id ASC
+                ";
+            } else {
+                // Paper Sequence: Sesuai urutan baris upload di file / cetakan kertas
+                $kanbanOrderBy = "
+                    COALESCE(b.imported_at, k.created_at) ASC,
+                    COALESCE(k.batch_id, 0) ASC,
+                    k.id ASC
+                ";
+            }
+
             // Fetch Kanban Schedule Items
             $sql = "
                 SELECT k.*,
                        b.document_number as doc_no,
+                       b.import_method,
+                       b.imported_at as batch_imported_at,
                        COALESCE(NULLIF(mp.part_name, ''), k.item_description) as display_part_name,
                        COALESCE((
                            SELECT SUM(
@@ -836,23 +1221,37 @@ if ($pdo) {
                 LEFT JOIN master_parts mp ON mp.part_code = k.item_code
                 LEFT JOIN inspection_sessions s ON s.kanban_item_id = k.id
                 WHERE {$tableWhereClause}
-                GROUP BY k.id, b.document_number, mp.part_name
-                ORDER BY 
-                    CASE 
-                        WHEN k.status = 'completed' OR total_passed_qty >= k.qty 
-                        THEN 2 
-                        WHEN DATE(COALESCE(k.eta, k.req_date, k.created_at)) < CURDATE()
-                        THEN 0 
-                        ELSE 1 
-                    END ASC,
-                    CASE WHEN k.eta IS NULL AND k.req_date IS NULL THEN 1 ELSE 0 END ASC,
-                    COALESCE(k.eta, k.req_date, k.created_at) ASC,
-                    k.id ASC
+                GROUP BY k.id, b.document_number, b.import_method, b.imported_at, mp.part_name
+                ORDER BY {$kanbanOrderBy}
                 LIMIT {$limit} OFFSET {$offset}
             ";
             $stmtKanban = $pdo->prepare($sql);
             $stmtKanban->execute($tableParams);
             $kanbans = $stmtKanban->fetchAll(PDO::FETCH_ASSOC);
+
+            // Hitung nomor urut relatif per-batch untuk Kanban yang ditampilkan
+            $batchIdsInPage = array_unique(array_filter(array_column($kanbans, 'batch_id')));
+            if (!empty($batchIdsInPage)) {
+                $inBatchStr = implode(',', array_map('intval', $batchIdsInPage));
+                try {
+                    $posStmt = $pdo->query("
+                        SELECT k.id, k.batch_id,
+                               (SELECT COUNT(*) FROM kanban_items k2 
+                                WHERE k2.batch_id = k.batch_id 
+                                  AND (k2.plan_type IS NULL OR k2.plan_type = 'kanban')
+                                  AND (k2.check_type IS NULL OR k2.check_type != 'Safety Stock')
+                                  AND (k2.kanban_no IS NULL OR k2.kanban_no NOT LIKE 'SS-%')
+                                  AND k2.id <= k.id) as pos_in_batch
+                        FROM kanban_items k
+                        WHERE k.batch_id IN ({$inBatchStr})
+                    ");
+                    if ($posStmt) {
+                        while ($pRow = $posStmt->fetch(PDO::FETCH_ASSOC)) {
+                            $itemPositionInBatch[(int)$pRow['id']] = (int)$pRow['pos_in_batch'];
+                        }
+                    }
+                } catch (Exception $ePos) {}
+            }
 
             // Batch fetch session details and lots for the displayed kanbans
             $kanbanIds = array_column($kanbans, 'id');
@@ -1020,7 +1419,15 @@ if ($pdo) {
             if ($statusFilter === 'uninspected') {
                 $tableWhere[] = "k.status = 'uninspected' AND NOT EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress')";
             } elseif ($statusFilter === 'in_progress') {
-                $tableWhere[] = "(k.status IN ('in_progress', 'partial') OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'))";
+                $tableWhere[] = "(
+                    k.status IN ('in_progress', 'partial', 'rejected') 
+                    OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status IN ('in_progress', 'rejected'))
+                    OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_lot
+                        JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
+                        WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status IN ('rejected', 'ng_quarantine', 'ng_found'))
+                    )
+                )";
             } elseif ($statusFilter === 'partial') {
                 $tableWhere[] = "k.status = 'partial'";
             } elseif ($statusFilter === 'completed') {
@@ -1525,13 +1932,7 @@ if ($pdo) {
                 }
             }
 
-            // Exclude Direct Close Kanban virtual sessions from physical inspection report
-            $sessWhere[] = "(s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')";
-            $sessWhere[] = "NOT EXISTS (
-                SELECT 1 FROM inspection_session_lots isl_dc 
-                WHERE isl_dc.inspection_session_id = s.id 
-                  AND (isl_dc.ref_number = 'DIRECT-PASS' OR isl_dc.ref_number LIKE '%DIRECT-PASS%' OR isl_dc.remarks LIKE '%Direct Close%')
-            )";
+
 
             // Exclude Auto Safety Stock virtual sessions from leftover/excess kanban (hanya inspeksi fisik real)
             $sessWhere[] = "(k.remark IS NULL OR (
@@ -1719,8 +2120,7 @@ if ($pdo) {
                         ) AS has_prev_rejected
                     FROM inspection_session_lots isl
                     WHERE isl.inspection_session_id IN ({$inSessIds})
-                      AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Direct Close%'))
-                      AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                      AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%'))
                     ORDER BY isl.id ASC
                 ");
                 $rawLotsList = [];
@@ -1993,7 +2393,7 @@ if ($pdo) {
                         foreach ($sessLots as $sl) {
                             $refNo = trim($sl['ref_number'] ?? '');
                             $remarks = trim($sl['remarks'] ?? '');
-                            if ($refNo === 'DIRECT-PASS' || stripos($refNo, 'DIRECT-PASS') !== false || stripos($remarks, 'Direct Close') !== false || stripos($remarks, 'Sisa Kelebihan Kanban') !== false || stripos($remarks, 'Sisa Split Safety Stock') !== false) {
+                            if (stripos($remarks, 'Sisa Kelebihan Kanban') !== false || stripos($remarks, 'Sisa Split Safety Stock') !== false) {
                                 continue;
                             }
 
@@ -2306,6 +2706,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             gap: 8px !important;
             margin-top: 2px !important;
             margin-bottom: 2px !important;
+        }
+        .kpi-grid-5cols {
+            display: grid !important;
+            grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+            margin-top: 2px !important;
+            margin-bottom: 2px !important;
+        }
+        @media (max-width: 1024px) {
+            .kpi-grid-5cols {
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) !important;
+            }
         }
         .kpi-card {
             border-radius: 8px !important;
@@ -2636,6 +3048,206 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         tr.lot-row-in_progress:hover {
             background-color: #fef3c7 !important;
         }
+
+        /* ── Excel-Style Column Header Filters (100% Solid & High-Contrast) ── */
+        .th-filter-wrapper {
+            display: inline-flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            position: relative;
+            gap: 4px;
+        }
+        .th-filter-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            color: #334155 !important;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            background-color: #ffffff !important;
+            border: 1.5px solid #cbd5e1 !important;
+            flex-shrink: 0;
+            padding: 0;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+        .th-filter-btn:hover {
+            color: #1d4ed8 !important;
+            background-color: #dbeafe !important;
+            border-color: #3b82f6 !important;
+        }
+        .th-filter-btn.active {
+            color: #ffffff !important;
+            background-color: #2563eb !important;
+            border-color: #1d4ed8 !important;
+            box-shadow: 0 1px 3px rgba(37, 99, 235, 0.4);
+        }
+        .excel-filter-dropdown {
+            position: absolute;
+            top: calc(100% + 5px);
+            z-index: 9999 !important;
+            background-color: #ffffff !important;
+            border: 1.5px solid #94a3b8 !important;
+            border-radius: 10px;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.25), 0 8px 10px -6px rgba(0, 0, 0, 0.2) !important;
+            width: 250px;
+            padding: 10px;
+            text-transform: none;
+            letter-spacing: normal;
+            font-weight: normal;
+            color: #0f172a;
+            display: none;
+            text-align: left;
+        }
+        .excel-filter-dropdown.align-right {
+            right: 0;
+            left: auto;
+        }
+        .excel-filter-dropdown.align-left {
+            left: 0;
+            right: auto;
+        }
+        .excel-filter-search {
+            width: 100%;
+            padding: 6px 10px;
+            border: 1.5px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 11px;
+            outline: none;
+            margin-bottom: 8px;
+            background-color: #ffffff;
+            color: #0f172a;
+        }
+        .excel-filter-search:focus {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 2px #bfdbfe;
+        }
+        /* Tombol Cepat: Pilih Semua & Hapus Pilihan (Solid Pill Buttons) */
+        .excel-quick-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3.5px 8px;
+            border-radius: 5px;
+            font-size: 10.5px;
+            font-weight: 800;
+            cursor: pointer;
+            border: 1px solid #cbd5e1;
+            background-color: #f1f5f9;
+            color: #1e293b;
+            line-height: 1.2;
+            transition: all 0.15s ease;
+        }
+        .excel-quick-btn:hover {
+            background-color: #e2e8f0;
+            border-color: #94a3b8;
+            color: #0f172a;
+        }
+        /* Tombol Reset Header Mini (Solid Red Pill) */
+        .excel-reset-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 2.5px 7px;
+            border-radius: 5px;
+            font-size: 10px;
+            font-weight: 800;
+            cursor: pointer;
+            border: 1px solid #fecdd3;
+            background-color: #ffe4e6;
+            color: #9f1239;
+            line-height: 1.2;
+            transition: all 0.15s ease;
+        }
+        .excel-reset-btn:hover {
+            background-color: #fecdd3;
+            border-color: #fda4af;
+            color: #881337;
+        }
+        .excel-filter-list {
+            max-height: 170px;
+            overflow-y: auto;
+            border: 1.5px solid #e2e8f0;
+            background-color: #f8fafc;
+            border-radius: 6px;
+            padding: 4px;
+            font-size: 11px;
+        }
+        .excel-filter-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+            font-weight: 600;
+            color: #1e293b;
+        }
+        .excel-filter-item:hover {
+            background-color: #e2e8f0;
+        }
+        .excel-filter-item input[type="checkbox"] {
+            cursor: pointer;
+            width: 14px;
+            height: 14px;
+            border-radius: 3px;
+            accent-color: #2563eb;
+        }
+        .excel-filter-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 10px;
+            padding-top: 8px;
+            border-top: 1.5px solid #f1f5f9;
+        }
+        /* Tombol Footer: Tutup (Solid Grey Button) & Terapkan (Solid Blue Button) */
+        .excel-btn-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 800;
+            cursor: pointer;
+            border: 1.5px solid #cbd5e1;
+            background-color: #f1f5f9;
+            color: #334155;
+            transition: all 0.15s ease;
+        }
+        .excel-btn-close:hover {
+            background-color: #e2e8f0;
+            border-color: #94a3b8;
+            color: #0f172a;
+        }
+        .excel-btn-apply {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            justify-content: center;
+            padding: 5px 14px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 800;
+            cursor: pointer;
+            border: 1.5px solid #1d4ed8;
+            background-color: #2563eb;
+            color: #ffffff;
+            box-shadow: 0 1px 2px rgba(37, 99, 235, 0.4);
+            transition: all 0.15s ease;
+        }
+        .excel-btn-apply:hover {
+            background-color: #1d4ed8;
+            border-color: #1e40af;
+        }
+        .excel-btn-apply:active {
+            transform: scale(0.97);
+        }
         </style>
 
         <?php
@@ -2811,101 +3423,189 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
 
             <!-- Baris 2: Search Input, Status Dropdown, Limit, Date Range, Filter & Reset -->
-            <form id="kanbanFilterForm" action="" method="GET" class="flex items-center gap-2 text-xs flex-wrap border-t border-slate-100 pt-3">
+            <!-- Baris 2: Search Input & Structured Controls with Micro-Labels -->
+            <form id="kanbanFilterForm" action="" method="GET" class="border-t border-slate-100 pt-3">
                 <input type="hidden" name="tab" id="kanbanTabInput" value="<?= htmlspecialchars($activeTab) ?>">
                 <input type="hidden" name="period" id="kanbanPeriodInput" value="<?= htmlspecialchars($period) ?>">
 
-                <!-- Search Field: Ruang nafas lega & teks tidak mepet -->
-                <div class="relative" style="flex: 1 1 240px; min-width: 200px;">
-                    <div style="position: absolute; left: 12px; top: 0; bottom: 0; display: flex; align-items: center; pointer-events: none;">
-                        <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                        </svg>
+                <!-- TIER A: Search Bar Utama (Area Kerja / Scan QR) -->
+                <div class="mb-3.5">
+                    <div class="relative w-full">
+                        <div style="position: absolute; left: 14px; top: 0; bottom: 0; display: flex; align-items: center; pointer-events: none;">
+                            <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                            </svg>
+                        </div>
+                        <input type="text" name="search" id="kanbanSearchInput" autofocus autocomplete="off" value="<?= htmlspecialchars($search) ?>" 
+                               placeholder="<?= ($activeTab === 'safety_stock') ? 'Scan QR / Cari Sesi, Part, Inspektur...' : (($activeTab === 'my_inspections') ? 'Scan QR / Cari Sesi, Kanban, Part, Lot...' : (($activeTab === 'my_lots') ? 'Scan QR / Cari Lot No, Ref No, Part...' : 'Scan QR Kanban atau Ketik Part Code / Customer...')) ?>" 
+                               style="padding-left: 42px; padding-right: 14px; height: 42px; width: 100%; font-size: 13px;" 
+                               class="w-full bg-slate-50 border border-slate-300 rounded-xl font-semibold text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 <?= $tabFocusRing ?> focus:border-transparent transition-all shadow-2xs">
                     </div>
-                    <input type="text" name="search" id="kanbanSearchInput" autofocus autocomplete="off" value="<?= htmlspecialchars($search) ?>" 
-                           placeholder="<?= ($activeTab === 'safety_stock') ? 'Cari Sesi, Part, Inspektur...' : (($activeTab === 'my_inspections') ? 'Cari Sesi, Kanban, Part, Lot, Ref...' : (($activeTab === 'my_lots') ? 'Cari Lot No, Ref No, Part, Defect...' : 'Cari Kanban, Part, Customer... (Scan/Ketik)')) ?>" 
-                           style="padding-left: 38px; padding-right: 14px; height: 38px; width: 100%;" 
-                           class="w-full bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold text-slate-800 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 <?= $tabFocusRing ?> focus:border-transparent transition-all">
                 </div>
 
-                <?php if ($activeTab === 'my_lots'): ?>
-                <!-- Jenis Inspeksi Filter (Khusus Tab Rincian Lot Saya) -->
-                <div class="w-36 flex-shrink-0">
-                    <select name="inspection_type" onchange="this.form.submit()" 
-                            style="height: 38px;" 
-                            class="w-full px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 focus:bg-white focus:outline-none focus:ring-2 <?= $tabFocusRing ?> transition-all cursor-pointer">
-                        <option value="all" <?= ($typeFilter === 'all') ? 'selected' : '' ?>>Semua Jenis</option>
-                        <option value="kanban" <?= ($typeFilter === 'kanban') ? 'selected' : '' ?>>Kanban</option>
-                        <option value="safety_stock" <?= ($typeFilter === 'safety_stock') ? 'selected' : '' ?>>Safety Stock</option>
-                    </select>
-                </div>
-                <?php endif; ?>
+                <!-- TIER B: Filter Controls Terstruktur dengan Spasi Lega & Label Presisi -->
+                <div class="flex items-end gap-3 flex-wrap">
 
-                <!-- Status Filter -->
-                <div class="w-44 flex-shrink-0">
-                    <select name="status" onchange="this.form.submit()" 
-                            style="height: 38px;" 
-                            class="w-full px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 focus:bg-white focus:outline-none focus:ring-2 <?= $tabFocusRing ?> transition-all cursor-pointer">
-                        <?php if ($activeTab === 'safety_stock' || $activeTab === 'my_inspections' || $activeTab === 'my_lots'): ?>
-                            <option value="all" <?= ($statusFilter === 'all') ? 'selected' : '' ?>>Semua Status</option>
-                            <option value="in_progress" <?= ($statusFilter === 'in_progress') ? 'selected' : '' ?>>Sedang Dikerjakan</option>
-                            <option value="completed" <?= ($statusFilter === 'completed' || $statusFilter === 'passed') ? 'selected' : '' ?>>Selesai (Passed)</option>
-                            <option value="rejected" <?= ($statusFilter === 'rejected') ? 'selected' : '' ?>>Ada Reject</option>
-                        <?php else: ?>
-                            <option value="all" <?= ($statusFilter === 'all') ? 'selected' : '' ?>>Semua Status</option>
-                            <option value="uninspected" <?= ($statusFilter === 'uninspected') ? 'selected' : '' ?>>Antrean (Belum Mulai)</option>
-                            <option value="in_progress" <?= ($statusFilter === 'in_progress') ? 'selected' : '' ?>>Sedang Dikerjakan / Parsial</option>
-                            <option value="partial" <?= ($statusFilter === 'partial') ? 'selected' : '' ?>>Hanya Parsial (Belum Penuh)</option>
-                            <option value="completed" <?= ($statusFilter === 'completed') ? 'selected' : '' ?>>Selesai (Passed)</option>
-                            <option value="rejected" <?= ($statusFilter === 'rejected') ? 'selected' : '' ?>>Ada Reject</option>
+                    <?php if ($activeTab === 'kanban'): ?>
+                    <!-- State Tanggal, Batch & Scope disimpan sebagai hidden input untuk form search & filter -->
+                    <input type="hidden" name="selected_date" value="<?= htmlspecialchars((string)$selectedDate) ?>">
+                    <input type="hidden" name="batch_id" value="<?= htmlspecialchars((string)$batchFilter) ?>">
+                    <input type="hidden" name="scope" value="<?= htmlspecialchars((string)$scopeFilter) ?>">
+
+                    <!-- KOTAK URUTAN TAMPILAN (URUTAN DOKUMEN CETAK VS PRIORITAS) -->
+                    <div class="w-48 flex-shrink-0">
+                        <label class="block text-[10px] font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                            Urutan Baris:
+                        </label>
+                        <select name="order_by" onchange="this.form.submit()" 
+                                style="height: 38px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 <?= $tabFocusRing ?> hover:border-slate-400 transition-all cursor-pointer shadow-2xs">
+                            <option value="paper" <?= ($orderFilter === 'paper') ? 'selected' : '' ?>>Urutan Cetak (Standar)</option>
+                            <option value="priority" <?= ($orderFilter === 'priority') ? 'selected' : '' ?>>Prioritas Status/Urgent</option>
+                        </select>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if ($activeTab === 'my_lots'): ?>
+                    <!-- KOTAK JENIS INSPEKSI (LOT) -->
+                    <div class="w-36 flex-shrink-0">
+                        <label class="block text-[10px] font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                            Jenis Inspeksi:
+                        </label>
+                        <select name="inspection_type" onchange="this.form.submit()" 
+                                style="height: 38px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 <?= $tabFocusRing ?> hover:border-slate-400 transition-all cursor-pointer shadow-2xs">
+                            <option value="all" <?= ($typeFilter === 'all') ? 'selected' : '' ?>>Semua Jenis</option>
+                            <option value="kanban" <?= ($typeFilter === 'kanban') ? 'selected' : '' ?>>Kanban</option>
+                            <option value="safety_stock" <?= ($typeFilter === 'safety_stock') ? 'selected' : '' ?>>Safety Stock</option>
+                        </select>
+                    </div>
+                    <?php endif; ?>
+
+                    <!-- KOTAK 4: STATUS PEKERJAAN -->
+                    <div class="w-40 flex-shrink-0">
+                        <label class="block text-[10px] font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                            Status:
+                        </label>
+                        <select name="status" onchange="this.form.submit()" 
+                                style="height: 38px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 <?= $tabFocusRing ?> hover:border-slate-400 transition-all cursor-pointer shadow-2xs">
+                            <?php if ($activeTab === 'safety_stock' || $activeTab === 'my_inspections' || $activeTab === 'my_lots'): ?>
+                                <option value="all" <?= ($statusFilter === 'all') ? 'selected' : '' ?>>Semua Status</option>
+                                <option value="in_progress" <?= ($statusFilter === 'in_progress') ? 'selected' : '' ?>>Sedang Dikerjakan</option>
+                                <option value="completed" <?= ($statusFilter === 'completed' || $statusFilter === 'passed') ? 'selected' : '' ?>>Selesai (Passed)</option>
+                                <option value="rejected" <?= ($statusFilter === 'rejected') ? 'selected' : '' ?>>Ada Reject</option>
+                            <?php else: ?>
+                                <option value="all" <?= ($statusFilter === 'all') ? 'selected' : '' ?>>Semua Status</option>
+                                <option value="uninspected" <?= ($statusFilter === 'uninspected') ? 'selected' : '' ?>>Antrean (Belum Mulai)</option>
+                                <option value="in_progress" <?= ($statusFilter === 'in_progress') ? 'selected' : '' ?>>Sedang Dikerjakan</option>
+                                <option value="partial" <?= ($statusFilter === 'partial') ? 'selected' : '' ?>>Parsial (Belum Penuh)</option>
+                                <option value="completed" <?= ($statusFilter === 'completed') ? 'selected' : '' ?>>Selesai</option>
+                                <option value="rejected" <?= ($statusFilter === 'rejected') ? 'selected' : '' ?>>Ada Reject</option>
+                            <?php endif; ?>
+                        </select>
+                    </div>
+
+                    <?php if ($activeTab === 'my_inspections' || $activeTab === 'my_lots'): ?>
+                    <!-- KOTAK URUTAN WAKTU RIWAYAT -->
+                    <div class="w-32 flex-shrink-0">
+                        <label class="block text-[10px] font-extrabold text-slate-600 uppercase tracking-wider mb-1.5">
+                            Waktu:
+                        </label>
+                        <select name="sort" onchange="this.form.submit()" 
+                                style="height: 38px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 <?= $tabFocusRing ?> hover:border-slate-400 transition-all cursor-pointer shadow-2xs">
+                            <option value="desc" <?= ($sort === 'DESC') ? 'selected' : '' ?>>Terbaru</option>
+                            <option value="asc" <?= ($sort === 'ASC') ? 'selected' : '' ?>>Terlama</option>
+                        </select>
+                    </div>
+                    <?php endif; ?>
+
+                    <!-- TOMBOL FILTER TAMBAHAN (OPSI LANJUTAN) -->
+                    <div class="flex-shrink-0">
+                        <button type="button" 
+                                onclick="document.getElementById('advancedFilterBox').classList.toggle('hidden')" 
+                                style="height: 38px;" 
+                                class="px-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 font-bold text-xs rounded-lg transition-all inline-flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                                title="Klik untuk membuka filter lanjutan (sumber, jumlah baris, custom tanggal)">
+                            <svg class="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path>
+                            </svg>
+                            <span>Opsi Lainnya</span>
+                            <svg class="w-3 h-3 text-slate-400 ml-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- TOMBOL SUBMIT & RESET -->
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                        <button type="submit" style="height: 38px;" class="px-4 bg-slate-800 hover:bg-slate-900 active:bg-black text-white font-bold text-xs rounded-lg shadow-xs transition-all flex items-center gap-1.5 cursor-pointer">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path>
+                            </svg>
+                            <span>Terapkan</span>
+                        </button>
+
+                        <?php if (!empty($search) || $statusFilter !== 'all' || $sourceFilter !== 'all' || $batchFilter !== 'all' || $orderFilter !== 'paper' || $scopeFilter !== 'today' || ($typeFilter ?? 'all') !== 'all' || $period !== 'today' || !empty($startDate) || !empty($endDate) || (($activeTab === 'my_inspections' || $activeTab === 'my_lots') && $sort === 'ASC')): ?>
+                            <a href="index.php?tab=<?= $activeTab ?>" style="height: 38px; display: inline-flex; align-items: center;" class="px-3.5 bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs rounded-lg border border-rose-200 transition-all" title="Kembalikan semua filter ke pengaturan awal">
+                                Reset
+                            </a>
                         <?php endif; ?>
-                    </select>
+                    </div>
+
                 </div>
 
-                <?php if ($activeTab === 'my_inspections' || $activeTab === 'my_lots'): ?>
-                <!-- Sort Order (Khusus Tab Riwayat Saya & Rincian Per Lot) -->
-                <div style="height: 38px;" class="flex items-center gap-1.5 bg-slate-50 border border-slate-300 rounded-lg px-2.5 text-xs text-slate-600 flex-shrink-0">
-                    <svg class="w-3.5 h-3.5 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/>
-                    </svg>
-                    <select name="sort" onchange="this.form.submit()" class="bg-transparent border-0 p-0 text-xs font-black text-slate-800 focus:outline-none cursor-pointer">
-                        <option value="desc" <?= ($sort === 'DESC') ? 'selected' : '' ?>>Terbaru</option>
-                        <option value="asc" <?= ($sort === 'ASC') ? 'selected' : '' ?>>Terlama</option>
-                    </select>
+                <!-- PANEL FILTER LANJUTAN (COLLAPSIBLE / OPSIONAL) -->
+                <?php 
+                $hasAdvancedFilterActive = ($sourceFilter !== 'all' || $limit != 200 || !empty($startDate) || !empty($endDate));
+                ?>
+                <div id="advancedFilterBox" class="<?= $hasAdvancedFilterActive ? '' : 'hidden' ?> mt-3 pt-3 border-t border-dashed border-slate-200 bg-slate-50/80 p-3 rounded-xl flex items-center gap-3 text-xs flex-wrap">
+                    
+                    <?php if ($activeTab === 'kanban'): ?>
+                    <!-- Sumber Data -->
+                    <div class="w-36 flex-shrink-0">
+                        <span class="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Sumber Pembuatan:</span>
+                        <select name="source" onchange="this.form.submit()" 
+                                style="height: 34px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none">
+                            <option value="all" <?= ($sourceFilter === 'all') ? 'selected' : '' ?>>Semua Sumber</option>
+                            <option value="manual" <?= ($sourceFilter === 'manual') ? 'selected' : '' ?>>Input Manual</option>
+                            <option value="import" <?= ($sourceFilter === 'import') ? 'selected' : '' ?>>Import Excel</option>
+                        </select>
+                    </div>
+                    <?php endif; ?>
+
+                    <!-- Jumlah Baris -->
+                    <div class="w-32 flex-shrink-0">
+                        <span class="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Jumlah Baris:</span>
+                        <select name="limit" onchange="this.form.submit()" 
+                                style="height: 34px;" 
+                                class="w-full px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none">
+                            <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10 baris</option>
+                            <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25 baris</option>
+                            <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50 baris</option>
+                            <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100 baris</option>
+                            <option value="200" <?= ($limit == 200) ? 'selected' : '' ?>>200 baris (Standar)</option>
+                            <option value="500" <?= ($limit == 500) ? 'selected' : '' ?>>500 baris</option>
+                        </select>
+                    </div>
+
+                    <!-- Rentang Tanggal Kustom -->
+                    <div class="flex-shrink-0">
+                        <span class="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Rentang Tanggal Khusus:</span>
+                        <div style="height: 34px;" class="flex items-center space-x-1.5 bg-white border border-slate-300 rounded-lg px-2.5 text-xs text-slate-600">
+                            <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="bg-transparent border-0 p-0 text-xs text-slate-800 focus:outline-none font-semibold">
+                            <span class="text-slate-400 font-bold text-[10px]">s/d</span>
+                            <input type="date" name="end_date" value="<?= htmlspecialchars($endDate) ?>" class="bg-transparent border-0 p-0 text-xs text-slate-800 focus:outline-none font-semibold">
+                        </div>
+                    </div>
+
+                    <div class="ml-auto text-[11px] text-slate-400">
+                        *Filter lanjutan ini otomatis tersimpan saat Anda menekan tombol Terapkan.
+                    </div>
+
                 </div>
-                <?php endif; ?>
-
-                <!-- Rows per page (Limit Selector) -->
-                <div style="height: 38px;" class="flex items-center gap-1.5 bg-slate-50 border border-slate-300 rounded-lg px-2.5 text-xs text-slate-600 flex-shrink-0">
-                    <span class="text-[10px] font-bold text-slate-500">Baris:</span>
-                    <select name="limit" onchange="this.form.submit()" class="bg-transparent border-0 p-0 text-xs font-black text-slate-800 focus:outline-none cursor-pointer">
-                        <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10</option>
-                        <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25</option>
-                        <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50</option>
-                        <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100 (Semua)</option>
-                    </select>
-                </div>
-
-                <!-- Date Range (Custom) -->
-                <div style="height: 38px;" class="flex items-center space-x-1.5 bg-slate-50 border border-slate-300 rounded-lg px-2.5 text-xs text-slate-600 flex-shrink-0">
-                    <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" class="bg-transparent border-0 p-0 text-xs text-slate-800 focus:outline-none font-bold">
-                    <span class="text-slate-400 font-bold text-[10px]">s/d</span>
-                    <input type="date" name="end_date" value="<?= htmlspecialchars($endDate) ?>" class="bg-transparent border-0 p-0 text-xs text-slate-800 focus:outline-none font-bold">
-                </div>
-
-                <!-- Filter & Reset Buttons -->
-                <button type="submit" style="height: 38px;" class="px-3.5 bg-slate-800 hover:bg-slate-900 active:bg-black text-white font-bold text-xs rounded-lg shadow-xs transition-all flex items-center gap-1.5 flex-shrink-0 cursor-pointer">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path>
-                    </svg>
-                    <span>Filter</span>
-                </button>
-
-                <?php if (!empty($search) || $statusFilter !== 'all' || ($typeFilter ?? 'all') !== 'all' || $period !== 'today' || !empty($startDate) || !empty($endDate) || (($activeTab === 'my_inspections' || $activeTab === 'my_lots') && $sort === 'ASC')): ?>
-                    <a href="index.php?tab=<?= $activeTab ?>" style="height: 38px; display: inline-flex; align-items: center;" class="px-3 bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs rounded-lg border border-rose-200 transition-all flex-shrink-0">
-                        Reset
-                    </a>
-                <?php endif; ?>
 
             </form>
 
@@ -3062,9 +3762,25 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
         <?php else: ?>
             <!-- KPI KANBAN DELIVERY (RICH CARDS) -->
-            <div class="kpi-grid-container">
+            <?php
+            $buildKpiUrl = function($targetStatus) use ($activeTab, $period, $selectedDate, $scopeFilter, $batchFilter, $orderFilter, $sourceFilter, $search) {
+                $params = [
+                    'tab'           => 'kanban',
+                    'status'        => $targetStatus,
+                    'period'        => $period,
+                    'selected_date' => $selectedDate,
+                    'scope'         => $scopeFilter,
+                    'batch_id'      => $batchFilter,
+                    'order_by'      => $orderFilter,
+                ];
+                if ($sourceFilter !== 'all') $params['source'] = $sourceFilter;
+                if (!empty($search)) $params['search'] = $search;
+                return '?' . http_build_query($params);
+            };
+            ?>
+            <div class="kpi-grid-5cols">
                 <!-- Stat 1: Total -->
-                <a href="?tab=kanban&status=all&period=<?= urlencode($period) ?>" 
+                <a href="<?= $buildKpiUrl('all') ?>" 
                    class="kpi-card kpi-card-total"
                    title="Klik untuk tampilkan semua status">
                     <div class="flex items-center justify-between gap-1">
@@ -3080,7 +3796,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </a>
 
                 <!-- Stat 2: Belum Mulai -->
-                <a href="?tab=kanban&status=uninspected&period=<?= urlencode($period) ?>" 
+                <a href="<?= $buildKpiUrl('uninspected') ?>" 
                    class="kpi-card kpi-card-uninspected"
                    title="Klik untuk filter Belum Mulai">
                     <div class="flex items-center justify-between gap-1">
@@ -3096,7 +3812,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </a>
 
                 <!-- Stat 3: Berjalan -->
-                <a href="?tab=kanban&status=in_progress&period=<?= urlencode($period) ?>" 
+                <a href="<?= $buildKpiUrl('in_progress') ?>" 
                    class="kpi-card kpi-card-progress"
                    title="Klik untuk filter Sedang Berjalan">
                     <div class="flex items-center justify-between gap-1">
@@ -3113,7 +3829,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </a>
 
                 <!-- Stat 4: Selesai -->
-                <a href="?tab=kanban&status=completed&period=<?= urlencode($period) ?>" 
+                <a href="<?= $buildKpiUrl('completed') ?>" 
                    class="kpi-card kpi-card-completed"
                    title="Klik untuk filter Selesai">
                     <div class="flex items-center justify-between gap-1">
@@ -3127,23 +3843,199 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <span class="kpi-stat-unit text-emerald-700">Kanban</span>
                     </div>
                 </a>
+
+                <!-- Stat 5: Lot NG / Butuh Tindakan -->
+                <a href="<?= $buildKpiUrl('rejected') ?>" 
+                   class="kpi-card kpi-card-rejected"
+                   title="Klik untuk filter Kanban yang terdapat Lot NG / Butuh Tindakan">
+                    <div class="flex items-center justify-between gap-1">
+                        <div class="text-[9px] font-extrabold text-rose-800 uppercase tracking-wider">LOT NG / TINDAKAN</div>
+                        <span class="w-5 h-5 rounded bg-rose-200/80 text-rose-700 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-1 flex items-baseline flex-wrap gap-1">
+                        <span class="kpi-stat-value text-rose-950"><?= number_format($stats['rejected_count'] ?? 0) ?></span>
+                        <span class="kpi-stat-unit text-rose-700">Kanban</span>
+                        <?php if (!empty($stats['ng_lots_count'])): ?>
+                            <span class="text-[9.5px] text-rose-900 font-extrabold bg-rose-200/80 border border-rose-300 px-1.5 py-0.5 rounded ml-1"><?= number_format($stats['ng_lots_count']) ?> Lot NG</span>
+                        <?php endif; ?>
+                    </div>
+                </a>
             </div>
-            <?php if ($stats['in_progress_sessions'] > 0): ?>
-                <div class="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3">
-                    <span class="text-xs font-semibold text-amber-800">
-                        <?= $stats['in_progress_sessions'] ?> sesi inspeksi belum selesai
-                    </span>
-                    <?php if ($statusFilter !== 'in_progress'): ?>
-                        <a href="?tab=kanban&status=in_progress" style="background-color: #d97706; color: #ffffff;" class="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold rounded-lg transition-all flex-shrink-0">
-                            Lihat Sesi Aktif
-                        </a>
-                    <?php endif; ?>
+
+            <!-- ═══════════════════════════════════════════════════════════════════ -->
+            <!-- SUB-NAVIGASI BERJENJANG: PILIH TANGGAL -> PILIH BATCH (OPERATOR)   -->
+            <!-- ═══════════════════════════════════════════════════════════════════ -->
+            <div class="bg-white border border-slate-200/90 rounded-xl p-3 shadow-xs space-y-2.5">
+                
+                <?php if ($period !== 'today' && !empty($periodDates)): ?>
+                    <!-- LEVEL 1: PITA PILIHAN TANGGAL DALAM PERIODE INI -->
+                    <div>
+                        <div class="flex items-center justify-between gap-2 mb-1.5 px-0.5">
+                            <div class="flex items-center gap-1.5">
+                                <span class="w-2 h-2 rounded-full bg-indigo-600"></span>
+                                <span class="text-xs font-extrabold text-slate-800 uppercase tracking-wider">Pilih Tanggal:</span>
+                            </div>
+                            <span class="text-[11px] text-slate-500 font-medium">Klik tanggal untuk melihat gelombang unggahan hari tersebut</span>
+                        </div>
+
+                        <div class="flex items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                            <?php foreach ($periodDates as $dItem): 
+                                $dDate = $dItem['work_date'];
+                                $isToday = ($dDate === date('Y-m-d'));
+                                $dLabel = date('d M Y', strtotime($dDate)) . ($isToday ? ' (Hari Ini)' : '');
+                                $dCount = (int)$dItem['item_count'];
+                                $dActive = ($selectedDate === $dDate);
+
+                                $buildDateUrl = function($targetDate) use ($activeTab, $period, $statusFilter, $orderFilter, $search) {
+                                    $params = [
+                                        'tab'           => $activeTab,
+                                        'period'        => $period,
+                                        'selected_date' => $targetDate,
+                                        'scope'         => 'today',
+                                        'order_by'      => $orderFilter,
+                                    ];
+                                    if ($statusFilter !== 'all') $params['status'] = $statusFilter;
+                                    if (!empty($search)) $params['search'] = $search;
+                                    return '?' . http_build_query($params);
+                                };
+                            ?>
+                                <a href="<?= $buildDateUrl($dDate) ?>" 
+                                   class="flex-shrink-0 px-3 py-1.5 rounded-lg border text-xs font-bold transition-all flex items-center gap-2 <?= $dActive ? 'bg-indigo-700 text-white border-indigo-700 shadow-sm ring-2 ring-indigo-500/30' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300' ?>">
+                                    <svg class="w-3.5 h-3.5 <?= $dActive ? 'text-indigo-200' : 'text-slate-400' ?>" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                                    </svg>
+                                    <span><?= $dLabel ?></span>
+                                    <span class="text-[10px] <?= $dActive ? 'bg-white/20 text-white' : 'bg-white text-slate-600 border border-slate-200' ?> px-1.5 py-0.2 rounded-md font-semibold">
+                                        <?= $dCount ?> Part
+                                    </span>
+                                </a>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                    <div class="border-t border-slate-100 pt-2"></div>
+                <?php endif; ?>
+
+                <!-- LEVEL 2: PITA PILIHAN BATCH PADA TANGGAL TERPILIH -->
+                <div>
+                    <div class="flex items-center justify-between gap-2 mb-1.5 px-0.5">
+                        <div class="flex items-center gap-1.5">
+                            <span class="w-2 h-2 rounded-full bg-blue-600"></span>
+                            <span class="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                                Gelombang / Batch (<?= date('d M Y', strtotime($selectedDate)) ?>):
+                            </span>
+                        </div>
+                        <span class="text-[11px] text-slate-500 font-medium">Klik batch untuk menyaring daftar part sesuai lembar fisik</span>
+                    </div>
+
+                    <div class="flex items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                        <?php if (!empty($todayBatches)): ?>
+                            <?php foreach ($todayBatches as $bIdx => $bItem): 
+                                $bId = (string)$bItem['id'];
+                                $bNum = $bIdx + 1;
+                                $bTime = !empty($bItem['imported_at']) ? date('H:i', strtotime($bItem['imported_at'])) : '-';
+                                $bTotal = (int)$bItem['item_count'];
+                                $bDone = (int)$bItem['completed_count'];
+                                $bProg = (int)($bItem['in_progress_count'] ?? 0);
+                                $bActive = ($scopeFilter !== 'pending_yesterday' && $batchFilter === $bId);
+
+                                $buildBatchUrl = function($targetBatchId) use ($activeTab, $period, $selectedDate, $statusFilter, $orderFilter, $search) {
+                                    $params = [
+                                        'tab'           => $activeTab,
+                                        'period'        => $period,
+                                        'selected_date' => $selectedDate,
+                                        'batch_id'      => $targetBatchId,
+                                        'scope'         => 'today',
+                                        'order_by'      => $orderFilter,
+                                    ];
+                                    if ($statusFilter !== 'all') $params['status'] = $statusFilter;
+                                    if (!empty($search)) $params['search'] = $search;
+                                    return '?' . http_build_query($params);
+                                };
+                            ?>
+                                <a href="<?= $buildBatchUrl($bId) ?>" 
+                                   class="flex-shrink-0 px-3.5 py-2 rounded-lg border text-xs font-bold transition-all flex items-center gap-2.5 <?= $bActive ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-blue-500/30' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300' ?>">
+                                    <div class="flex items-center gap-1.5">
+                                        <span class="w-1.5 h-1.5 rounded-full <?= $bActive ? 'bg-emerald-400' : 'bg-slate-400' ?>"></span>
+                                        <span>Batch <?= $bNum ?></span>
+                                        <span class="text-[10.5px] <?= $bActive ? 'text-slate-300' : 'text-slate-500' ?> font-semibold">(<?= $bTime ?>)</span>
+                                    </div>
+                                    <div class="flex items-center gap-1 text-[10.5px] <?= $bActive ? 'bg-white/15 text-white' : 'bg-white text-slate-700 border border-slate-200' ?> px-2 py-0.5 rounded-md">
+                                        <span><?= $bDone ?>/<?= $bTotal ?> Selesai</span>
+                                        <?php if ($bProg > 0): ?>
+                                            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" title="Ada sesi berjalan"></span>
+                                        <?php endif; ?>
+                                    </div>
+                                </a>
+                            <?php endforeach; ?>
+
+                            <!-- Tombol Pill: Semua Batch di Tanggal Ini -->
+                            <?php
+                            $isAllTodayActive = ($scopeFilter !== 'pending_yesterday' && $batchFilter === 'all');
+                            $buildAllTodayUrl = function() use ($activeTab, $period, $selectedDate, $statusFilter, $orderFilter, $search) {
+                                $params = [
+                                    'tab'           => $activeTab,
+                                    'period'        => $period,
+                                    'selected_date' => $selectedDate,
+                                    'batch_id'      => 'all',
+                                    'scope'         => 'today',
+                                    'order_by'      => $orderFilter,
+                                ];
+                                if ($statusFilter !== 'all') $params['status'] = $statusFilter;
+                                if (!empty($search)) $params['search'] = $search;
+                                return '?' . http_build_query($params);
+                            };
+                            ?>
+                            <a href="<?= $buildAllTodayUrl() ?>" 
+                               class="flex-shrink-0 px-3 py-2 rounded-lg border text-xs font-bold transition-all flex items-center gap-2 <?= $isAllTodayActive ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-blue-500/30' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300' ?>">
+                                <span>Semua Batch Tanggal Ini</span>
+                                <span class="text-[10.5px] <?= $isAllTodayActive ? 'bg-white/15 text-white' : 'bg-white text-slate-600 border border-slate-200' ?> px-2 py-0.5 rounded-md font-semibold">
+                                    <?= number_format(array_sum(array_column($todayBatches, 'item_count'))) ?> Part
+                                </span>
+                            </a>
+
+                        <?php else: ?>
+                            <div class="text-xs text-slate-500 italic py-1 px-2">
+                                Belum ada dokumen batch Kanban yang diunggah pada tanggal <?= date('d M Y', strtotime($selectedDate)) ?>.
+                            </div>
+                        <?php endif; ?>
+
+                        <!-- Tab Khusus: Sisa / Tunggakan Kemarin (Highlight Kuning/Amber) -->
+                        <?php if ($pendingYesterdayCount > 0): 
+                            $isYesterdayActive = ($scopeFilter === 'pending_yesterday');
+                            $buildYesterdayUrl = function() use ($activeTab, $period, $selectedDate, $statusFilter, $orderFilter, $search) {
+                                $params = [
+                                    'tab'           => $activeTab,
+                                    'period'        => $period,
+                                    'selected_date' => $selectedDate,
+                                    'batch_id'      => 'all',
+                                    'scope'         => 'pending_yesterday',
+                                    'order_by'      => $orderFilter,
+                                ];
+                                if ($statusFilter !== 'all') $params['status'] = $statusFilter;
+                                if (!empty($search)) $params['search'] = $search;
+                                return '?' . http_build_query($params);
+                            };
+                        ?>
+                            <div class="h-6 w-px bg-slate-200 mx-1 flex-shrink-0"></div>
+                            <a href="<?= $buildYesterdayUrl() ?>" 
+                               class="flex-shrink-0 px-3 py-2 rounded-lg border text-xs font-bold transition-all flex items-center gap-2 <?= $isYesterdayActive ? 'bg-amber-600 text-white border-amber-600 shadow-sm ring-2 ring-amber-400/40' : 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-200 hover:border-amber-300' ?>">
+                                <span class="w-2 h-2 rounded-full <?= $isYesterdayActive ? 'bg-white' : 'bg-amber-500' ?>"></span>
+                                <span>Tunggakan Kemarin</span>
+                                <span class="text-[10.5px] <?= $isYesterdayActive ? 'bg-white/20 text-white' : 'bg-white text-amber-900 border border-amber-200' ?> px-2 py-0.5 rounded-md font-extrabold">
+                                    <?= number_format($pendingYesterdayCount) ?> Belum Selesai
+                                </span>
+                            </a>
+                        <?php endif; ?>
+                    </div>
                 </div>
-            <?php endif; ?>
+
+            </div>
         <?php endif; ?>
         <!-- TABEL DATA: KANBAN DELIVERY vs SAFETY STOCK vs RIWAYAT SAYA        -->
         <!-- ═══════════════════════════════════════════════════════════════════ -->
-        <div class="card p-0 overflow-hidden border border-slate-200/90 rounded-xl shadow-xs" style="min-width: 0; max-width: 100%;">
+        <div class="card p-0 border border-slate-200/90 rounded-xl shadow-xs <?= ($activeTab === 'kanban' || empty($activeTab)) ? 'overflow-visible' : 'overflow-hidden' ?>" style="min-width: 0; max-width: 100%;">
             
             <?php if ($activeTab === 'my_inspections'): ?>
                 <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -4282,6 +5174,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                                             </td>
                                                                             <td style="padding: 8px 10px; font-family: monospace; font-weight: 800; color: #7c3aed; white-space: nowrap;">
                                                                                 <?= htmlspecialchars($rLot['ref_number'] ?: '-') ?>
+                                                                                <?php if (!empty($rLot['ref_number']) && ($rLot['ref_number'] === 'DIRECT-PASS' || strpos($rLot['ref_number'], 'DIRECT-PASS') !== false)): ?>
+                                                                                    <span style="font-size: 8.5px; font-weight: 800; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 4px; border-radius: 4px; display: inline-block; margin-left: 3px;">
+                                                                                        DIRECT
+                                                                                    </span>
+                                                                                <?php elseif (!empty($rLot['remarks']) && stripos($rLot['remarks'], 'Tutup Kanban') !== false): ?>
+                                                                                    <span style="font-size: 8.5px; font-weight: 800; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; padding: 1px 4px; border-radius: 4px; display: inline-block; margin-left: 3px;">
+                                                                                        CLOSE KB
+                                                                                    </span>
+                                                                                <?php endif; ?>
                                                                             </td>
                                                                             <td style="padding: 8px 10px; text-align: right; font-weight: 800; color: #0f172a; white-space: nowrap;">
                                                                                 <?= number_format((int)($rLot['qty'] ?? 0)) ?> <span class="text-[10px] font-normal text-slate-500">pcs</span>
@@ -4348,7 +5249,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 <div class="w-full">
                     <table class="w-full text-left text-xs text-slate-700 table-fixed" style="border-collapse: collapse;">
                         <colgroup>
-                            <col style="width: 38px">
+                            <col style="width: <?= $isAdminOrSupervisor ? '54px' : '38px' ?>;">
                             <col style="width: 19%">
                             <col style="width: 25%">
                             <col style="width: 16%">
@@ -4358,24 +5259,306 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         </colgroup>
                         <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase tracking-wider text-[10px]">
                             <tr>
-                                <th class="text-center px-2 py-2.5">No</th>
-                                <th class="px-3 py-2.5">Kanban</th>
-                                <th class="px-3 py-2.5">Part</th>
-                                <th class="px-2.5 py-2.5 whitespace-nowrap">Jadwal & ETA</th>
-                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap">Progres</th>
-                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap">Status</th>
+                                <th class="text-center px-1.5 py-2.5">
+                                    <?php if ($isAdminOrSupervisor): ?>
+                                        <div class="flex items-center justify-center gap-1">
+                                            <input type="checkbox" id="bulk-kanban-check-all" onchange="toggleSelectAllKanban(this.checked)" title="Pilih Semua Kanban Terbuka" class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-sm">
+                                            <span class="text-[9px] text-slate-400">All</span>
+                                        </div>
+                                    <?php else: ?>
+                                        No
+                                    <?php endif; ?>
+                                </th>
+
+                                <!-- Kolom KANBAN dengan Excel Filter -->
+                                <th class="px-3 py-2.5" style="position: relative;">
+                                    <div class="th-filter-wrapper">
+                                        <span>Kanban</span>
+                                        <button type="button" class="th-filter-btn" data-col="kanban" title="Klik untuk menyaring Kanban" onclick="toggleExcelFilter(event, 'kanban')">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                        </button>
+                                    </div>
+                                    <!-- Dropdown Filter Kanban -->
+                                    <div id="filter-dropdown-kanban" class="excel-filter-dropdown align-left">
+                                        <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
+                                            <span class="text-[11px] font-extrabold text-slate-900 tracking-wide">FILTER KANBAN</span>
+                                            <button type="button" class="excel-reset-btn" onclick="resetSingleColFilter('kanban')" title="Reset filter kolom ini">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                                <span>Reset</span>
+                                            </button>
+                                        </div>
+                                        <input type="text" class="excel-filter-search" placeholder="Cari..." oninput="onSearchFilterOptions('kanban', this.value)">
+                                        <div class="flex items-center gap-1.5 mb-2">
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('kanban', true)">
+                                                <svg width="11" height="11" class="text-emerald-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                <span>Pilih Semua</span>
+                                            </button>
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('kanban', false)">
+                                                <svg width="11" height="11" class="text-rose-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                <span>Hapus Pilihan</span>
+                                            </button>
+                                        </div>
+                                        <div class="excel-filter-list" id="filter-list-kanban">
+                                            <!-- Checkbox list dinamis -->
+                                        </div>
+                                        <div class="excel-filter-actions">
+                                            <span class="text-[10px] text-slate-500 font-bold filter-count-info"></span>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" class="excel-btn-close" onclick="closeAllExcelFilters()">
+                                                    Tutup
+                                                </button>
+                                                <button type="button" class="excel-btn-apply" onclick="applyExcelFilters()">
+                                                    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    <span>Terapkan</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </th>
+
+                                <!-- Kolom PART dengan Excel Filter -->
+                                <th class="px-3 py-2.5" style="position: relative;">
+                                    <div class="th-filter-wrapper">
+                                        <span>Part</span>
+                                        <button type="button" class="th-filter-btn" data-col="part" title="Klik untuk menyaring Part" onclick="toggleExcelFilter(event, 'part')">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                        </button>
+                                    </div>
+                                    <!-- Dropdown Filter Part -->
+                                    <div id="filter-dropdown-part" class="excel-filter-dropdown align-left">
+                                        <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
+                                            <span class="text-[11px] font-extrabold text-slate-900 tracking-wide">FILTER PART</span>
+                                            <button type="button" class="excel-reset-btn" onclick="resetSingleColFilter('part')" title="Reset filter kolom ini">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                                <span>Reset</span>
+                                            </button>
+                                        </div>
+                                        <input type="text" class="excel-filter-search" placeholder="Cari Part..." oninput="onSearchFilterOptions('part', this.value)">
+                                        <div class="flex items-center gap-1.5 mb-2">
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('part', true)">
+                                                <svg width="11" height="11" class="text-emerald-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                <span>Pilih Semua</span>
+                                            </button>
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('part', false)">
+                                                <svg width="11" height="11" class="text-rose-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                <span>Hapus Pilihan</span>
+                                            </button>
+                                        </div>
+                                        <div class="excel-filter-list" id="filter-list-part">
+                                            <!-- Checkbox list dinamis -->
+                                        </div>
+                                        <div class="excel-filter-actions">
+                                            <span class="text-[10px] text-slate-500 font-bold filter-count-info"></span>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" class="excel-btn-close" onclick="closeAllExcelFilters()">
+                                                    Tutup
+                                                </button>
+                                                <button type="button" class="excel-btn-apply" onclick="applyExcelFilters()">
+                                                    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    <span>Terapkan</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </th>
+
+                                <!-- Kolom JADWAL & ETA dengan Excel Filter -->
+                                <th class="px-2.5 py-2.5 whitespace-nowrap" style="position: relative;">
+                                    <div class="th-filter-wrapper">
+                                        <span>Jadwal & ETA</span>
+                                        <button type="button" class="th-filter-btn" data-col="schedule" title="Klik untuk menyaring Jadwal & ETA" onclick="toggleExcelFilter(event, 'schedule')">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                        </button>
+                                    </div>
+                                    <!-- Dropdown Filter Jadwal & ETA -->
+                                    <div id="filter-dropdown-schedule" class="excel-filter-dropdown align-left">
+                                        <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
+                                            <span class="text-[11px] font-extrabold text-slate-900 tracking-wide">FILTER JADWAL & ETA</span>
+                                            <button type="button" class="excel-reset-btn" onclick="resetSingleColFilter('schedule')" title="Reset filter kolom ini">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                                <span>Reset</span>
+                                            </button>
+                                        </div>
+                                        <input type="text" class="excel-filter-search" placeholder="Cari tanggal / status..." oninput="onSearchFilterOptions('schedule', this.value)">
+                                        <div class="flex items-center gap-1.5 mb-2">
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('schedule', true)">
+                                                <svg width="11" height="11" class="text-emerald-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                <span>Pilih Semua</span>
+                                            </button>
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('schedule', false)">
+                                                <svg width="11" height="11" class="text-rose-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                <span>Hapus Pilihan</span>
+                                            </button>
+                                        </div>
+                                        <div class="excel-filter-list" id="filter-list-schedule">
+                                            <!-- Checkbox list dinamis -->
+                                        </div>
+                                        <div class="excel-filter-actions">
+                                            <span class="text-[10px] text-slate-500 font-bold filter-count-info"></span>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" class="excel-btn-close" onclick="closeAllExcelFilters()">
+                                                    Tutup
+                                                </button>
+                                                <button type="button" class="excel-btn-apply" onclick="applyExcelFilters()">
+                                                    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    <span>Terapkan</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </th>
+
+                                <!-- Kolom PROGRES dengan Excel Filter -->
+                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap" style="position: relative;">
+                                    <div class="th-filter-wrapper">
+                                        <span class="w-full text-center">Progres</span>
+                                        <button type="button" class="th-filter-btn" data-col="progress" title="Klik untuk menyaring Progres" onclick="toggleExcelFilter(event, 'progress')">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                        </button>
+                                    </div>
+                                    <!-- Dropdown Filter Progres -->
+                                    <div id="filter-dropdown-progress" class="excel-filter-dropdown align-right">
+                                        <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
+                                            <span class="text-[11px] font-extrabold text-slate-900 tracking-wide">FILTER PROGRES</span>
+                                            <button type="button" class="excel-reset-btn" onclick="resetSingleColFilter('progress')" title="Reset filter kolom ini">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                                <span>Reset</span>
+                                            </button>
+                                        </div>
+                                        <input type="text" class="excel-filter-search" placeholder="Cari progres..." oninput="onSearchFilterOptions('progress', this.value)">
+                                        <div class="flex items-center gap-1.5 mb-2">
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('progress', true)">
+                                                <svg width="11" height="11" class="text-emerald-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                <span>Pilih Semua</span>
+                                            </button>
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('progress', false)">
+                                                <svg width="11" height="11" class="text-rose-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                <span>Hapus Pilihan</span>
+                                            </button>
+                                        </div>
+                                        <div class="excel-filter-list" id="filter-list-progress">
+                                            <!-- Checkbox list dinamis -->
+                                        </div>
+                                        <div class="excel-filter-actions">
+                                            <span class="text-[10px] text-slate-500 font-bold filter-count-info"></span>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" class="excel-btn-close" onclick="closeAllExcelFilters()">
+                                                    Tutup
+                                                </button>
+                                                <button type="button" class="excel-btn-apply" onclick="applyExcelFilters()">
+                                                    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    <span>Terapkan</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </th>
+
+                                <!-- Kolom STATUS dengan Excel Filter -->
+                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap" style="position: relative;">
+                                    <div class="th-filter-wrapper">
+                                        <span class="w-full text-center">Status</span>
+                                        <button type="button" class="th-filter-btn" data-col="status" title="Klik untuk menyaring Status" onclick="toggleExcelFilter(event, 'status')">
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                        </button>
+                                    </div>
+                                    <!-- Dropdown Filter Status -->
+                                    <div id="filter-dropdown-status" class="excel-filter-dropdown align-right">
+                                        <div class="flex items-center justify-between pb-1.5 mb-2 border-b border-slate-100">
+                                            <span class="text-[11px] font-extrabold text-slate-900 tracking-wide">FILTER STATUS</span>
+                                            <button type="button" class="excel-reset-btn" onclick="resetSingleColFilter('status')" title="Reset filter kolom ini">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                                <span>Reset</span>
+                                            </button>
+                                        </div>
+                                        <input type="text" class="excel-filter-search" placeholder="Cari status..." oninput="onSearchFilterOptions('status', this.value)">
+                                        <div class="flex items-center gap-1.5 mb-2">
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('status', true)">
+                                                <svg width="11" height="11" class="text-emerald-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+                                                <span>Pilih Semua</span>
+                                            </button>
+                                            <button type="button" class="excel-quick-btn" onclick="toggleSelectAllFilter('status', false)">
+                                                <svg width="11" height="11" class="text-rose-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                <span>Hapus Pilihan</span>
+                                            </button>
+                                        </div>
+                                        <div class="excel-filter-list" id="filter-list-status">
+                                            <!-- Checkbox list dinamis -->
+                                        </div>
+                                        <div class="excel-filter-actions">
+                                            <span class="text-[10px] text-slate-500 font-bold filter-count-info"></span>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" class="excel-btn-close" onclick="closeAllExcelFilters()">
+                                                    Tutup
+                                                </button>
+                                                <button type="button" class="excel-btn-apply" onclick="applyExcelFilters()">
+                                                    <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    <span>Terapkan</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </th>
+
                                 <th class="px-3 py-2.5 text-right whitespace-nowrap">Aksi</th>
                             </tr>
                         </thead>
-                        <tbody class="divide-y divide-slate-100">
+                        <tbody id="kanban-table-body" class="divide-y divide-slate-100">
+                            <!-- Baris Indikator Filter Aktif Client-Side -->
+                            <tr id="excel-filter-active-bar" style="display: none; background-color: #eff6ff;">
+                                <td colspan="7" class="px-3 py-1.5 text-xs text-blue-900 border-b border-blue-200">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex items-center gap-1.5 font-bold text-[11px]">
+                                            <svg class="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                            <span>Filter Kolom Excel Aktif:</span>
+                                            <span id="excel-filter-summary-text" class="font-normal text-blue-700"></span>
+                                        </div>
+                                        <button type="button" onclick="resetAllExcelFilters()" class="text-[10.5px] font-bold text-rose-600 hover:text-rose-800 hover:underline">
+                                            Reset Semua Filter Kolom
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <!-- Baris Jika Hasil Filter Kosong -->
+                            <tr id="excel-filter-empty-row" style="display: none;">
+                                <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                                    <svg class="w-7 h-7 text-slate-300 mx-auto mb-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path>
+                                    </svg>
+                                    <p class="font-bold text-slate-600 text-xs">Tidak ada data yang sesuai dengan filter kolom yang dipilih.</p>
+                                    <button type="button" onclick="resetAllExcelFilters()" class="mt-1.5 px-2.5 py-1 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded text-[11px] font-bold border border-blue-200">
+                                        Hapus Filter Kolom
+                                    </button>
+                                </td>
+                            </tr>
                             <?php if (empty($kanbans)): ?>
                                 <tr>
-                                    <td colspan="7" class="px-4 py-10 text-center text-slate-400">
-                                        <svg class="w-8 h-8 text-slate-300 mx-auto mb-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <td colspan="7" class="px-4 py-12 text-center text-slate-400">
+                                        <svg class="w-9 h-9 text-slate-300 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
                                         </svg>
-                                        <p class="font-bold text-slate-600 text-xs">Tidak ada data jadwal Kanban pada periode ini.</p>
-                                        <p class="text-[11px] text-slate-400 mt-0.5">Ubah filter tanggal atau klik "Mulai Inspeksi Baru".</p>
+                                        <?php if ($scopeFilter === 'today'): ?>
+                                            <p class="font-bold text-slate-700 text-sm">Belum ada dokumen / jadwal Kanban untuk hari ini.</p>
+                                            <p class="text-xs text-slate-400 mt-1">Dokumen batch Kanban hari ini belum diunggah oleh admin.</p>
+                                            <?php if ($pendingYesterdayCount > 0): ?>
+                                                <div class="mt-3.5 inline-flex items-center gap-2">
+                                                    <a href="?tab=kanban&scope=pending_yesterday" class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-lg shadow-xs transition-all inline-flex items-center gap-1.5">
+                                                        <span>Periksa Tunggakan Kemarin (<?= number_format($pendingYesterdayCount) ?> Item)</span>
+                                                    </a>
+                                                </div>
+                                            <?php endif; ?>
+                                        <?php elseif ($scopeFilter === 'pending_yesterday'): ?>
+                                            <p class="font-bold text-slate-700 text-sm">Semua Kanban hari kemarin telah selesai diinspeksi.</p>
+                                            <p class="text-xs text-slate-400 mt-1">Tidak ada tunggakan atau sisa inspeksi dari hari kemarin.</p>
+                                            <div class="mt-3.5">
+                                                <a href="?tab=kanban&scope=today" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-lg transition-all">
+                                                    Kembali ke Hari Ini
+                                                </a>
+                                            </div>
+                                        <?php else: ?>
+                                            <p class="font-bold text-slate-700 text-sm">Tidak ada data jadwal Kanban pada filter ini.</p>
+                                            <p class="text-xs text-slate-400 mt-1">Ubah kata kunci pencarian atau reset filter di atas.</p>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                             <?php else: ?>
@@ -4431,6 +5614,56 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     $isPartial = (!$isFullyPassed && $k['status'] !== 'completed' && ($k['status'] === 'partial' || ($passedQty > 0 && $passedQty < $targetQty)));
                                     $isCompleted = ($isFullyPassed || $k['status'] === 'completed');
                                     $isRejected = ($k['status'] === 'rejected' && $passedQty <= 0);
+                                    $remainingQuotaToClose = max(0, $targetQty - $passedQty);
+
+                                    // Estimasi Sample Size AQL (ISO 2859-1 Level II)
+                                    $sampleSizeAql = 0;
+                                    if ($remainingQuotaToClose > 0) {
+                                        if ($remainingQuotaToClose <= 8) $sampleSizeAql = 2;
+                                        elseif ($remainingQuotaToClose <= 15) $sampleSizeAql = 3;
+                                        elseif ($remainingQuotaToClose <= 25) $sampleSizeAql = 5;
+                                        elseif ($remainingQuotaToClose <= 50) $sampleSizeAql = 8;
+                                        elseif ($remainingQuotaToClose <= 90) $sampleSizeAql = 13;
+                                        elseif ($remainingQuotaToClose <= 150) $sampleSizeAql = 20;
+                                        elseif ($remainingQuotaToClose <= 280) $sampleSizeAql = 32;
+                                        elseif ($remainingQuotaToClose <= 500) $sampleSizeAql = 50;
+                                        elseif ($remainingQuotaToClose <= 1200) $sampleSizeAql = 80;
+                                        elseif ($remainingQuotaToClose <= 3200) $sampleSizeAql = 125;
+                                        elseif ($remainingQuotaToClose <= 10000) $sampleSizeAql = 200;
+                                        elseif ($remainingQuotaToClose <= 35000) $sampleSizeAql = 315;
+                                        else $sampleSizeAql = 500;
+                                    }
+
+                                    // Klasifikasi Nilai Filter
+                                    $filterStatusVal = 'Belum Mulai';
+                                    if ($hasActiveSession) {
+                                        $filterStatusVal = 'Sedang Dikerjakan';
+                                    } elseif ($isCompleted) {
+                                        $filterStatusVal = 'Selesai';
+                                    } elseif ($isPartial) {
+                                        $filterStatusVal = $hasRejectedSession ? 'Parsial (Ada Reject)' : 'Parsial';
+                                    } elseif ($isRejected) {
+                                        $filterStatusVal = 'Reject';
+                                    }
+
+                                    $filterProgressVal = '0% (Belum Mulai)';
+                                    if ($progressPct >= 100) {
+                                        $filterProgressVal = '100% Selesai';
+                                    } elseif ($progressPct >= 75) {
+                                        $filterProgressVal = '75% - 99%';
+                                    } elseif ($progressPct >= 50) {
+                                        $filterProgressVal = '50% - 74%';
+                                    } elseif ($progressPct > 0) {
+                                        $filterProgressVal = '1% - 49%';
+                                    }
+
+                                    $filterScheduleVal = !empty($schedDate) ? date('d/m/Y', strtotime($schedDate)) : '-';
+                                    if ($isOverdue) {
+                                        $filterScheduleVal .= ' (Overdue)';
+                                    }
+
+                                    $filterKanbanVal = '#' . ($k['kanban_no'] ?? '') . ' - ' . ($k['customer'] ?? 'PT. Indonesia Epson Industry');
+                                    $filterPartVal = ($k['item_code'] ?? '') . ' - ' . ($k['display_part_name'] ?? '');
 
                                     if ($isOverdue) {
                                         $rowColorClass = 'row-status-overdue';
@@ -4455,11 +5688,35 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         data-customer="<?= htmlspecialchars($k['customer'] ?? 'PT. Indonesia Epson Industry', ENT_QUOTES) ?>"
                                         data-target-qty="<?= (int)$targetQty ?>"
                                         data-passed-qty="<?= (int)$passedQty ?>"
+                                        data-filter-kanban="<?= htmlspecialchars($filterKanbanVal, ENT_QUOTES) ?>"
+                                        data-filter-part="<?= htmlspecialchars($filterPartVal, ENT_QUOTES) ?>"
+                                        data-filter-schedule="<?= htmlspecialchars($filterScheduleVal, ENT_QUOTES) ?>"
+                                        data-filter-progress="<?= htmlspecialchars($filterProgressVal, ENT_QUOTES) ?>"
+                                        data-filter-status="<?= htmlspecialchars($filterStatusVal, ENT_QUOTES) ?>"
                                         class="transition-colors <?= $rowColorClass ?>" style="vertical-align: middle;">
                                         
-                                        <!-- No -->
-                                        <td class="w-10 text-center px-2 py-3 font-semibold text-slate-400">
-                                            <?= $offset + $idx + 1 ?>
+                                        <!-- No & Select Checkbox (Admin) -->
+                                        <td class="text-center px-1.5 py-3 font-semibold text-slate-400">
+                                            <?php 
+                                            $posInPaper = $itemPositionInBatch[$kid] ?? ($offset + $idx + 1);
+                                            ?>
+                                            <?php if ($isAdminOrSupervisor): ?>
+                                                <div class="flex items-center justify-center gap-1.5">
+                                                    <?php $canBulkClose = (!$isCompleted && !$hasActiveSession); ?>
+                                                    <input type="checkbox" 
+                                                           class="bulk-kanban-cb w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-sm disabled:opacity-30 disabled:cursor-not-allowed" 
+                                                           value="<?= $kid ?>" 
+                                                           data-kanban-no="<?= htmlspecialchars($k['kanban_no']) ?>" 
+                                                           data-part="<?= htmlspecialchars($k['item_code']) ?>" 
+                                                           data-qty="<?= (int)$remainingQuotaToClose ?>" 
+                                                           data-sample="<?= (int)$sampleSizeAql ?>" 
+                                                           <?= !$canBulkClose ? 'disabled title="Sudah selesai atau sedang diinspeksi"' : 'title="Pilih untuk Direct Close"' ?> 
+                                                           onchange="onKanbanCheckChange()">
+                                                    <span class="text-xs font-bold text-slate-700 font-mono"><?= $posInPaper ?></span>
+                                                </div>
+                                            <?php else: ?>
+                                                <span class="text-xs font-bold text-slate-700 font-mono"><?= $posInPaper ?></span>
+                                            <?php endif; ?>
                                         </td>
 
                                         <!-- No Kanban & Customer -->
@@ -4476,6 +5733,27 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             </div>
                                             <div class="text-[11px] text-slate-500 font-medium truncate max-w-[160px]" title="<?= htmlspecialchars($k['customer'] ?? 'PT. Indonesia Epson Industry') ?>">
                                                 <?= htmlspecialchars($k['customer'] ?? 'PT. Indonesia Epson Industry') ?>
+                                            </div>
+                                            <div class="mt-1 flex items-center gap-1 flex-wrap">
+                                                <?php 
+                                                $importMethod = strtolower($k['import_method'] ?? 'manual');
+                                                $isImport = ($importMethod === 'excel_import' || $importMethod === 'excel' || $importMethod === 'csv');
+                                                $isFromYesterday = (!empty($k['created_at']) && date('Y-m-d', strtotime($k['created_at'])) < date('Y-m-d'));
+                                                ?>
+                                                <?php if ($isFromYesterday): ?>
+                                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-amber-100 text-amber-800 border border-amber-300 uppercase tracking-wider leading-none" title="Kanban sisa dari tanggal <?= date('d/m/Y', strtotime($k['created_at'])) ?>">
+                                                        Kemarin
+                                                    </span>
+                                                <?php endif; ?>
+                                                <?php if ($isImport): ?>
+                                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-teal-50 text-teal-700 border border-teal-200 uppercase tracking-wider leading-none" title="Dibuat melalui Import File Batch">
+                                                        Import
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 uppercase tracking-wider leading-none" title="Dibuat melalui Input Form Manual">
+                                                        Manual
+                                                    </span>
+                                                <?php endif; ?>
                                             </div>
                                         </td>
 
@@ -4652,15 +5930,30 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                     <?php elseif (!$isFullyPassed && $k['status'] !== 'completed'): ?>
                                                         <?php $remainingQuotaToClose = max(0, $targetQty - $passedQty); ?>
                                                         <div class="inline-flex items-center gap-2 flex-nowrap">
-                                                            <a href="<?= base_url('modules/inspection/close_kanban.php?kanban_id=' . $kid) ?>"
-                                                               style="background-color: #ffffff; color: #475569; border: 1px solid #cbd5e1;"
-                                                               onmouseover="this.style.borderColor='#86efac'; this.style.backgroundColor='#f0fdf4'; this.style.color='#15803d';"
-                                                               onmouseout="this.style.borderColor='#cbd5e1'; this.style.backgroundColor='#ffffff'; this.style.color='#475569';"
-                                                               class="px-2.5 py-1.5 font-bold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" 
-                                                               title="Tutup Kanban dengan input Lot fisik / scan">
-                                                                <svg class="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
-                                                                <span>Close</span>
-                                                            </a>
+                                                            <?php if ($isAdminOrSupervisor): ?>
+                                                                <!-- Tombol Close Khusus Admin / Supervisor: Langsung Modal Direct Close -->
+                                                                <button type="button" 
+                                                                        onclick="openDirectCloseModal(<?= $kid ?>, '<?= addslashes($k['kanban_no']) ?>', '<?= addslashes($k['item_code']) ?>', '<?= addslashes($k['display_part_name']) ?>', '<?= addslashes($k['customer'] ?? 'PT. Indonesia Epson Industry') ?>', <?= (int)$remainingQuotaToClose ?>, <?= (int)$targetQty ?>)"
+                                                                        style="background-color: #ffffff; color: #475569; border: 1.5px solid #cbd5e1;"
+                                                                        onmouseover="this.style.borderColor='#86efac'; this.style.backgroundColor='#f0fdf4'; this.style.color='#15803d';"
+                                                                        onmouseout="this.style.borderColor='#cbd5e1'; this.style.backgroundColor='#ffffff'; this.style.color='#475569';"
+                                                                        class="px-2.5 py-1.5 font-extrabold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" 
+                                                                        title="Selesaikan Kanban langsung (Admin Direct Close)">
+                                                                    <svg class="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                                                                    <span>Close</span>
+                                                                </button>
+                                                            <?php else: ?>
+                                                                <!-- Tombol Close Non-Admin (Operator/Inspector): Halaman Form Input Lot Fisik -->
+                                                                <a href="<?= base_url('modules/inspection/close_kanban.php?kanban_id=' . $kid) ?>"
+                                                                   style="background-color: #ffffff; color: #475569; border: 1.5px solid #cbd5e1;"
+                                                                   onmouseover="this.style.borderColor='#86efac'; this.style.backgroundColor='#f0fdf4'; this.style.color='#15803d';"
+                                                                   onmouseout="this.style.borderColor='#cbd5e1'; this.style.backgroundColor='#ffffff'; this.style.color='#475569';"
+                                                                   class="px-2.5 py-1.5 font-extrabold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" 
+                                                                   title="Tutup Kanban dengan input Lot fisik / scan">
+                                                                    <svg class="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                                                                    <span>Close</span>
+                                                                </a>
+                                                            <?php endif; ?>
 
                                                             <a href="<?= base_url('modules/inspection/session.php?scan_new=1&kanban_id=' . $kid) ?>" 
                                                                style="background-color: #2563eb; color: #ffffff;"
@@ -5324,18 +6617,41 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 var tQty = parseInt(rowElem.getAttribute('data-target-qty')) || 0;
                                 var pQty = parseInt(info.passed_qty) || 0;
                                 var remQty = Math.max(0, tQty - pQty);
+                                var isAdminUser = <?= $isAdminOrSupervisor ? 'true' : 'false' ?>;
 
-                                actionContainer.innerHTML = 
-                                    '<div class="inline-flex items-center gap-2 flex-nowrap">' +
-                                        '<a href="' + baseUrl + 'close_kanban.php?kanban_id=' + kid + '" ' +
-                                           'style="background-color: #ffffff; color: #475569; border: 1px solid #cbd5e1;" ' +
+                                var closeBtnHtml = '';
+                                if (isAdminUser) {
+                                    var safeKNo = kNo.replace(/'/g, "\\'");
+                                    var safeICode = iCode.replace(/'/g, "\\'");
+                                    var safePName = pName.replace(/'/g, "\\'");
+                                    var safeCName = cName.replace(/'/g, "\\'");
+                                    closeBtnHtml = 
+                                        '<button type="button" ' +
+                                           'onclick="openDirectCloseModal(' + kid + ', \'' + safeKNo + '\', \'' + safeICode + '\', \'' + safePName + '\', \'' + safeCName + '\', ' + remQty + ', ' + tQty + ')" ' +
+                                           'style="background-color: #ffffff; color: #475569; border: 1.5px solid #cbd5e1;" ' +
                                            'onmouseover="this.style.borderColor=\'#86efac\'; this.style.backgroundColor=\'#f0fdf4\'; this.style.color=\'#15803d\';" ' +
                                            'onmouseout="this.style.borderColor=\'#cbd5e1\'; this.style.backgroundColor=\'#ffffff\'; this.style.color=\'#475569\';" ' +
-                                           'class="px-2.5 py-1.5 font-bold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" ' +
+                                           'class="px-2.5 py-1.5 font-extrabold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" ' +
+                                           'title="Selesaikan Kanban langsung (Admin Direct Close)">' +
+                                            '<svg class="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>' +
+                                            '<span>Close</span>' +
+                                        '</button>';
+                                } else {
+                                    closeBtnHtml = 
+                                        '<a href="' + baseUrl + 'close_kanban.php?kanban_id=' + kid + '" ' +
+                                           'style="background-color: #ffffff; color: #475569; border: 1.5px solid #cbd5e1;" ' +
+                                           'onmouseover="this.style.borderColor=\'#86efac\'; this.style.backgroundColor=\'#f0fdf4\'; this.style.color=\'#15803d\';" ' +
+                                           'onmouseout="this.style.borderColor=\'#cbd5e1\'; this.style.backgroundColor=\'#ffffff\'; this.style.color=\'#475569\';" ' +
+                                           'class="px-2.5 py-1.5 font-extrabold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap flex-nowrap cursor-pointer" ' +
                                            'title="Tutup Kanban dengan input Lot fisik / scan">' +
                                             '<svg class="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>' +
                                             '<span>Close</span>' +
-                                        '</a>' +
+                                        '</a>';
+                                }
+
+                                actionContainer.innerHTML = 
+                                    '<div class="inline-flex items-center gap-2 flex-nowrap">' +
+                                        closeBtnHtml +
                                         '<a href="' + baseUrl + 'session.php?scan_new=1&kanban_id=' + kid + '" ' +
                                            'style="background-color: #2563eb; color: #ffffff;" ' +
                                            'class="px-3.5 py-1.5 hover:bg-blue-700 active:bg-blue-800 text-white font-extrabold text-xs rounded-md shadow-xs hover:shadow transition-all inline-flex items-center gap-1.5 whitespace-nowrap flex-nowrap" ' +
@@ -5382,15 +6698,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             }
                         }
 
-                        // 5. Relocate completed row to the bottom of the workboard
-                        if (info.is_fully_passed || info.status_type === 'completed') {
-                            var tbody = rowElem.parentNode;
-                            if (tbody && rowElem !== tbody.lastElementChild) {
-                                tbody.appendChild(rowElem);
-                                var detailRow = document.getElementById('kanban-detail-' + kid);
-                                if (detailRow) tbody.appendChild(detailRow);
-                            }
-                        }
+                        // 5. Completed row stays in its exact original paper sequence (do not relocate to bottom)
                     });
                 })
                 .catch(function(err) {
@@ -5512,6 +6820,136 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         </div>
     </div>
 
+    <?php if ($isAdminOrSupervisor): ?>
+    <!-- FLOATING BULK ACTION BOTTOM BAR (SOLID STYLING) -->
+    <div id="bulk-kanban-action-bar" 
+         style="display: none; position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9998; background-color: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 14px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3); padding: 10px 18px;"
+         class="items-center gap-4">
+        <div class="flex items-center space-x-3">
+            <span style="background-color: #2563eb; color: #ffffff; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 9999px;" class="tracking-wide">
+                <span id="bulk-selected-count">0</span> KANBAN TERPILIH
+            </span>
+            <div class="text-xs text-slate-300 font-medium">
+                Total Kuota: <span id="bulk-selected-qty" class="text-white font-mono font-bold text-sm">0 pcs</span>
+            </div>
+        </div>
+        <div class="h-5 w-px bg-slate-700"></div>
+        <div class="flex items-center space-x-2">
+            <button type="button" onclick="clearBulkKanbanSelection()" 
+                    style="background-color: #334155; color: #cbd5e1; border: 1px solid #475569; font-size: 11px; font-weight: 700; padding: 7px 12px; border-radius: 8px;"
+                    class="hover:bg-slate-600 hover:text-white cursor-pointer transition-colors">
+                Batal Pilih
+            </button>
+            <button type="button" onclick="openBulkDirectCloseModal()" 
+                    style="background-color: #059669; color: #ffffff; border: 1px solid #047857; font-size: 12px; font-weight: 800; padding: 7px 16px; border-radius: 8px; box-shadow: 0 2px 4px rgba(5,150,105,0.4);"
+                    class="hover:opacity-95 active:scale-95 inline-flex items-center gap-1.5 cursor-pointer transition-all">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                <span>Close Terpilih Sekaligus</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- MODAL BATCH DIRECT CLOSE KANBAN (ADMIN BULK) -->
+    <div id="modalBulkDirectCloseKanban" 
+         style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh; background-color: rgba(15, 23, 42, 0.65); z-index: 99999; display: none; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;"
+         onclick="if(event.target === this) closeBulkDirectCloseModal();">
+        <div style="max-width: 560px; width: 100%; margin: auto; border: 1px solid #e2e8f0; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); border-radius: 16px; overflow: hidden; background-color: #ffffff;">
+            
+            <!-- Header Modal Solid Emerald -->
+            <div style="background-color: #065f46; color: #ffffff; padding: 16px 22px;" class="flex items-center justify-between">
+                <div class="flex items-center space-x-3">
+                    <div style="width: 38px; height: 38px; background-color: rgba(255, 255, 255, 0.18); border: 1px solid rgba(255, 255, 255, 0.25);" class="rounded-xl flex items-center justify-center flex-shrink-0">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 style="font-size: 15px; font-weight: 800; color: #ffffff; line-height: 1.2;">Batch Direct Close Kanban</h3>
+                        <p style="font-size: 11px; color: #a7f3d0; margin-top: 2px;">Selesaikan banyak Kanban sekaligus tanpa scan fisik</p>
+                    </div>
+                </div>
+                <button type="button" onclick="closeBulkDirectCloseModal()" style="color: #ffffff; background-color: rgba(255,255,255,0.15);" class="w-8 h-8 rounded-lg hover:opacity-80 flex items-center justify-center font-bold text-sm cursor-pointer transition-opacity">
+                    ✕
+                </button>
+            </div>
+
+            <!-- Body Form -->
+            <form id="formBulkDirectCloseKanban" onsubmit="submitBulkDirectClose(event)" class="p-6 space-y-4">
+                
+                <!-- Ringkasan Batch -->
+                <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px;" class="space-y-2">
+                    <div class="flex items-center justify-between pb-2 border-b border-slate-200">
+                        <span style="font-size: 11px; font-weight: 800; color: #475569; text-transform: uppercase;">Total Kanban Dipilih</span>
+                        <span style="background-color: #059669; color: #ffffff; font-size: 11px; font-weight: 800; padding: 2px 10px; border-radius: 9999px;">
+                            <span id="bulk-modal-total-count">0</span> Kanban
+                        </span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 pt-1">
+                        <div style="background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px;">
+                            <span style="font-size: 10px; font-weight: 800; color: #92400e; text-transform: uppercase; display: block;">KUOTA DITUTUP</span>
+                            <div class="flex items-baseline space-x-1 mt-0.5">
+                                <span id="bulk-modal-total-qty" style="font-size: 16px; font-weight: 900; color: #78350f; font-family: monospace;">0</span>
+                                <span style="font-size: 10px; font-weight: 700; color: #b45309;">pcs</span>
+                            </div>
+                        </div>
+                        <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 8px 10px;">
+                            <span style="font-size: 10px; font-weight: 800; color: #166534; text-transform: uppercase; display: block;">SAMPLE AQL (PASSED)</span>
+                            <div class="flex items-baseline space-x-1 mt-0.5">
+                                <span id="bulk-modal-total-sample" style="font-size: 16px; font-weight: 900; color: #14532d; font-family: monospace;">0</span>
+                                <span style="font-size: 10px; font-weight: 700; color: #15803d;">pcs</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Daftar Kanban Yang Akan Ditutup -->
+                <div>
+                    <label style="font-size: 11px; font-weight: 700; color: #334155; display: block; margin-bottom: 6px;">
+                        Daftar Kanban yang Diproses:
+                    </label>
+                    <div id="bulk-modal-items-list" style="max-height: 180px; overflow-y: auto; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px;" class="space-y-1.5 custom-scrollbar">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Info AQL & Dashboard Compliance -->
+                <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 10px 12px;" class="flex items-start space-x-2.5 text-xs text-blue-900 leading-relaxed">
+                    <svg style="width: 16px; height: 16px; color: #2563eb; flex-shrink: 0; margin-top: 2px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span style="font-size: 11px; color: #1e40af;">Setiap Kanban akan dibuatkan 1 Sesi & 1 Lot Virtual PASSED otomatis sesuai standar sampling AQL. Riwayat audit tercatat atas nama Anda (Admin).</span>
+                </div>
+
+                <!-- Input Catatan/Alasan Batch -->
+                <div>
+                    <label for="bulk_dc_remarks" style="font-size: 11px; font-weight: 700; color: #334155; display: block; margin-bottom: 4px;">
+                        Alasan / Keterangan Batch <span style="font-weight: 400; color: #94a3b8;">(Opsional)</span>
+                    </label>
+                    <input type="text" id="bulk_dc_remarks" name="remarks" maxlength="150"
+                           placeholder="Misal: Batch Direct Pass End-of-Shift / Urgent Shipment"
+                           style="width: 100%; font-size: 12px; font-weight: 500; padding: 8px 12px; border-radius: 8px; border: 1px solid #cbd5e1; outline: none; transition: border-color 0.2s;"
+                           onfocus="this.style.borderColor='#059669';" onblur="this.style.borderColor='#cbd5e1';">
+                </div>
+
+                <!-- Tombol Aksi -->
+                <div style="border-top: 1px solid #f1f5f9; padding-top: 12px;" class="flex items-center justify-end space-x-2">
+                    <button type="button" onclick="closeBulkDirectCloseModal()" 
+                            style="background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; font-size: 12px; font-weight: 700; padding: 8px 16px; border-radius: 8px;"
+                            class="hover:bg-slate-200 cursor-pointer transition-colors">
+                        Batal
+                    </button>
+                    <button type="submit" id="btnSubmitBulkDirectClose" 
+                            style="background-color: #059669; color: #ffffff; font-size: 12px; font-weight: 800; padding: 8px 18px; border-radius: 8px; box-shadow: 0 1px 3px rgba(5, 150, 105, 0.4);"
+                            class="hover:opacity-95 active:scale-95 inline-flex items-center gap-1.5 cursor-pointer transition-all">
+                        <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                        <span>Selesaikan Semua Sekaligus</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <script>
     function estimateAqlSampleSize(qty) {
         qty = parseInt(qty) || 0;
@@ -5629,6 +7067,194 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         });
     }
 
+    <?php if ($isAdminOrSupervisor): ?>
+    /* ═════════════════════════════════════════════════════════════════════════
+     * MULTI-KANBAN BATCH DIRECT CLOSE (BULK ADMIN FEATURE)
+     * ═════════════════════════════════════════════════════════════════════════ */
+    function getSelectedKanbanCheckboxes() {
+        return Array.from(document.querySelectorAll('.bulk-kanban-cb:checked:not(:disabled)'));
+    }
+
+    function toggleSelectAllKanban(masterChecked) {
+        var checkboxes = document.querySelectorAll('.bulk-kanban-cb:not(:disabled)');
+        checkboxes.forEach(function(cb) {
+            // Hanya centang row yang tidak tersembunyi oleh Excel filter
+            var row = cb.closest('tr');
+            if (!row || row.style.display !== 'none') {
+                cb.checked = masterChecked;
+            }
+        });
+        onKanbanCheckChange();
+    }
+
+    function clearBulkKanbanSelection() {
+        var checkboxes = document.querySelectorAll('.bulk-kanban-cb');
+        checkboxes.forEach(function(cb) { cb.checked = false; });
+        var masterCb = document.getElementById('bulk-kanban-check-all');
+        if (masterCb) masterCb.checked = false;
+        onKanbanCheckChange();
+    }
+
+    function onKanbanCheckChange() {
+        var selected = getSelectedKanbanCheckboxes();
+        var bar = document.getElementById('bulk-kanban-action-bar');
+        var masterCb = document.getElementById('bulk-kanban-check-all');
+        var allEnabled = document.querySelectorAll('.bulk-kanban-cb:not(:disabled)');
+
+        if (masterCb && allEnabled.length > 0) {
+            masterCb.checked = (selected.length === allEnabled.length);
+        }
+
+        if (!bar) return;
+
+        if (selected.length > 0) {
+            var totalQty = selected.reduce(function(acc, cb) {
+                return acc + (parseInt(cb.getAttribute('data-qty')) || 0);
+            }, 0);
+
+            document.getElementById('bulk-selected-count').innerText = selected.length;
+            document.getElementById('bulk-selected-qty').innerText = Number(totalQty).toLocaleString() + ' pcs';
+            bar.style.display = 'flex';
+        } else {
+            bar.style.display = 'none';
+        }
+    }
+
+    function openBulkDirectCloseModal() {
+        var selected = getSelectedKanbanCheckboxes();
+        if (selected.length === 0) {
+            if (typeof Swal !== 'undefined') {
+                Swal.fire({ icon: 'warning', title: 'Belum Ada Kanban Dipilih', text: 'Silakan centang minimal 1 kartu Kanban terlebih dahulu.' });
+            } else {
+                alert('Pilih minimal 1 kartu Kanban.');
+            }
+            return;
+        }
+
+        var totalQty = 0;
+        var totalSample = 0;
+        var listContainer = document.getElementById('bulk-modal-items-list');
+        listContainer.innerHTML = '';
+
+        selected.forEach(function(cb) {
+            var kNo = cb.getAttribute('data-kanban-no') || cb.value;
+            var pCode = cb.getAttribute('data-part') || '-';
+            var qty = parseInt(cb.getAttribute('data-qty')) || 0;
+            var sample = parseInt(cb.getAttribute('data-sample')) || estimateAqlSampleSize(qty);
+            totalQty += qty;
+            totalSample += sample;
+
+            var itemDiv = document.createElement('div');
+            itemDiv.style.backgroundColor = '#ffffff';
+            itemDiv.style.border = '1px solid #cbd5e1';
+            itemDiv.style.borderRadius = '8px';
+            itemDiv.style.padding = '8px 12px';
+            itemDiv.className = 'flex items-center justify-between shadow-sm';
+            itemDiv.innerHTML = 
+                '<div class="flex items-center space-x-2.5">' +
+                    '<span class="font-mono font-black text-slate-900 text-xs">#' + escapeHtml(kNo) + '</span>' +
+                    '<span style="background-color: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; font-family: monospace; font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 700;">' + escapeHtml(pCode) + '</span>' +
+                '</div>' +
+                '<div class="flex items-center space-x-3 text-right">' +
+                    '<div>' +
+                        '<span class="block text-[9px] text-amber-800 font-bold uppercase leading-none">Kuota</span>' +
+                        '<span class="font-mono font-black text-xs text-amber-900">' + Number(qty).toLocaleString() + ' pcs</span>' +
+                    '</div>' +
+                    '<div>' +
+                        '<span class="block text-[9px] text-emerald-700 font-bold uppercase leading-none">Sample AQL</span>' +
+                        '<span class="font-mono font-extrabold text-xs text-emerald-700">' + Number(sample).toLocaleString() + ' pcs</span>' +
+                    '</div>' +
+                '</div>';
+            listContainer.appendChild(itemDiv);
+        });
+
+        document.getElementById('bulk-modal-total-count').innerText = selected.length;
+        document.getElementById('bulk-modal-total-qty').innerText = Number(totalQty).toLocaleString();
+        var totalSampleElem = document.getElementById('bulk-modal-total-sample');
+        if (totalSampleElem) totalSampleElem.innerText = Number(totalSample).toLocaleString();
+        document.getElementById('bulk_dc_remarks').value = '';
+
+        var modal = document.getElementById('modalBulkDirectCloseKanban');
+        if (modal) modal.style.display = 'flex';
+    }
+
+    function closeBulkDirectCloseModal() {
+        var modal = document.getElementById('modalBulkDirectCloseKanban');
+        if (modal) modal.style.display = 'none';
+    }
+
+    function submitBulkDirectClose(e) {
+        e.preventDefault();
+        var selected = getSelectedKanbanCheckboxes();
+        if (selected.length === 0) return;
+
+        var kanbanIds = selected.map(function(cb) { return cb.value; });
+        var remarks = document.getElementById('bulk_dc_remarks').value;
+        var btn = document.getElementById('btnSubmitBulkDirectClose');
+
+        var origBtnHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path></svg> <span>Menyelesaikan ' + kanbanIds.length + ' Kanban...</span>';
+
+        var formData = new FormData();
+        kanbanIds.forEach(function(id) {
+            formData.append('kanban_ids[]', id);
+        });
+        formData.append('remarks', remarks);
+
+        fetch('<?= base_url('modules/inspection/api/bulk_close_kanban_direct.php') ?>', {
+            method: 'POST',
+            body: formData
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            btn.disabled = false;
+            btn.innerHTML = origBtnHtml;
+
+            if (data && data.success) {
+                closeBulkDirectCloseModal();
+                if (typeof Swal !== 'undefined') {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Berhasil Batch Close!',
+                        text: data.message,
+                        timer: 2000,
+                        showConfirmButton: false
+                    }).then(function() {
+                        window.location.reload();
+                    });
+                } else {
+                    alert(data.message);
+                    window.location.reload();
+                }
+            } else {
+                if (typeof Swal !== 'undefined') {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal Batch Close',
+                        text: (data && data.message) ? data.message : 'Terjadi kesalahan sistem.'
+                    });
+                } else {
+                    alert((data && data.message) ? data.message : 'Terjadi kesalahan sistem.');
+                }
+            }
+        })
+        .catch(function(err) {
+            btn.disabled = false;
+            btn.innerHTML = origBtnHtml;
+            if (typeof Swal !== 'undefined') {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Error Jaringan',
+                    text: 'Gagal menghubungi server saat batch close.'
+                });
+            } else {
+                alert('Gagal menghubungi server saat batch close.');
+            }
+        });
+    }
+    <?php endif; ?>
+
     function scrollMyLotsTable(amount) {
         var wrapper = document.getElementById('my-lots-table-wrapper') || document.getElementById('ss-table-wrapper');
         if (wrapper) {
@@ -5642,6 +7268,275 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             row.classList.toggle('hidden');
         }
     }
+
+    /* ═════════════════════════════════════════════════════════════════════════
+     * EXCEL-STYLE COLUMN AUTOFILTER ENGINE (CLIENT-SIDE)
+     * ═════════════════════════════════════════════════════════════════════════ */
+    var ExcelFilterState = {
+        activeCol: null,
+        filters: {
+            kanban: new Set(),
+            part: new Set(),
+            schedule: new Set(),
+            progress: new Set(),
+            status: new Set()
+        },
+        allOptions: {
+            kanban: new Set(),
+            part: new Set(),
+            schedule: new Set(),
+            progress: new Set(),
+            status: new Set()
+        }
+    };
+
+    function initExcelFilters() {
+        var rows = document.querySelectorAll('tr[id^="kanban-row-"]');
+        if (!rows || rows.length === 0) return;
+
+        // Reset options
+        ['kanban', 'part', 'schedule', 'progress', 'status'].forEach(function(col) {
+            ExcelFilterState.allOptions[col] = new Set();
+        });
+
+        // Scan values
+        rows.forEach(function(r) {
+            var kb = r.getAttribute('data-filter-kanban') || '';
+            var pt = r.getAttribute('data-filter-part') || '';
+            var sc = r.getAttribute('data-filter-schedule') || '';
+            var pr = r.getAttribute('data-filter-progress') || '';
+            var st = r.getAttribute('data-filter-status') || '';
+
+            if (kb) ExcelFilterState.allOptions.kanban.add(kb);
+            if (pt) ExcelFilterState.allOptions.part.add(pt);
+            if (sc) ExcelFilterState.allOptions.schedule.add(sc);
+            if (pr) ExcelFilterState.allOptions.progress.add(pr);
+            if (st) ExcelFilterState.allOptions.status.add(st);
+        });
+
+        // Populate lists
+        ['kanban', 'part', 'schedule', 'progress', 'status'].forEach(function(col) {
+            renderFilterCheckboxes(col);
+        });
+    }
+
+    function renderFilterCheckboxes(col) {
+        var container = document.getElementById('filter-list-' + col);
+        if (!container) return;
+
+        var options = Array.from(ExcelFilterState.allOptions[col]).sort();
+        var selected = ExcelFilterState.filters[col];
+        var isFilterActive = (selected.size > 0);
+
+        var html = '';
+        if (options.length === 0) {
+            html = '<div class="text-[10px] text-slate-400 p-2 text-center">Tidak ada opsi</div>';
+        } else {
+            options.forEach(function(val, idx) {
+                var checked = (!isFilterActive || selected.has(val)) ? 'checked' : '';
+                var safeVal = val.replace(/"/g, '&quot;');
+                html += '<label class="excel-filter-item" data-val="' + safeVal.toLowerCase() + '">' +
+                        '<input type="checkbox" value="' + safeVal + '" ' + checked + ' onchange="onFilterCheckboxChange(\'' + col + '\')">' +
+                        '<span class="truncate" title="' + safeVal + '">' + safeVal + '</span>' +
+                        '</label>';
+            });
+        }
+        container.innerHTML = html;
+    }
+
+    function toggleExcelFilter(event, col) {
+        event.stopPropagation();
+        var dropdown = document.getElementById('filter-dropdown-' + col);
+        if (!dropdown) return;
+
+        var isVisible = (dropdown.style.display === 'block');
+        closeAllExcelFilters();
+
+        if (!isVisible) {
+            dropdown.style.display = 'block';
+            ExcelFilterState.activeCol = col;
+            var searchInput = dropdown.querySelector('.excel-filter-search');
+            if (searchInput) {
+                searchInput.value = '';
+                onSearchFilterOptions(col, '');
+                setTimeout(function() { searchInput.focus(); }, 50);
+            }
+        }
+    }
+
+    function closeAllExcelFilters() {
+        document.querySelectorAll('.excel-filter-dropdown').forEach(function(dd) {
+            dd.style.display = 'none';
+        });
+        ExcelFilterState.activeCol = null;
+    }
+
+    function onSearchFilterOptions(col, keyword) {
+        var container = document.getElementById('filter-list-' + col);
+        if (!container) return;
+        var kw = (keyword || '').toLowerCase().trim();
+        var items = container.querySelectorAll('.excel-filter-item');
+        items.forEach(function(item) {
+            var val = item.getAttribute('data-val') || '';
+            if (!kw || val.indexOf(kw) !== -1) {
+                item.style.display = 'flex';
+            } else {
+                item.style.display = 'none';
+            }
+        });
+    }
+
+    function toggleSelectAllFilter(col, selectAll) {
+        var container = document.getElementById('filter-list-' + col);
+        if (!container) return;
+        var checkboxes = container.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(function(cb) {
+            // Hanya toggle checkbox yang sedang terlihat (sesuai search)
+            if (cb.closest('.excel-filter-item').style.display !== 'none') {
+                cb.checked = selectAll;
+            }
+        });
+    }
+
+    function onFilterCheckboxChange(col) {
+        // Callback opsional jika diperlukan
+    }
+
+    function applyExcelFilters() {
+        var cols = ['kanban', 'part', 'schedule', 'progress', 'status'];
+
+        cols.forEach(function(col) {
+            var container = document.getElementById('filter-list-' + col);
+            if (!container) return;
+
+            var checkboxes = container.querySelectorAll('input[type="checkbox"]');
+            var allCount = checkboxes.length;
+            var checkedValues = [];
+
+            checkboxes.forEach(function(cb) {
+                if (cb.checked) {
+                    checkedValues.push(cb.value);
+                }
+            });
+
+            var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
+
+            if (checkedValues.length === 0 || checkedValues.length === allCount) {
+                // Semua terpilih atau tidak ada yang terpilih = jangan batasi (kosongkan filter)
+                ExcelFilterState.filters[col].clear();
+                if (btn) btn.classList.remove('active');
+            } else {
+                ExcelFilterState.filters[col] = new Set(checkedValues);
+                if (btn) btn.classList.add('active');
+            }
+        });
+
+        closeAllExcelFilters();
+        executeRowFiltering();
+    }
+
+    function resetSingleColFilter(col) {
+        ExcelFilterState.filters[col].clear();
+        var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
+        if (btn) btn.classList.remove('active');
+        renderFilterCheckboxes(col);
+        closeAllExcelFilters();
+        executeRowFiltering();
+    }
+
+    function resetAllExcelFilters() {
+        ['kanban', 'part', 'schedule', 'progress', 'status'].forEach(function(col) {
+            ExcelFilterState.filters[col].clear();
+            var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
+            if (btn) btn.classList.remove('active');
+            renderFilterCheckboxes(col);
+        });
+        closeAllExcelFilters();
+        executeRowFiltering();
+    }
+
+    function executeRowFiltering() {
+        var rows = document.querySelectorAll('tr[id^="kanban-row-"]');
+        if (!rows || rows.length === 0) return;
+
+        var activeFilterCols = [];
+        ['kanban', 'part', 'schedule', 'progress', 'status'].forEach(function(c) {
+            if (ExcelFilterState.filters[c].size > 0) activeFilterCols.push(c);
+        });
+
+        var visibleCount = 0;
+        var totalRows = rows.length;
+
+        rows.forEach(function(r) {
+            var kid = r.getAttribute('data-kanban-id');
+            var detailRow = document.getElementById('kanban-detail-' + kid);
+
+            var kb = r.getAttribute('data-filter-kanban') || '';
+            var pt = r.getAttribute('data-filter-part') || '';
+            var sc = r.getAttribute('data-filter-schedule') || '';
+            var pr = r.getAttribute('data-filter-progress') || '';
+            var st = r.getAttribute('data-filter-status') || '';
+
+            var match = true;
+            if (ExcelFilterState.filters.kanban.size > 0 && !ExcelFilterState.filters.kanban.has(kb)) match = false;
+            if (match && ExcelFilterState.filters.part.size > 0 && !ExcelFilterState.filters.part.has(pt)) match = false;
+            if (match && ExcelFilterState.filters.schedule.size > 0 && !ExcelFilterState.filters.schedule.has(sc)) match = false;
+            if (match && ExcelFilterState.filters.progress.size > 0 && !ExcelFilterState.filters.progress.has(pr)) match = false;
+            if (match && ExcelFilterState.filters.status.size > 0 && !ExcelFilterState.filters.status.has(st)) match = false;
+
+            if (match) {
+                r.style.display = '';
+                visibleCount++;
+            } else {
+                r.style.display = 'none';
+                if (detailRow) detailRow.classList.add('hidden');
+            }
+        });
+
+        // Update indikator bar filter
+        var indicatorBar = document.getElementById('excel-filter-active-bar');
+        var emptyRow = document.getElementById('excel-filter-empty-row');
+        var summaryText = document.getElementById('excel-filter-summary-text');
+
+        if (activeFilterCols.length > 0) {
+            if (indicatorBar) indicatorBar.style.display = '';
+            if (summaryText) {
+                summaryText.innerText = 'Menyaring ' + visibleCount + ' dari ' + totalRows + ' baris (' + activeFilterCols.join(', ') + ')';
+            }
+        } else {
+            if (indicatorBar) indicatorBar.style.display = 'none';
+        }
+
+        if (visibleCount === 0 && totalRows > 0) {
+            if (emptyRow) emptyRow.style.display = '';
+        } else {
+            if (emptyRow) emptyRow.style.display = 'none';
+        }
+
+        // Sinkronisasi checkbox batch selection
+        if (typeof onKanbanCheckChange === 'function') {
+            onKanbanCheckChange();
+        }
+    }
+
+    // Event listener: Tutup filter jika klik di luar
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.excel-filter-dropdown') && !e.target.closest('.th-filter-btn')) {
+            closeAllExcelFilters();
+        }
+    });
+
+    // Event listener: Escape key untuk menutup filter
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            closeAllExcelFilters();
+        }
+    });
+
+    // Inisialisasi saat DOM siap
+    document.addEventListener('DOMContentLoaded', function() {
+        initExcelFilters();
+    });
     </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

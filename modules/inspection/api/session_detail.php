@@ -180,7 +180,7 @@ try {
             // 1. Fetch info riwayat NG terdahulu untuk lot spesifik ini
             $whereRej = [
                 "s.id != :curr_sid",
-                "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR s.status = 'rejected')"
+                "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))"
             ];
             $paramsRej = [':curr_sid' => $sessionId];
 

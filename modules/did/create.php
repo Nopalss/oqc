@@ -59,7 +59,7 @@ if ($pdo) {
 
             <!-- TAB 1: Multi-Row Dynamic Manual Form -->
             <div id="tab-content-manual">
-                <form action="<?= base_url('modules/did/store.php') ?>" method="POST" class="space-y-4">
+                <form id="manual-did-form" action="<?= base_url('modules/did/store.php') ?>" method="POST" class="space-y-4">
                     <?= csrf_field() ?>
                     <input type="hidden" name="entry_type" value="manual">
 
@@ -574,7 +574,65 @@ if ($pdo) {
     window.addEventListener('DOMContentLoaded', function() {
         var dateEl = document.getElementById('inspecting_date');
         if (dateEl && dateEl.value) checkDateTaken(dateEl.value);
+
+        // 1. Validasi Form Manual via SweetAlert2 Toast
+        var manualForm = document.getElementById('manual-did-form');
+        if (manualForm) {
+            manualForm.addEventListener('submit', function(e) {
+                var rows = document.querySelectorAll('#did-rows-body tr');
+                if (rows.length === 0) {
+                    e.preventDefault();
+                    showToast('warning', 'Minimal harus ada 1 baris data inspeksi!');
+                    return;
+                }
+
+                for (var i = 0; i < rows.length; i++) {
+                    var tr = rows[i];
+                    var num = i + 1;
+                    var partSelect = tr.querySelector('input[name*="[part_code_select]"]');
+                    var partCustom = tr.querySelector('input[name*="[part_code_custom]"]');
+                    var partName = tr.querySelector('input[name*="[part_name]"]');
+                    var lotNum = tr.querySelector('input[name*="[lot_number]"]');
+
+                    var codeVal = partSelect ? partSelect.value.trim() : '';
+                    if (codeVal === 'custom' && partCustom) {
+                        codeVal = partCustom.value.trim();
+                    }
+
+                    if (!codeVal) {
+                        e.preventDefault();
+                        showToast('warning', 'Baris #' + num + ': Part Code belum dipilih atau diisi!');
+                        return;
+                    }
+
+                    if (!partName || !partName.value.trim()) {
+                        e.preventDefault();
+                        showToast('warning', 'Baris #' + num + ': Nama Part wajib diisi!');
+                        if (partName) partName.focus();
+                        return;
+                    }
+
+                    if (!lotNum || !lotNum.value.trim()) {
+                        e.preventDefault();
+                        showToast('warning', 'Baris #' + num + ': Lot Number wajib diisi!');
+                        if (lotNum) lotNum.focus();
+                        return;
+                    }
+                }
+
+                showToast('info', 'Menyimpan data DID, mohon tunggu...', 2000);
+            });
+        }
+
+        // 2. Loading Toast saat Submit File Excel Multi-Tab
+        var xlsxForm = document.getElementById('xlsx-upload-form');
+        if (xlsxForm) {
+            xlsxForm.addEventListener('submit', function() {
+                showToast('info', 'Sedang mengunggah & memproses file Excel...', 6000);
+            });
+        }
     });
     </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>
+

@@ -58,7 +58,6 @@ if (!function_exists('syncDailySummaryForDate')) {
                             LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
                             LEFT JOIN master_parts mp ON ss.part_id = mp.id
                             WHERE ss.status IN ('passed', 'rejected')
-                              AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
                               AND NOT (ki.remark LIKE '%AUTO-SS-SESS-%' OR ki.remark LIKE '%Auto Safety Stock Sisa Excess%' OR ki.remark LIKE '%Sisa Excess Kanban%')
                               AND (ki.remark IS NULL OR ki.remark NOT LIKE '%Split%')
                               AND (
@@ -186,7 +185,7 @@ if (!function_exists('syncDailySummaryForDate')) {
                                 strpos($lot['remarks'], 'Direct Close') !== false
                             ));
 
-                            if ($isExcessLot || $isDirectCloseLot || ($lot['lot_result'] ?? '') === 'skipped') {
+                            if ($isExcessLot || ($lot['lot_result'] ?? '') === 'skipped') {
                                 continue;
                             }
                             $hasPhysicalLot = true;

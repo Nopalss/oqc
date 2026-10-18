@@ -1,0 +1,434 @@
+﻿
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:52:{"step_index":51,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:42:35Z","content"
+:"Created At: 2026-10-18T13:42:35+07:00\nCompleted At: 2026-10-18T13:42:35+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12704\nTotal Bytes: 747844\nShowing lines 
+5080 to 5200\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5080:     if (autoSelectId) {\n5081:         url += '&selected_id=' + 
+encodeURIComponent(autoSelectId);\n5082:     }\n5083:     \n5084:     var tbody = 
+document.getElementById('planning-table-body');\n5085:     if (tbody) {\n5086:         tbody.innerHTML = '<tr><td 
+colspan=\"7\" class=\"px-4 py-12 text-center text-slate-400\">' +\n5087:             '<div class=\"inline-block 
+animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2\"></div>' +\n5088:             '<p class=\"font-bold 
+text-slate-600 text-xs\">Memuat data jadwal Kanban...</p>' +\n5089:             '</td></tr>';\n5090:     }\n5091: 
+\n5092:     fetch(url)\n5093:         .then(function(r) { return r.json(); })\n5094:         .then(function(res) 
+{\n5095:             if (res && res.success) {\n5096:                 cachedPlanningItems = Array.isArray(res.items) ? 
+res.items : [];\n5097:                 renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 
+0);\n5098:                 renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5099:              
+   renderPlanningTableRows(cachedPlanningItems);\n5100: \n5101:                 if (autoSelectId) {\n5102:             
+        var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5103:                     if (targetPlan) {\n5104:                         var targetTotalQty = 
+parseInt(targetPlan.qty) || 0;\n5105:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5106:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalP\n<truncated 3088 bytes>\n();\n5158:     if (uLots) uLots.textContent = 
+(parseInt(userStats.total_lots) || 0).toLocaleString();\n5159:     if (uPass) uPass.textContent = 
+(parseInt(userStats.passed_lots) || 0).toLocaleString();\n5160:     if (uNg) uNg.textContent = 
+(parseInt(userStats.ng_lots) || 0).toLocaleString();\n5161: \n5162:     updateKpiActiveCardStyles();\n5163: }\n5164: 
+\n5165: function filterModalByStatus(status) {\n5166:     // Jika status yang sama diklik lagi, toggle kembali ke 
+'all'\n5167:     if (currentModalStatusFilter === status && status !== 'all') {\n5168:         
+currentModalStatusFilter = 'all';\n5169:     } else {\n5170:         currentModalStatusFilter = status || 
+'all';\n5171:     }\n5172:     updateKpiActiveCardStyles();\n5173:     filterPlanningItems();\n5174: }\n5175: \n5176: 
+function updateKpiActiveCardStyles() {\n5177:     var kpiTypes = ['all', 'uninspected', 'in_progress', 'completed', 
+'rejected', 'my_kanban'];\n5178:     kpiTypes.forEach(function(t) {\n5179:         var card = 
+document.getElementById('kpi-btn-' + t);\n5180:         if (!card) return;\n5181:         if (t === 
+currentModalStatusFilter) {\n5182:             card.classList.add('kpi-active-selected');\n5183:             
+card.style.outline = (t === 'my_kanban') ? '2.5px solid #6366f1' : '2.5px solid #2563eb';\n5184:             
+card.style.outlineOffset = '2px';\n5185:         } else {\n5186:             
+card.classList.remove('kpi-active-selected');\n5187:             card.style.outline = 'none';\n5188:             
+card.style.outlineOffset = '0px';\n5189:         }\n5190:     });\n5191: }\n5192: \n5193: function 
+renderModalBatchPills(todayBatches, pendingYesterdayCount) {\n5194:     var bar = 
+document.getElementById('modal-batch-pills-bar');\n5195:     if (!bar) return;\n5196: \n5197:     var html = 
+'';\n5198: \n5199:     // 1. Batch Hari Ini Pills\n5200:     if (todayBatches && todayBatches.length > 0) {\nThe above 
+content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to 
+complete your task, call this tool again to view those lines.\n","truncated_fields":["content"]}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:118:{"step_index":117,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:45:27Z","conten
+t":"Created At: 2026-10-18T13:45:27+07:00\nCompleted At: 2026-10-18T13:45:28+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12704\nTotal Bytes: 747844\nShowing lines 
+5095 to 5130\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5095:             if (res && res.success) {\n5096:                 
+cachedPlanningItems = Array.isArray(res.items) ? res.items : [];\n5097:                 
+renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 0);\n5098:                 
+renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5099:                 
+renderPlanningTableRows(cachedPlanningItems);\n5100: \n5101:                 if (autoSelectId) {\n5102:                
+     var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5103:                     if (targetPlan) {\n5104:                         var targetTotalQty = 
+parseInt(targetPlan.qty) || 0;\n5105:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5106:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5107:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5108:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5109:                         selectPlanningItem(\n5110:                             
+parseInt(targetPlan.id),\n5111:                             targetPlan.item_code,\n5112:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5113:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5114:                             remainingQty,\n5115:                             
+targetPlan.check_type || '',\n5116:                             planTypeAttr,\n5117:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5118:                             totalPassedQty,\n5119:                      
+       targetTotalQty,\n5120:                             targetPlan.kanban_no || '',\n5121:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5122:                         );\n5123:                     }\n5124:    
+             }\n5125:             }\n5126:         })\n5127:         .catch(function(err) {\n5128:             
+console.error('Gagal memperbarui list planning items:', err);\n5129:             if (tbody) {\n5130:                 
+tbody.innerHTML = '<tr><td colspan=\"7\" class=\"px-4 py-8 text-center text-rose-500 font-bold text-xs\">Gagal memuat 
+data dari server. Silakan coba lagi.</td></tr>';\nThe above content does NOT show the entire file contents. If you 
+need to view any lines of the file which were not shown to complete your task, call this tool again to view those 
+lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:149:{"step_index":148,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:46:32Z","conten
+t":"Created At: 2026-10-18T13:46:32+07:00\nCompleted At: 2026-10-18T13:46:32+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12704\nTotal Bytes: 747844\nShowing lines 
+5095 to 5115\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5095:             if (res && res.success) {\n5096:                 
+cachedPlanningItems = Array.isArray(res.items) ? res.items : [];\n5097:                 
+renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 0);\n5098:                 
+renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5099:                 
+renderPlanningTableRows(cachedPlanningItems);\n5100: \n5101:                 if (autoSelectId) {\n5102:                
+     var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5103:                     if (targetPlan) {\n5104:                         var targetTotalQty = 
+parseInt(targetPlan.qty) || 0;\n5105:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5106:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5107:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5108:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5109:                         selectPlanningItem(\n5110:                             
+parseInt(targetPlan.id),\n5111:                             targetPlan.item_code,\n5112:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5113:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5114:                             remainingQty,\n5115:                             
+targetPlan.check_type || '',\nThe above content does NOT show the entire file contents. If you need to view any lines 
+of the file which were not shown to complete your task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:167:{"step_index":166,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:48:38Z","conten
+t":"Created At: 2026-10-18T13:48:38+07:00\nCompleted At: 2026-10-18T13:48:38+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12704\nTotal Bytes: 747844\nShowing lines 
+5090 to 5130\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5090:     }\n5091: \n5092:     fetch(url)\n5093:         .then(function(r) { return 
+r.json(); })\n5094:         .then(function(res) {\n5095:             if (res && res.success) {\n5096:                 
+cachedPlanningItems = Array.isArray(res.items) ? res.items : [];\n5097:                 
+renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 0);\n5098:                 
+renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5099:                 
+renderPlanningTableRows(cachedPlanningItems);\n5100: \n5101:                 if (autoSelectId) {\n5102:                
+     var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5103:                     if (targetPlan) {\n5104:                         var targetTotalQty = 
+parseInt(targetPlan.qty) || 0;\n5105:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5106:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5107:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5108:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5109:                         selectPlanningItem(\n5110:                             
+parseInt(targetPlan.id),\n5111:                             targetPlan.item_code,\n5112:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5113:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5114:                             remainingQty,\n5115:                             
+targetPlan.check_type || '',\n5116:                             planTypeAttr,\n5117:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5118:                             totalPassedQty,\n5119:                      
+       targetTotalQty,\n5120:                             targetPlan.kanban_no || '',\n5121:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5122:                         );\n5123:                     }\n5124:    
+             }\n5125:             }\n5126:         })\n5127:         .catch(function(err) {\n5128:             
+console.error('Gagal memperbarui list planning items:', err);\n5129:             if (tbody) {\n5130:                 
+tbody.innerHTML = '<tr><td colspan=\"7\" class=\"px-4 py-8 text-center text-rose-500 font-bold text-xs\">Gagal memuat 
+data dari server. Silakan coba lagi.</td></tr>';\nThe above content does NOT show the entire file contents. If you 
+need to view any lines of the file which were not shown to complete your task, call this tool again to view those 
+lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:209:{"step_index":208,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:51:01Z","conten
+t":"Created At: 2026-10-18T13:51:01+07:00\nCompleted At: 2026-10-18T13:51:01+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751169\nShowing lines 
+5120 to 5165\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5120:     if (document.getElementById('selected-plan-kanban-no')) 
+document.getElementById('selected-plan-kanban-no').textContent = '-';\n5121:     if 
+(document.getElementById('selected-plan-eta')) document.getElementById('selected-plan-eta').textContent = '-';\n5122: 
+\n5123:     // 4. Update UI tables & cards\n5124:     setPlanningTypeTab('kanban');\n5125: \n5126:     if (typeof 
+renderScannedLabelsTable === 'function') renderScannedLabelsTable();\n5127:     if (typeof 
+updateSafetyStockDeductionUI === 'function') updateSafetyStockDeductionUI();\n5128: }\n5129: \n5130: var 
+currentModalScope = 'today'; // 'today' | 'pending_yesterday'\n5131: var currentModalBatchId = 'all';\n5132: var 
+cachedPlanningItems = [];\n5133: \n5134: function refreshPlanningItemsAjax(autoSelectId) {\n5135:     var url = '<?= 
+base_url(\"modules/inspection/session.php?action=get_planning_items\") ?>';\n5136:     url += '&scope=' + 
+encodeURIComponent(currentModalScope);\n5137:     url += '&batch_id=' + 
+encodeURIComponent(currentModalBatchId);\n5138:     if (autoSelectId) {\n5139:         url += '&selected_id=' + 
+encodeURIComponent(autoSelectId);\n5140:     }\n5141:     \n5142:     var tbody = 
+document.getElementById('planning-table-body');\n5143:     if (tbody) {\n5144:         tbody.innerHTML = '<tr><td 
+colspan=\"7\" class=\"px-4 py-12 text-center text-slate-400\">' +\n5145:             '<div class=\"inline-block 
+animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2\"></div>' +\n5146:             '<p class=\"font-bold 
+text-slate-600 text-xs\">Memuat data jadwal Kanban...</p>' +\n5147:             '</td></tr>';\n5148:     }\n5149: 
+\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:         .then(function(res) 
+{\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = Array.isArray(res.items) ? 
+res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 
+0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5157:              
+   renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:                 if (autoSelectId) {\n5160:             
+        var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5161:                     if (targetPlan) {\n5162:                         var targetTotalQty = 
+parseInt(targetPlan.qty) || 0;\n5163:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\nThe above content does NOT show the entire file contents. If you need to view 
+any lines of the file which were not shown to complete your task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:213:{"step_index":212,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:51:10Z","conten
+t":"Created At: 2026-10-18T13:51:10+07:00\nCompleted At: 2026-10-18T13:51:10+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751169\nShowing lines 
+5150 to 5160\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:  
+       .then(function(res) {\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = 
+Array.isArray(res.items) ? res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], 
+res.pending_yesterday_count || 0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, 
+res.user_daily_stats || {});\n5157:                 renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:       
+          if (autoSelectId) {\n5160:                     var targetPlan = cachedPlanningItems.find(function(p) { 
+return parseInt(p.id) === parseInt(autoSelectId); });\nThe above content does NOT show the entire file contents. If 
+you need to view any lines of the file which were not shown to complete your task, call this tool again to view those 
+lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:223:{"step_index":222,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:51:32Z","conten
+t":"Created At: 2026-10-18T13:51:32+07:00\nCompleted At: 2026-10-18T13:51:32+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751169\nShowing lines 
+5150 to 5185\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:  
+       .then(function(res) {\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = 
+Array.isArray(res.items) ? res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], 
+res.pending_yesterday_count || 0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, 
+res.user_daily_stats || {});\n5157:                 renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:       
+          if (autoSelectId) {\n5160:                     var targetPlan = cachedPlanningItems.find(function(p) { 
+return parseInt(p.id) === parseInt(autoSelectId); });\n5161:                     if (targetPlan) {\n5162:              
+           var targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5166:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5167:                         selectPlanningItem(\n5168:                             
+parseInt(targetPlan.id),\n5169:                             targetPlan.item_code,\n5170:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5171:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5172:                             remainingQty,\n5173:                             
+targetPlan.check_type || '',\n5174:                             planTypeAttr,\n5175:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5176:                             totalPassedQty,\n5177:                      
+       targetTotalQty,\n5178:                             targetPlan.kanban_no || '',\n5179:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5180:                         );\n5181:                     }\n5182:    
+             }\n5183:             }\n5184:         })\n5185:         .catch(function(err) {\nThe above content does 
+NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your 
+task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:271:{"step_index":270,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:57:05Z","conten
+t":"Created At: 2026-10-18T13:57:05+07:00\nCompleted At: 2026-10-18T13:57:05+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751244\nShowing lines 
+5150 to 5200\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:  
+       .then(function(res) {\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = 
+Array.isArray(res.items) ? res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], 
+res.pending_yesterday_count || 0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, 
+res.user_daily_stats || {});\n5157:                 renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:       
+          if (autoSelectId) {\n5160:                     var targetPlan = cachedPlanningItems.find(function(p) { 
+return parseInt(p.id) === parseInt(autoSelectId); });\n5161:                     if (targetPlan && 
+(!selectedPlanningId || selectedPlanningId !== parseInt(targetPlan.id))) {\n5162:                         var 
+targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5166:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5167:                         selectPlanningItem(\n5168:                             
+parseInt(targetPlan.id),\n5169:                             targetPlan.item_code,\n5170:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5171:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5172:                             remainingQty,\n5173:                             
+targetPlan.check_type || '',\n5174:                             planTypeAttr,\n5175:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5176:                             totalPassedQty,\n5177:                      
+       targetTotalQty,\n5178:                             targetPlan.kanban_no || '',\n5179:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5180:                         );\n5181:                     }\n5182:    
+             }\n5183:             }\n5184:         })\n5185:         .catch(function(err) {\n5186:             
+console.error('Gagal memperbarui list planning items:', err);\n5187:             if (tbody) {\n5188:                 
+tbody.innerHTML = '<tr><td colspan=\"7\" class=\"px-4 py-8 text-center text-rose-500 font-bold text-xs\">Gagal memuat 
+data dari server. Silakan coba lagi.</td></tr>';\n5189:             }\n5190:         });\n5191: }\n5192: \n5193: var 
+currentModalStatusFilter = 'all';\n5194: \n5195: function renderModalKpiSummary(kpi, userStats) {\n5196:     // 1. 
+Update 5 Kartu KPI\n5197:     var valTotal = document.getElementById('kpi-val-total');\n5198:     var valUninsp = 
+document.getElementById('kpi-val-uninspected');\n5199:     var valInProg = 
+document.getElementById('kpi-val-in_progress');\n5200:     var valDone = 
+document.getElementById('kpi-val-completed');\nThe above content does NOT show the entire file contents. If you need 
+to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:303:{"step_index":302,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T06:59:02Z","conten
+t":"Created At: 2026-10-18T13:59:02+07:00\nCompleted At: 2026-10-18T13:59:02+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751244\nShowing lines 
+5130 to 5165\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5130: var currentModalScope = 'today'; // 'today' | 'pending_yesterday'\n5131: var 
+currentModalBatchId = 'all';\n5132: var cachedPlanningItems = [];\n5133: \n5134: function 
+refreshPlanningItemsAjax(autoSelectId) {\n5135:     var url = '<?= 
+base_url(\"modules/inspection/session.php?action=get_planning_items\") ?>';\n5136:     url += '&scope=' + 
+encodeURIComponent(currentModalScope);\n5137:     url += '&batch_id=' + 
+encodeURIComponent(currentModalBatchId);\n5138:     if (autoSelectId) {\n5139:         url += '&selected_id=' + 
+encodeURIComponent(autoSelectId);\n5140:     }\n5141:     \n5142:     var tbody = 
+document.getElementById('planning-table-body');\n5143:     if (tbody) {\n5144:         tbody.innerHTML = '<tr><td 
+colspan=\"7\" class=\"px-4 py-12 text-center text-slate-400\">' +\n5145:             '<div class=\"inline-block 
+animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2\"></div>' +\n5146:             '<p class=\"font-bold 
+text-slate-600 text-xs\">Memuat data jadwal Kanban...</p>' +\n5147:             '</td></tr>';\n5148:     }\n5149: 
+\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:         .then(function(res) 
+{\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = Array.isArray(res.items) ? 
+res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 
+0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5157:              
+   renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:                 if (autoSelectId) {\n5160:             
+        var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5161:                     if (targetPlan && (!selectedPlanningId || selectedPlanningId !== 
+parseInt(targetPlan.id))) {\n5162:                         var targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:  
+                       var totalPassedQty = parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         
+var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = 
+(targetPlan.plan_type === 'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || 
+(targetPlan.kanban_no || '').toUpperCase().indexOf('SS') === 0);\nThe above content does NOT show the entire file 
+contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again 
+to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:339:{"step_index":338,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T07:00:32Z","conten
+t":"Created At: 2026-10-18T14:00:32+07:00\nCompleted At: 2026-10-18T14:00:32+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751244\nShowing lines 
+5130 to 5165\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5130: var currentModalScope = 'today'; // 'today' | 'pending_yesterday'\n5131: var 
+currentModalBatchId = 'all';\n5132: var cachedPlanningItems = [];\n5133: \n5134: function 
+refreshPlanningItemsAjax(autoSelectId) {\n5135:     var url = '<?= 
+base_url(\"modules/inspection/session.php?action=get_planning_items\") ?>';\n5136:     url += '&scope=' + 
+encodeURIComponent(currentModalScope);\n5137:     url += '&batch_id=' + 
+encodeURIComponent(currentModalBatchId);\n5138:     if (autoSelectId) {\n5139:         url += '&selected_id=' + 
+encodeURIComponent(autoSelectId);\n5140:     }\n5141:     \n5142:     var tbody = 
+document.getElementById('planning-table-body');\n5143:     if (tbody) {\n5144:         tbody.innerHTML = '<tr><td 
+colspan=\"7\" class=\"px-4 py-12 text-center text-slate-400\">' +\n5145:             '<div class=\"inline-block 
+animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2\"></div>' +\n5146:             '<p class=\"font-bold 
+text-slate-600 text-xs\">Memuat data jadwal Kanban...</p>' +\n5147:             '</td></tr>';\n5148:     }\n5149: 
+\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:         .then(function(res) 
+{\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = Array.isArray(res.items) ? 
+res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 
+0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\n5157:              
+   renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:                 if (autoSelectId) {\n5160:             
+        var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+});\n5161:                     if (targetPlan && (!selectedPlanningId || selectedPlanningId !== 
+parseInt(targetPlan.id))) {\n5162:                         var targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:  
+                       var totalPassedQty = parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         
+var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = 
+(targetPlan.plan_type === 'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || 
+(targetPlan.kanban_no || '').toUpperCase().indexOf('SS') === 0);\nThe above content does NOT show the entire file 
+contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again 
+to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:369:{"step_index":368,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T07:01:48Z","conten
+t":"Created At: 2026-10-18T14:01:48+07:00\nCompleted At: 2026-10-18T14:01:48+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751244\nShowing lines 
+5150 to 5200\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:  
+       .then(function(res) {\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = 
+Array.isArray(res.items) ? res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], 
+res.pending_yesterday_count || 0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, 
+res.user_daily_stats || {});\n5157:                 renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:       
+          if (autoSelectId) {\n5160:                     var targetPlan = cachedPlanningItems.find(function(p) { 
+return parseInt(p.id) === parseInt(autoSelectId); });\n5161:                     if (targetPlan && 
+(!selectedPlanningId || selectedPlanningId !== parseInt(targetPlan.id))) {\n5162:                         var 
+targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5166:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5167:                         selectPlanningItem(\n5168:                             
+parseInt(targetPlan.id),\n5169:                             targetPlan.item_code,\n5170:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5171:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5172:                             remainingQty,\n5173:                             
+targetPlan.check_type || '',\n5174:                             planTypeAttr,\n5175:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5176:                             totalPassedQty,\n5177:                      
+       targetTotalQty,\n5178:                             targetPlan.kanban_no || '',\n5179:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5180:                         );\n5181:                     }\n5182:    
+             }\n5183:             }\n5184:         })\n5185:         .catch(function(err) {\n5186:             
+console.error('Gagal memperbarui list planning items:', err);\n5187:             if (tbody) {\n5188:                 
+tbody.innerHTML = '<tr><td colspan=\"7\" class=\"px-4 py-8 text-center text-rose-500 font-bold text-xs\">Gagal memuat 
+data dari server. Silakan coba lagi.</td></tr>';\n5189:             }\n5190:         });\n5191: }\n5192: \n5193: var 
+currentModalStatusFilter = 'all';\n5194: \n5195: function renderModalKpiSummary(kpi, userStats) {\n5196:     // 1. 
+Update 5 Kartu KPI\n5197:     var valTotal = document.getElementById('kpi-val-total');\n5198:     var valUninsp = 
+document.getElementById('kpi-val-uninspected');\n5199:     var valInProg = 
+document.getElementById('kpi-val-in_progress');\n5200:     var valDone = 
+document.getElementById('kpi-val-completed');\nThe above content does NOT show the entire file contents. If you need 
+to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:405:{"step_index":404,"source":"MODEL","type":"VIEW_FILE","status":"DONE","created_at":"2026-10-18T07:03:20Z","conten
+t":"Created At: 2026-10-18T14:03:20+07:00\nCompleted At: 2026-10-18T14:03:20+07:00\nFile Path: 
+`file:///d:/laragon/www/oqc/modules/inspection/session.php`\nTotal Lines: 12762\nTotal Bytes: 751244\nShowing lines 
+5150 to 5200\nThe following code has been modified to include a line number before every line, in the format: 
+<line_number>: <original_line>. Please note that any changes targeting the original code should remove the line 
+number, colon, and leading space.\n5150:     fetch(url)\n5151:         .then(function(r) { return r.json(); })\n5152:  
+       .then(function(res) {\n5153:             if (res && res.success) {\n5154:                 cachedPlanningItems = 
+Array.isArray(res.items) ? res.items : [];\n5155:                 renderModalBatchPills(res.today_batches || [], 
+res.pending_yesterday_count || 0);\n5156:                 renderModalKpiSummary(res.kpi_stats || {}, 
+res.user_daily_stats || {});\n5157:                 renderPlanningTableRows(cachedPlanningItems);\n5158: \n5159:       
+          if (autoSelectId) {\n5160:                     var targetPlan = cachedPlanningItems.find(function(p) { 
+return parseInt(p.id) === parseInt(autoSelectId); });\n5161:                     if (targetPlan && 
+(!selectedPlanningId || selectedPlanningId !== parseInt(targetPlan.id))) {\n5162:                         var 
+targetTotalQty = parseInt(targetPlan.qty) || 0;\n5163:                         var totalPassedQty = 
+parseInt(targetPlan.total_passed_qty) || 0;\n5164:                         var remainingQty = Math.max(0, 
+targetTotalQty - totalPassedQty);\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+'').toUpperCase().indexOf('SS') === 0);\n5166:                         var planTypeAttr = isSafetyStock ? 
+'safety_stock' : 'kanban';\n5167:                         selectPlanningItem(\n5168:                             
+parseInt(targetPlan.id),\n5169:                             targetPlan.item_code,\n5170:                             
+targetPlan.display_part_name || targetPlan.item_description,\n5171:                             targetPlan.customer || 
+'PT. Indonesia Epson Industry',\n5172:                             remainingQty,\n5173:                             
+targetPlan.check_type || '',\n5174:                             planTypeAttr,\n5175:                             
+parseInt(targetPlan.avail_ss_qty) || 0,\n5176:                             totalPassedQty,\n5177:                      
+       targetTotalQty,\n5178:                             targetPlan.kanban_no || '',\n5179:                           
+  targetPlan.eta || targetPlan.req_date || ''\n5180:                         );\n5181:                     }\n5182:    
+             }\n5183:             }\n5184:         })\n5185:         .catch(function(err) {\n5186:             
+console.error('Gagal memperbarui list planning items:', err);\n5187:             if (tbody) {\n5188:                 
+tbody.innerHTML = '<tr><td colspan=\"7\" class=\"px-4 py-8 text-center text-rose-500 font-bold text-xs\">Gagal memuat 
+data dari server. Silakan coba lagi.</td></tr>';\n5189:             }\n5190:         });\n5191: }\n5192: \n5193: var 
+currentModalStatusFilter = 'all';\n5194: \n5195: function renderModalKpiSummary(kpi, userStats) {\n5196:     // 1. 
+Update 5 Kartu KPI\n5197:     var valTotal = document.getElementById('kpi-val-total');\n5198:     var valUninsp = 
+document.getElementById('kpi-val-uninspected');\n5199:     var valInProg = 
+document.getElementById('kpi-val-in_progress');\n5200:     var valDone = 
+document.getElementById('kpi-val-completed');\nThe above content does NOT show the entire file contents. If you need 
+to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:605:{"step_index":607,"source":"MODEL","type":"RUN_COMMAND","status":"DONE","exit_code":0,"created_at":"2026-10-18T09
+:33:48Z","content":"Created At: 2026-10-18T16:33:48+07:00\nCompleted At: 2026-10-18T16:33:49+07:00\n\n\t\t\t\tThe 
+command exited with code 0.\n\t\t\t\tOutput:\n\t\t\t\t\r\nC:\\Users\\user\\.gemini\\antigravity-ide\\brain\\24ed0abf-e9
+52-4df7-8508-db8347313700\\.system_generated\\logs\\transcript.json\r\nl:209:{\"step_index\":208,\"source\":\"MODEL\",\
+"type\":\"VIEW_FILE\",\"status\":\"DONE\",\"created_at\":\"2026-10-18T06:51:01Z\",\"conten\r\nt\":\"Created At: 
+2026-10-18T13:51:01+07:00\\nCompleted At: 2026-10-18T13:51:01+07:00\\nFile Path: 
+\r\n`file:///d:/laragon/www/oqc/modules/inspection/session.php`\\nTotal Lines: 12762\\nTotal Bytes: 751169\\nShowing 
+lines \r\n5120 to 5165\\nThe following code has been modified to include a line number before every line, in the 
+format: \r\n<line_number>: <original_line>. Please note that any changes targeting the original code should remove the 
+line \r\nnumber, colon, and leading space.\\n5120:     if (document.getElementById('selected-plan-kanban-no')) 
+\r\ndocument.getElementById('selected-plan-kanban-no').textContent = '-';\\n5121:     if 
+\r\n(document.getElementById('selected-plan-eta')) document.getElementById('selected-plan-eta').textContent = 
+'-';\\n5122: \r\n\\n5123:     // 4. Update UI tables & cards\\n5124:     setPlanningTypeTab('kanban');\\n5125: 
+\\n5126:     if (typeof \r\nrenderScannedLabelsTable === 'function') renderScannedLabelsTable();\\n5127:     if 
+(typeof \r\nupdateSafetyStockDeductionUI === 'function') updateSafetyStockDeductionUI();\\n5128: }\\n5129: \\n5130: 
+var \r\ncurrentModalScope = 'today'; // 'today' | 'pending_yesterday'\\n5131: var currentModalBatchId = 'all';\\n5132: 
+var \r\ncachedPlanningItems = [];\\n5133: \\n5134: function refreshPlanningItemsAjax(autoSelectId) {\\n5135:     var 
+url = '<?= \r\nbase_url(\\\"modules/inspection/session.php?action=get_planning_items\\\") ?>';\\n5136:     url += 
+'&scope=' + \r\nencodeURIComponent(currentModalScope);\\n5137:     url += '&batch_id=' + 
+\r\nencodeURIComponent(currentModalBatchId);\\n5138:     if (autoSelectId) {\\n5139:         url += '&selected_id=' + 
+\r\nencodeURIComponent(autoSelectId);\\n5140:     }\\n5141:     \\n5142:     var tbody = 
+\r\ndocument.getElementById('planning-table-body');\\n5143:     if (tbody) {\\n5144:         tbody.innerHTML = 
+'<tr><td \r\ncolspan=\\\"7\\\" class=\\\"px-4 py-12 text-center text-slate-400\\\">' +\\n5145:             '<div 
+class=\\\"inline-block \r\nanimate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2\\\"></div>' +\\n5146:     
+        '<p class=\\\"font-bold \r\ntext-slate-600 text-xs\\\">Memuat data jadwal Kanban...</p>' +\\n5147:             
+'</td></tr>';\\n5148:     }\\n5149: \r\n\\n5150:     fetch(url)\\n5151:         .then(function(r) { return r.json(); 
+})\\n5152:         .then(function(res) \r\n{\\n5153:             if (res && res.success) {\\n5154:                 
+cachedPlanningItems = Array.isArray(res.items) ? \r\nres.items : [];\\n5155:                 
+renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || \r\n0);\\n5156:                 
+renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});\\n5157:              \r\n   
+renderPlanningTableRows(cachedPlanningItems);\\n5158: \\n5159:                 if (autoSelectId) {\\n5160:             
+\r\n        var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); 
+\r\n});\\n5161:                     if (targetPlan) {\\n5162:                         var targetTotalQty = 
+\r\nparseInt(targetPlan.qty) || 0;\\n5163:                         var totalPassedQty = 
+\r\nparseInt(targetPlan.total_passed_qty) || 0;\\n5164:                         var remainingQty = Math.max(0, 
+\r\ntargetTotalQty - totalPassedQty);\\n5165:                         var isSafetyStock = (targetPlan.plan_type === 
+\r\n'safety_stock' || (targetPlan.batch_plan_type || '') === 'safety_stock' || (targetPlan.kanban_no || 
+\r\n'').toUpperCase().indexOf('SS') === 0);\\nThe above content does NOT show the entire file contents. If you need to 
+view \r\nany lines of the file which were not shown to complete your task, call this tool again to view those 
+lines.\\n\"}\r\n\r\n\r\n\n"}
+C:\Users\user\.gemini\antigravity-ide\brain\24ed0abf-e952-4df7-8508-db8347313700\.system_generated\logs\transcript.json
+l:626:{"step_index":628,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-18T09:34:47Z",
+"tool_calls":[{"name":"run_command","args":{"CommandLine":"\"Select-String -Path C:\\\\Users\\\\user\\\\.gemini\\\\anti
+gravity-ide\\\\brain\\\\24ed0abf-e952-4df7-8508-db8347313700\\\\.system_generated\\\\logs\\\\transcript.jsonl -Pattern 
+\\\"renderModalKpiSummary\\\" | Out-File -FilePath scratch/kpi_summary_matches.txt\"","Cwd":"\"d:\\\\laragon\\\\www\\\\
+oqc\"","WaitMsBeforeAsync":"5000","toolAction":"\"Search renderModalKpiSummary in 
+transcript\"","toolSummary":"\"Search transcript\""}}]}
+
+

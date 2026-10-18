@@ -244,6 +244,26 @@ if (!empty($allLotIds)) {
     }
 }
 
+// Fetch Administrative Quarantine Closures from new table lot_quarantine_closures
+$closuresByLot = [];
+if (!empty($allLotIds)) {
+    $inLotIds = implode(',', array_map('intval', array_unique($allLotIds)));
+    $closureSql = "
+        SELECT lqc.*, u.name AS closed_by_name
+        FROM lot_quarantine_closures lqc
+        LEFT JOIN users u ON u.id = lqc.closed_by
+        WHERE lqc.session_lot_id IN ($inLotIds)
+        ORDER BY lqc.id DESC
+    ";
+    $stmtClosure = $pdo->query($closureSql);
+    while ($cRow = $stmtClosure->fetch(PDO::FETCH_ASSOC)) {
+        $lId = (int)$cRow['session_lot_id'];
+        if (!isset($closuresByLot[$lId])) {
+            $closuresByLot[$lId] = $cRow;
+        }
+    }
+}
+
 // Check Re-inspections & calculate statuses with Lot Grouping (1 baris per unique Part + Lot No + Ref No)
 $groupedNgLotsMap = [];
 foreach ($allSessionsForLots as $row) {
@@ -266,6 +286,7 @@ foreach ($allSessionsForLots as $row) {
 $processedNgLots = [];
 $statsTotal = 0;
 $statsPending = 0;
+$statsDisposed = 0;
 $statsInProgress = 0;
 $statsResolvedPassed = 0;
 $statsResolvedReplaced = 0;
@@ -289,6 +310,17 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
     $latestRow['rejected_session_id'] = $rejectedSessionId;
     $latestRow['rejected_lot_id']     = $rejectedLotId;
     
+    // Check if any lot in this group has administrative closure record in lot_quarantine_closures
+    $groupClosure = null;
+    foreach ($groupRows as $gRow) {
+        $gLotId = (int)$gRow['lot_id'];
+        if (isset($closuresByLot[$gLotId])) {
+            $groupClosure = $closuresByLot[$gLotId];
+            break;
+        }
+    }
+    $latestRow['closure_info'] = $groupClosure;
+
     // Aggregate defects across ALL rounds in this group
     $aggregatedDefects = [];
     $totalNgCount = 0;
@@ -321,7 +353,7 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
     $lotSt     = strtolower($latestRow['lot_status'] ?? '');
     $sessSt    = strtolower($latestRow['session_status'] ?? '');
 
-    // Check if any subsequent row or latest status is passed/replaced
+    // Check if any subsequent row or latest status is passed/replaced/closed
     if ($resStatus === 'passed' || $lotSt === 'passed') {
         $handlingCode  = 'resolved_passed';
         $handlingLabel = ($roundCount > 1) ? "LULUS RE-INSPEKSI (RONDE {$roundCount})" : 'LULUS INSPEKSI';
@@ -336,8 +368,15 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
         $rowClass      = 'font-medium';
         $rowStyle      = 'background-color: #f5f3ff; border-left: 4px solid #6366f1;';
         $statsResolvedReplaced++;
+    } elseif ($groupClosure !== null) {
+        $handlingCode  = 'closed_external';
+        $handlingLabel = 'DISPOSISI SELESAI (DIVISI)';
+        $badgeClass    = 'bg-sky-100 text-sky-800 border-sky-300';
+        $rowClass      = 'font-medium';
+        $rowStyle      = 'background-color: #f0f9ff; border-left: 4px solid #0284c7;';
+        $statsDisposed++;
     } elseif ($resStatus === 'rejected') {
-        $handlingCode  = 'in_progress';
+        $handlingCode  = ($roundCount > 1) ? 'in_progress' : 'pending';
         $handlingLabel = ($roundCount > 1) ? "RE-INSPEKSI RONDE {$roundCount} (MASIH NG)" : 'BELUM DITANGANI (NG)';
         $badgeClass    = 'bg-rose-100 text-rose-800 border-rose-300';
         $rowClass      = 'font-medium';
@@ -427,8 +466,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
-        <!-- 4 Top KPI Summary Cards (Aligned Horizontal Row with Colored Background Tints) -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;" class="w-full">
+        <!-- 5 Top KPI Summary Cards (Aligned Horizontal Row with Colored Background Tints) -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem;" class="w-full">
             <!-- Total Lot NG -->
             <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 16px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); display: flex; flex-direction: column; justify-content: space-between;">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -454,6 +493,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 <div style="margin-top: 12px; display: flex; align-items: baseline; justify-content: space-between;">
                     <span style="font-size: 28px; font-weight: 900; color: #e11d48; line-height: 1;"><?= number_format($statsPending) ?></span>
                     <span style="font-size: 11px; font-weight: 700; color: #be123c;">Butuh Re-Inspeksi</span>
+                </div>
+            </div>
+
+            <!-- Disposisi Selesai (Divisi Terkait) -->
+            <div style="background-color: #f0f9ff; border: 1px solid #bae6fd; border-radius: 16px; padding: 18px; box-shadow: 0 1px 3px rgba(2,132,199,0.06); display: flex; flex-direction: column; justify-content: space-between;">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 11px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.5px;">Disposisi Divisi</span>
+                    <span style="padding: 2px 8px; border-radius: 9999px; font-size: 10px; font-weight: 900; background-color: #0284c7; color: #ffffff;">Memo OK</span>
+                </div>
+                <div style="margin-top: 12px; display: flex; align-items: baseline; justify-content: space-between;">
+                    <span style="font-size: 28px; font-weight: 900; color: #0284c7; line-height: 1;"><?= number_format($statsDisposed) ?></span>
+                    <span style="font-size: 11px; font-weight: 700; color: #0369a1;">Selesai Disortir</span>
                 </div>
             </div>
 
@@ -504,6 +555,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <select name="status_handling" onchange="this.form.submit()" style="width: 100%; padding: 8px 12px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 12px; font-weight: 700; color: #1e293b; outline: none;">
                         <option value="all" <?= $statusHandling === 'all' ? 'selected' : '' ?>>Semua Status</option>
                         <option value="pending" <?= $statusHandling === 'pending' ? 'selected' : '' ?>>Belum Ditangani (Pending)</option>
+                        <option value="closed_external" <?= $statusHandling === 'closed_external' ? 'selected' : '' ?>>Disposisi Selesai (Divisi)</option>
                         <option value="in_progress" <?= $statusHandling === 'in_progress' ? 'selected' : '' ?>>Sedang Re-Inspeksi</option>
                         <option value="resolved_passed" <?= $statusHandling === 'resolved_passed' ? 'selected' : '' ?>>Re-Inspeksi Passed</option>
                     </select>
@@ -694,6 +746,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 <span>Detail</span>
                                             </a>
                                             <?php if ($rLot['handling_code'] !== 'resolved_passed'): ?>
+                                                <!-- Tombol Disposisi / Tutup Karantina Divisi -->
+                                                <button type="button" 
+                                                        onclick="openDispositionModal(<?= (int)$rLot['lot_id'] ?>, '<?= htmlspecialchars(addslashes($rLot['lot_number'] ?: '-')) ?>', '<?= htmlspecialchars(addslashes($rLot['part_code'] . ' - ' . $rLot['part_name'])) ?>', '<?= htmlspecialchars(addslashes($rLot['closure_info']['notes'] ?? '')) ?>')"
+                                                        style="background-color: #0284c7; color: #ffffff; padding: 6px 10px; border-radius: 8px; font-weight: 800; font-size: 11px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(2,132,199,0.2);" 
+                                                        title="<?= $rLot['closure_info'] ? 'Update Catatan Disposisi' : 'Catat Penutupan Karantina dari Divisi Lain' ?>">
+                                                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                    </svg>
+                                                    <span><?= $rLot['closure_info'] ? 'Edit Disposisi' : 'Disposisi' ?></span>
+                                                </button>
+
                                                 <a href="<?= base_url('modules/inspection/session.php?scan_new=1&plan_type=safety_stock&part_code=' . urlencode($rLot['part_code']) . '&lot_number=' . urlencode($rLot['lot_number']) . '&ref_number=' . urlencode($rLot['ref_number'])) ?>" 
                                                    style="background-color: #7c3aed; color: #ffffff; padding: 6px 10px; border-radius: 8px; font-weight: 800; font-size: 11px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(124,58,237,0.2);" 
                                                    title="Mulai Re-inspeksi Safety Stock Workbench">
@@ -752,5 +815,95 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
     </div>
 </main>
+
+<script>
+function openDispositionModal(lotId, lotNumber, partInfo, existingNotes) {
+    Swal.fire({
+        title: '<div class="text-left font-black text-slate-800 text-base flex items-center gap-2"><span class="w-3 h-3 rounded-full bg-sky-500"></span>Disposisi & Penutupan Karantina</div>',
+        html: `
+            <div class="text-left text-xs space-y-3 pt-2">
+                <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                    <div class="flex justify-between">
+                        <span class="text-slate-500 font-bold">Lot Number:</span>
+                        <span class="font-mono font-extrabold text-slate-800">${lotNumber}</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-slate-500 font-bold">Part:</span>
+                        <span class="font-bold text-slate-800">${partInfo}</span>
+                    </div>
+                </div>
+                <div class="p-2.5 bg-sky-50 border border-sky-200 rounded-xl text-[11px] text-sky-800 font-medium">
+                    Gunakan fitur ini jika barang NG telah selesai disortir/diperbaiki oleh divisi terkait (produksi/gudang) berdasarkan memo atau laporan verbal.
+                </div>
+                <div>
+                    <label class="block font-bold text-slate-700 mb-1">Catatan Penutupan / Hasil Sortir Divisi <span class="text-rose-500">*</span></label>
+                    <textarea id="swal-disposition-notes" rows="4" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-800 focus:ring-2 focus:ring-sky-500 focus:outline-none" placeholder="Contoh: Telah disortir oleh tim Produksi, 50 pcs OK dan disimpan di Buffer Rack A-02 sesuai Memo #123...">${existingNotes || ''}</textarea>
+                </div>
+            </div>
+        `,
+        showCancelButton: true,
+        confirmButtonText: 'Simpan Disposisi',
+        cancelButtonText: 'Batal',
+        confirmButtonColor: '#0284c7',
+        cancelButtonColor: '#64748b',
+        focusConfirm: false,
+        preConfirm: () => {
+            const notes = document.getElementById('swal-disposition-notes').value.trim();
+            if (!notes) {
+                Swal.showValidationMessage('Catatan penanganan wajib diisi!');
+                return false;
+            }
+            return { lotId, notes };
+        }
+    }).then((result) => {
+        if (result.isConfirmed) {
+            Swal.fire({
+                title: 'Menyimpan...',
+                text: 'Mencatat penutupan karantina ke database',
+                allowOutsideClick: false,
+                didOpen: () => {
+                    Swal.showLoading();
+                }
+            });
+
+            const formData = new FormData();
+            formData.append('lot_id', result.value.lotId);
+            formData.append('action_notes', result.value.notes);
+
+            fetch('<?= base_url('modules/ng_quarantine/close_action.php') ?>', {
+                method: 'POST',
+                body: formData
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Berhasil Disimpan',
+                        text: data.message,
+                        timer: 1800,
+                        showConfirmButton: false
+                    }).then(() => {
+                        window.location.reload();
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal Menyimpan',
+                        text: data.message || 'Terjadi kesalahan pada sistem.'
+                    });
+                }
+            })
+            .catch(err => {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Kesalahan Jaringan',
+                    text: 'Tidak dapat menghubungi server: ' + err.message
+                });
+            });
+        }
+    });
+}
+</script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

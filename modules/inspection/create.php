@@ -128,7 +128,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     // Auto-create/Ensure ad-hoc kanban_items entry exists for Safety Stock direct warehouse scan
     if ($inspectionType === 'safety_stock' && $kanbanItemId === 0 && !empty($partCode) && $pdo) {
         $ssKanbanNo = 'SS-' . ($lotNumber ?: 'GUDANG');
-        $stmtChkK = $pdo->prepare("SELECT id FROM kanban_items WHERE UPPER(item_code) = :pcode AND (kanban_no = :kno OR plan_type = 'safety_stock') ORDER BY id DESC LIMIT 1");
+        $stmtChkK = $pdo->prepare("
+            SELECT id FROM kanban_items 
+            WHERE UPPER(item_code) = :pcode 
+              AND kanban_no = :kno 
+              AND plan_type = 'safety_stock'
+              AND (remark IS NULL OR (remark NOT LIKE '%Auto Safety Stock%' AND remark NOT LIKE '%AUTO-SS-SESS-%'))
+              AND (str_loc IS NULL OR str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))
+            ORDER BY id DESC LIMIT 1
+        ");
         $stmtChkK->execute([':pcode' => $partCode, ':kno' => $ssKanbanNo]);
         $existingKId = (int)$stmtChkK->fetchColumn();
 
@@ -276,24 +284,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                             // 2. Cek already passed (jika tipe kanban)
                             if ($inspectionType !== 'safety_stock') {
-                                $stmtChkPassed = $pdo->prepare("
-                                    SELECT s.id, ki.kanban_no 
-                                    FROM inspection_session_lots isl 
-                                    JOIN inspection_sessions s ON s.id = isl.inspection_session_id 
+                                // Cek apakah label ini punya sisa aktif di Safety Stock Gudang
+                                $stmtSSAvailChk = $pdo->prepare("
+                                    SELECT isl.id AS lot_id, s.id AS session_id, COALESCE(isl.qty, s.total_scanned_qty, 0) AS available_qty
+                                    FROM inspection_session_lots isl
+                                    JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                                    LEFT JOIN daily_inspection_data did ON did.id = s.did_id
                                     LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
-                                    WHERE UPPER(isl.ref_number) = :ref 
-                                      AND (isl.lot_result = 'passed' OR s.status = 'passed') 
-                                      AND s.inspection_type = 'kanban'
+                                    LEFT JOIN master_parts mp ON mp.id = s.part_id
+                                    WHERE s.inspection_type = 'safety_stock'
+                                      AND s.status = 'passed'
+                                      AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                                      AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
+                                      AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
+                                      AND isl.qty > 0
+                                      AND UPPER(isl.ref_number) = :ref
+                                      AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
+                                    ORDER BY s.id DESC
                                     LIMIT 1
                                 ");
-                                $stmtChkPassed->execute([':ref' => $cRef]);
-                                $passSess = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
-                                if ($passSess) {
-                                    echo json_encode([
-                                        'success' => false,
-                                        'message' => "Label Ref '{$cRef}' SUDAH PERNAH diinspeksi dan dinyatakan PASSED pada Sesi #{$passSess['id']} (Kanban " . ($passSess['kanban_no'] ?: '-') . "). Tidak dapat digunakan kembali demi mencegah data ganda!"
-                                    ]);
-                                    exit;
+                                $stmtSSAvailChk->execute([
+                                    ':ref' => $cRef,
+                                    ':p1'  => $partCode,
+                                    ':p2'  => $partCode,
+                                    ':p3'  => $partCode
+                                ]);
+                                $activeSSRow = $stmtSSAvailChk->fetch(PDO::FETCH_ASSOC);
+
+                                if (!$activeSSRow) {
+                                    $stmtChkPassed = $pdo->prepare("
+                                        SELECT s.id, ki.kanban_no 
+                                        FROM inspection_session_lots isl 
+                                        JOIN inspection_sessions s ON s.id = isl.inspection_session_id 
+                                        LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                                        WHERE UPPER(isl.ref_number) = :ref 
+                                          AND (isl.lot_result = 'passed' OR s.status = 'passed') 
+                                          AND s.inspection_type = 'kanban'
+                                        LIMIT 1
+                                    ");
+                                    $stmtChkPassed->execute([':ref' => $cRef]);
+                                    $passSess = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
+                                    if ($passSess) {
+                                        echo json_encode([
+                                            'success' => false,
+                                            'message' => "Label Ref '{$cRef}' SUDAH PERNAH diinspeksi dan dinyatakan PASSED pada Sesi #{$passSess['id']} (Kanban " . ($passSess['kanban_no'] ?: '-') . "). Tidak dapat digunakan kembali demi mencegah data ganda!"
+                                        ]);
+                                        exit;
+                                    }
                                 }
                             }
                         }
@@ -358,13 +395,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     (inspection_session_id, ref_number, lot_number, qty, aql_level, sample_code, sample_size, accept_number, reject_number, ng_count, lot_result, scanned_qr_raw, remarks, lot_status, created_at) 
                     VALUES (:sid, :ref, :lot, :qty, :aql_lvl, :spl_code, :spl_size, :acc, :rej, 0, 'in_progress', :raw, :rem, 'ok', NOW())");
                 foreach ($scannedLabels as $lbl) {
-                    $lRef = sanitize($lbl['Z5'] ?? ($lbl['ref_number'] ?? ''));
-                    $lLot = sanitize($lbl['Z2'] ?? ($lbl['lot_number'] ?? $lotNumber));
+                    $lRef = strtoupper(trim(sanitize($lbl['Z5'] ?? ($lbl['ref_number'] ?? ''))));
+                    $lLot = strtoupper(trim(sanitize($lbl['Z2'] ?? ($lbl['lot_number'] ?? $lotNumber))));
                     $lQty = (int)($lbl['Z3'] ?? ($lbl['qty'] ?? 0));
                     $lRem = sanitize($lbl['Z4'] ?? ($lbl['remarks'] ?? ''));
                     $lRaw = sanitize($lbl['raw'] ?? '');
 
                     if (!empty($lLot)) {
+                        // Cek apakah label ini merupakan label Safety Stock aktif
+                        $matchedSsLot = null;
+                        if (!empty($lRef) && $inspectionType === 'kanban') {
+                            $stmtChkSSMatch = $pdo->prepare("
+                                SELECT isl.id AS lot_id, s.id AS session_id, COALESCE(isl.qty, s.total_scanned_qty, 0) AS available_qty
+                                FROM inspection_session_lots isl
+                                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                                LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+                                LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                                LEFT JOIN master_parts mp ON mp.id = s.part_id
+                                WHERE s.inspection_type = 'safety_stock'
+                                  AND s.status = 'passed'
+                                  AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
+                                  AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
+                                  AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
+                                  AND isl.qty > 0
+                                  AND UPPER(isl.ref_number) = UPPER(:ref)
+                                  AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
+                                ORDER BY s.id DESC
+                                LIMIT 1
+                            ");
+                            $stmtChkSSMatch->execute([
+                                ':ref' => $lRef,
+                                ':p1'  => $partCode,
+                                ':p2'  => $partCode,
+                                ':p3'  => $partCode
+                            ]);
+                            $matchedSsLot = $stmtChkSSMatch->fetch(PDO::FETCH_ASSOC);
+                        }
+
+                        if ($matchedSsLot) {
+                            $ssMaxQty = (int)$matchedSsLot['available_qty'];
+                            if ($lQty > $ssMaxQty) {
+                                $lQty = $ssMaxQty; // Sesuaikan dengan sisa kuota Safety Stock
+                            }
+                            if (empty($lRem)) {
+                                $lRem = "Alokasi Safety Stock Fisik (Sesi #{$matchedSsLot['session_id']})";
+                            }
+                        }
+
                         // Check duplicate ref_number for this session
                         $stmtChkRef = $pdo->prepare("SELECT id FROM inspection_session_lots WHERE inspection_session_id = :sid AND (ref_number = :ref OR (ref_number IS NULL AND lot_number = :lot AND qty = :qty)) LIMIT 1");
                         $stmtChkRef->execute([':sid' => $sessionId, ':ref' => $lRef ?: null, ':lot' => $lLot, ':qty' => $lQty]);
@@ -396,6 +473,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 ':raw'      => $lRaw ?: null,
                                 ':rem'      => $lRem ?: null
                             ]);
+
+                            // Jika berasal dari Safety Stock, kurangi atau tandai terpakai pada sesi Safety Stock asal
+                            if ($matchedSsLot) {
+                                $matchedSsLotId = (int)$matchedSsLot['lot_id'];
+                                $matchedSsSessId = (int)$matchedSsLot['session_id'];
+                                $ssAvail = (int)$matchedSsLot['available_qty'];
+
+                                if ($lQty >= $ssAvail) {
+                                    // Habis terpakai seluruhnya
+                                    $stmtUpdSSFull = $pdo->prepare("UPDATE inspection_sessions SET auto_fulfilled_by_session_id = :ksid WHERE id = :ssid");
+                                    $stmtUpdSSFull->execute([':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
+                                } else {
+                                    // Terpakai sebagian -> kurangi qty di lot SS asal
+                                    $newLeftoverQty = $ssAvail - $lQty;
+                                    $stmtUpdSSPartLot = $pdo->prepare("UPDATE inspection_session_lots SET qty = :nqty WHERE id = :lid");
+                                    $stmtUpdSSPartLot->execute([':nqty' => $newLeftoverQty, ':lid' => $matchedSsLotId]);
+
+                                    $stmtUpdSSPartSess = $pdo->prepare("UPDATE inspection_sessions SET total_scanned_qty = :nqty WHERE id = :ssid");
+                                    $stmtUpdSSPartSess->execute([':nqty' => $newLeftoverQty, ':ssid' => $matchedSsSessId]);
+                                }
+                            }
                         }
                     }
                 }

@@ -131,6 +131,10 @@ function nav_active($keyword, $currentUri) {
                             )
                             AND (isl.lot_result != 'passed' AND isl.lot_status NOT IN ('passed', 'reinspected', 'replaced'))
                             AND isl.replaced_by_lot_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM lot_quarantine_closures lqc 
+                                WHERE lqc.session_lot_id = isl.id
+                            )
                             AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
                             AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
                         ")->fetchColumn();

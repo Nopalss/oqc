@@ -181,6 +181,36 @@ function confirmPostDelete(actionUrl, id, name, csrfToken, extraData) {
 }
 
 /**
+ * Global SweetAlert2 Toast Notification Helper (Top-Right)
+ * 
+ * @param {string} icon 'success' | 'error' | 'warning' | 'info'
+ * @param {string} title Message text to display
+ * @param {number} timer Duration in ms (default: 3500)
+ */
+window.showToast = function (icon, title, timer) {
+    if (typeof Swal !== 'undefined') {
+        var Toast = Swal.mixin({
+            toast: true,
+            position: 'top-end',
+            showConfirmButton: false,
+            timer: timer || 3500,
+            timerProgressBar: true,
+            didOpen: function (toast) {
+                toast.addEventListener('mouseenter', Swal.stopTimer);
+                toast.addEventListener('mouseleave', Swal.resumeTimer);
+            }
+        });
+
+        Toast.fire({
+            icon: icon || 'info',
+            title: title || ''
+        });
+    } else {
+        alert(title);
+    }
+};
+
+/**
  * Device Workstation Line Management (LocalStorage + SweetAlert2)
  */
 function getAppBaseUrl() {

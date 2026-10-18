@@ -43,6 +43,37 @@ $totalFilteredLots = 0;
 $totalBoxPages     = 1;
 $totalActiveBoxes  = 0;
 
+// Filter & Pagination Parameters for Table 2 (Riwayat Pemakaian Kanban)
+// Menggunakan filter default Hari Ini agar tidak query jutaan data lama saat load awal
+$historyPeriod    = sanitize($_GET['hist_period'] ?? 'today'); // 'today', '7days', 'month', 'all', 'custom'
+$historySearch    = sanitize($_GET['hist_search'] ?? '');
+$historyStartDate = sanitize($_GET['hist_start_date'] ?? date('Y-m-d'));
+$historyEndDate   = sanitize($_GET['hist_end_date'] ?? date('Y-m-d'));
+
+if ($historyPeriod === 'today') {
+    $historyStartDate = date('Y-m-d');
+    $historyEndDate   = date('Y-m-d');
+} elseif ($historyPeriod === '7days') {
+    $historyStartDate = date('Y-m-d', strtotime('-6 days'));
+    $historyEndDate   = date('Y-m-d');
+} elseif ($historyPeriod === 'month') {
+    $historyStartDate = date('Y-m-01');
+    $historyEndDate   = date('Y-m-d');
+} elseif ($historyPeriod === 'all') {
+    $historyStartDate = '';
+    $historyEndDate   = '';
+}
+
+$historyLimit = filter_input(INPUT_GET, 'hist_limit', FILTER_VALIDATE_INT) ?: 10;
+if (!in_array($historyLimit, [5, 10, 25, 50])) {
+    $historyLimit = 10;
+}
+$historyPage = filter_input(INPUT_GET, 'hist_page', FILTER_VALIDATE_INT) ?: 1;
+if ($historyPage < 1) $historyPage = 1;
+
+$totalFilteredHistory = 0;
+$totalHistoryPages    = 1;
+
 $totalInitialStock = 0;
 $totalUsedQty      = 0;
 $availableStock    = 0;
@@ -331,7 +362,97 @@ if ($pdo) {
                     }
                 }
 
-                // 5. Fetch Kanban Usage History (Table 2)
+                // 5. Fetch Kanban Usage History with Server-Side Filter & Pagination (Table 2)
+                $khWhere = [
+                    "s_ss.inspection_type = 'safety_stock'",
+                    "(did.part_code = :p1 OR ki_ss.item_code = :p2)",
+                    "s_ss.auto_fulfilled_by_session_id > 0"
+                ];
+                $khParams = [
+                    ':p1' => $partCodeParam,
+                    ':p2' => $partCodeParam
+                ];
+
+                // Tanggal Filter (Default: Hari Ini)
+                if (!empty($historyStartDate) && !empty($historyEndDate)) {
+                    $khWhere[] = "DATE(s_kanban.started_at) BETWEEN :h_sd AND :h_ed";
+                    $khParams[':h_sd'] = $historyStartDate;
+                    $khParams[':h_ed'] = $historyEndDate;
+                }
+
+                // Search / Barcode Filter
+                if (!empty($historySearch)) {
+                    $khQrRef = '';
+                    $khQrLot = '';
+                    if (strpos($historySearch, '|') !== false || str_starts_with($historySearch, 'Z1') || str_starts_with($historySearch, 'Z5')) {
+                        $parts = explode('|', $historySearch);
+                        foreach ($parts as $p) {
+                            $p = trim($p);
+                            if (str_starts_with($p, 'Z5')) $khQrRef = substr($p, 2);
+                            if (str_starts_with($p, 'Z2')) $khQrLot = substr($p, 2);
+                        }
+                    }
+
+                    if (!empty($khQrRef) && !empty($khQrLot)) {
+                        $khWhere[] = "((isl_k.ref_number LIKE :qrRef OR isl_ss.ref_number LIKE :qrRef2) AND (isl_k.lot_number LIKE :qrLot OR isl_ss.lot_number LIKE :qrLot2))";
+                        $khParams[':qrRef']  = '%' . $khQrRef . '%';
+                        $khParams[':qrRef2'] = '%' . $khQrRef . '%';
+                        $khParams[':qrLot']  = '%' . $khQrLot . '%';
+                        $khParams[':qrLot2'] = '%' . $khQrLot . '%';
+                    } elseif (!empty($khQrRef)) {
+                        $khWhere[] = "(isl_k.ref_number LIKE :qrRef OR isl_ss.ref_number LIKE :qrRef2)";
+                        $khParams[':qrRef']  = '%' . $khQrRef . '%';
+                        $khParams[':qrRef2'] = '%' . $khQrRef . '%';
+                    } elseif (!empty($khQrLot)) {
+                        $khWhere[] = "(isl_k.lot_number LIKE :qrLot OR isl_ss.lot_number LIKE :qrLot2)";
+                        $khParams[':qrLot']  = '%' . $khQrLot . '%';
+                        $khParams[':qrLot2'] = '%' . $khQrLot . '%';
+                    } else {
+                        $khWhere[] = "(ki.kanban_no LIKE :ks1 OR isl_k.ref_number LIKE :ks2 OR isl_ss.ref_number LIKE :ks3 OR isl_k.lot_number LIKE :ks4 OR isl_ss.lot_number LIKE :ks5)";
+                        $khParams[':ks1'] = '%' . $historySearch . '%';
+                        $khParams[':ks2'] = '%' . $historySearch . '%';
+                        $khParams[':ks3'] = '%' . $historySearch . '%';
+                        $khParams[':ks4'] = '%' . $historySearch . '%';
+                        $khParams[':ks5'] = '%' . $historySearch . '%';
+                    }
+                }
+
+                $khWhereStr = implode(" AND ", $khWhere);
+
+                // Count Total Filtered History
+                $stCountKh = $pdo->prepare("
+                    SELECT COUNT(s_ss.id)
+                    FROM inspection_sessions s_ss
+                    JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
+                    LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
+                    LEFT JOIN kanban_items ki_ss ON ki_ss.id = s_ss.kanban_item_id
+                    LEFT JOIN kanban_items ki ON ki.id = s_kanban.kanban_item_id
+                    LEFT JOIN inspection_session_lots isl_ss ON (
+                        isl_ss.inspection_session_id = s_ss.id
+                        AND isl_ss.id = (SELECT MIN(x.id) FROM inspection_session_lots x WHERE x.inspection_session_id = s_ss.id)
+                    )
+                    LEFT JOIN inspection_session_lots isl_k ON (
+                        isl_k.inspection_session_id = s_kanban.id
+                        AND isl_k.id = (
+                            SELECT MIN(x2.id) FROM inspection_session_lots x2
+                            WHERE x2.inspection_session_id = s_kanban.id
+                              AND (
+                                  x2.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
+                                  OR (isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND x2.ref_number = isl_ss.ref_number)
+                              )
+                        )
+                    )
+                    WHERE {$khWhereStr}
+                ");
+                $stCountKh->execute($khParams);
+                $totalFilteredHistory = (int)$stCountKh->fetchColumn();
+
+                $totalHistoryPages = max(1, (int)ceil($totalFilteredHistory / $historyLimit));
+                if ($historyPage > $totalHistoryPages) {
+                    $historyPage = $totalHistoryPages;
+                }
+                $historyOffset = ($historyPage - 1) * $historyLimit;
+
                 $stmtKanban = $pdo->prepare("
                     SELECT 
                         s_kanban.id AS kanban_session_id,
@@ -360,19 +481,20 @@ if ($pdo) {
                     )
                     LEFT JOIN inspection_session_lots isl_k ON (
                         isl_k.inspection_session_id = s_kanban.id
-                        AND (
-                            isl_k.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
-                            OR isl_k.ref_number = isl_ss.ref_number
-                            OR isl_k.remarks LIKE '%ALOKASI SAFETY STOCK%'
+                        AND isl_k.id = (
+                            SELECT MIN(x2.id) FROM inspection_session_lots x2
+                            WHERE x2.inspection_session_id = s_kanban.id
+                              AND (
+                                  x2.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
+                                  OR (isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND x2.ref_number = isl_ss.ref_number)
+                              )
                         )
                     )
-                    WHERE s_ss.inspection_type = 'safety_stock'
-                      AND (did.part_code = :p1 OR ki_ss.item_code = :p2)
-                      AND s_ss.auto_fulfilled_by_session_id > 0
+                    WHERE {$khWhereStr}
                     ORDER BY s_kanban.id DESC, s_ss.id ASC
-                    LIMIT 50
-                ");
-                $stmtKanban->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
+                    LIMIT " . (int)$historyLimit . " OFFSET " . (int)$historyOffset
+                );
+                $stmtKanban->execute($khParams);
                 $kanbanUsage = $stmtKanban->fetchAll(PDO::FETCH_ASSOC);
 
                 // 6. Fetch Defect / NG Records (Table 3)
@@ -764,10 +886,76 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <span>Riwayat Pemakaian Memotong Kanban</span>
                     </h3>
                     <span style="padding: 2px 8px; background-color: #f3e8ff; color: #7e22ce; font-size: 11px; font-weight: 800; border-radius: 9999px;">
-                        <?= count($kanbanUsage) ?> Alokasi
+                        <?= number_format($totalFilteredHistory) ?> Alokasi
                     </span>
                 </div>
             </div>
+
+            <!-- SERVER-SIDE FILTER & SCAN TOOLBAR UNTUK RIWAYAT KANBAN -->
+            <form method="GET" action="<?= base_url('modules/safety_stock/detail.php') ?>" id="formFilterHistory" style="padding: 10px 16px; background-color: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 0;">
+                <input type="hidden" name="part_code" value="<?= htmlspecialchars($partInfo['item_code']) ?>">
+                <input type="hidden" name="box_page" value="<?= (int)$boxPage ?>">
+                <input type="hidden" name="search_box" value="<?= htmlspecialchars($boxSearch) ?>">
+                <input type="hidden" name="lot_status" value="<?= htmlspecialchars($boxStatus) ?>">
+                <input type="hidden" name="hist_page" value="1">
+
+                <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 240px; max-width: 400px; position: relative;">
+                    <span style="position: absolute; left: 10px; color: #64748b; display: flex; align-items: center; pointer-events: none;">
+                        <svg style="width: 15px; height: 15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                        </svg>
+                    </span>
+                    <input type="text" name="hist_search" id="scanHistorySearchInput"
+                           value="<?= htmlspecialchars($historySearch) ?>"
+                           onkeydown="handleHistoryScanKeydown(event)"
+                           placeholder="Scan Barcode (Z1...) / Cari Ref, Lot, No Kanban..."
+                           style="width: 100%; padding: 7px 10px 7px 32px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; font-family: monospace; font-weight: 600; color: #0f172a; outline: none;"
+                           autocomplete="off">
+                </div>
+
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <!-- Periode Cepat -->
+                    <select name="hist_period" id="selectHistPeriod" onchange="handlePeriodChange(this)"
+                            style="padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #334155; font-weight: 600; outline: none;">
+                        <option value="today" <?= ($historyPeriod === 'today') ? 'selected' : '' ?>>Hari Ini</option>
+                        <option value="7days" <?= ($historyPeriod === '7days') ? 'selected' : '' ?>>7 Hari Terakhir</option>
+                        <option value="month" <?= ($historyPeriod === 'month') ? 'selected' : '' ?>>Bulan Ini</option>
+                        <option value="custom" <?= ($historyPeriod === 'custom') ? 'selected' : '' ?>>Kustom Tanggal</option>
+                        <option value="all" <?= ($historyPeriod === 'all') ? 'selected' : '' ?>>Semua Waktu</option>
+                    </select>
+
+                    <!-- Rentang Tanggal Manual -->
+                    <div id="histDateRangeWrap" style="display: <?= ($historyPeriod === 'custom') ? 'inline-flex' : 'none' ?>; align-items: center; gap: 4px; font-size: 11px; color: #64748b;">
+                        <span>Tgl:</span>
+                        <input type="date" name="hist_start_date" id="histStartDateInput" value="<?= htmlspecialchars($historyStartDate) ?>"
+                               style="padding: 5px 8px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; color: #334155; outline: none;">
+                        <span>-</span>
+                        <input type="date" name="hist_end_date" id="histEndDateInput" value="<?= htmlspecialchars($historyEndDate) ?>"
+                               style="padding: 5px 8px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; color: #334155; outline: none;">
+                    </div>
+
+                    <!-- Limit Selector -->
+                    <select name="hist_limit" onchange="this.form.submit()"
+                            style="padding: 6px 8px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #334155; font-weight: 600; outline: none;">
+                        <option value="5" <?= ($historyLimit === 5) ? 'selected' : '' ?>>5 / hal</option>
+                        <option value="10" <?= ($historyLimit === 10) ? 'selected' : '' ?>>10 / hal</option>
+                        <option value="25" <?= ($historyLimit === 25) ? 'selected' : '' ?>>25 / hal</option>
+                        <option value="50" <?= ($historyLimit === 50) ? 'selected' : '' ?>>50 / hal</option>
+                    </select>
+
+                    <button type="submit"
+                            style="padding: 6px 14px; background-color: #7c3aed; color: #ffffff; font-size: 11px; font-weight: 700; border-radius: 8px; border: none; cursor: pointer;">
+                        Cari
+                    </button>
+
+                    <?php if (!empty($historySearch) || $historyPeriod !== 'today'): ?>
+                        <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($partInfo['item_code']) . '&hist_period=today') ?>"
+                           style="padding: 6px 12px; background-color: #f1f5f9; color: #475569; font-size: 11px; font-weight: 700; border-radius: 8px; border: 1px solid #cbd5e1; text-decoration: none; display: inline-flex; align-items: center;">
+                            Reset
+                        </a>
+                    <?php endif; ?>
+                </div>
+            </form>
 
             <div style="overflow-x-auto;">
                 <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
@@ -787,8 +975,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <tbody>
                         <?php if (empty($kanbanUsage)): ?>
                             <tr>
-                                <td colspan="9" style="padding: 32px; text-align: center; color: #94a3b8;">
-                                    Belum ada catatan pemakaian stok part ini untuk memotong Kanban. Stok masih utuh di gudang.
+                                <td colspan="9" style="padding: 28px; text-align: center; color: #94a3b8;">
+                                    Tidak ada data pemakaian pada periode ini.
                                 </td>
                             </tr>
                         <?php else: ?>
@@ -805,9 +993,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     $kStart = !empty($ku['used_at']) ? date('d M Y, H:i', strtotime($ku['used_at'])) : '-';
                                     $kEnd   = !empty($ku['closed_at']) ? date('H:i', strtotime($ku['closed_at'])) : 'In Progress';
+                                    $hRowNum = ($historyPage - 1) * $historyLimit + $kIdx + 1;
                                 ?>
                                 <tr style="border-bottom: 1px solid #f1f5f9;">
-                                    <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $kIdx + 1 ?></td>
+                                    <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $hRowNum ?></td>
                                     
                                     <!-- No Kanban -->
                                     <td style="padding: 10px 14px; font-weight: 800; color: #0f172a; font-family: monospace;">
@@ -865,6 +1054,48 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </tbody>
                 </table>
             </div>
+
+            <!-- SERVER-SIDE PAGINATION FOOTER FOR TABLE 2 -->
+            <?php if ($totalHistoryPages > 1): ?>
+                <div style="padding: 12px 16px; border-top: 1px solid #e2e8f0; background-color: #f8fafc; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px;">
+                    <div style="color: #64748b;">
+                        Halaman <b style="color: #1e293b;"><?= $historyPage ?></b> dari <b style="color: #1e293b;"><?= $totalHistoryPages ?></b> (Total <?= number_format($totalFilteredHistory) ?> data)
+                    </div>
+
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <?php 
+                            $hParams = $_GET; 
+                            $prevHistPage = max(1, $historyPage - 1);
+                            $nextHistPage = min($totalHistoryPages, $historyPage + 1);
+                            
+                            $hParams['hist_page'] = $prevHistPage;
+                            $prevHistUrl = base_url('modules/safety_stock/detail.php?') . http_build_query($hParams);
+                            
+                            $hParams['hist_page'] = $nextHistPage;
+                            $nextHistUrl = base_url('modules/safety_stock/detail.php?') . http_build_query($hParams);
+                        ?>
+
+                        <a href="<?= $prevHistUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; font-size: 11px; text-decoration: none; <?= ($historyPage <= 1) ? 'pointer-events-none opacity-50' : '' ?>">
+                            &laquo; Prev
+                        </a>
+
+                        <?php for ($hp = 1; $hp <= $totalHistoryPages; $hp++): ?>
+                            <?php 
+                                if ($hp > 1 && $hp < $totalHistoryPages && abs($hp - $historyPage) > 2) continue;
+                                $hParams['hist_page'] = $hp;
+                                $hpUrl = base_url('modules/safety_stock/detail.php?') . http_build_query($hParams);
+                            ?>
+                            <a href="<?= $hpUrl ?>" style="padding: 5px 10px; border-radius: 6px; font-weight: 800; font-size: 11px; text-decoration: none; <?= ($hp == $historyPage) ? 'background-color: #7c3aed; color: #ffffff; border: 1px solid #7c3aed;' : 'background-color: #ffffff; color: #334155; border: 1px solid #cbd5e1;' ?>">
+                                <?= $hp ?>
+                            </a>
+                        <?php endfor; ?>
+
+                        <a href="<?= $nextHistUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; font-size: 11px; text-decoration: none; <?= ($historyPage >= $totalHistoryPages) ? 'pointer-events-none opacity-50' : '' ?>">
+                            Next &raquo;
+                        </a>
+                    </div>
+                </div>
+            <?php endif; ?>
 
         </div>
 
@@ -1087,6 +1318,36 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             }
 
             document.getElementById('formFilterBox').submit();
+        }
+    }
+
+    function handlePeriodChange(selectEl) {
+        var wrap = document.getElementById('histDateRangeWrap');
+        if (selectEl.value === 'custom') {
+            if (wrap) wrap.style.display = 'inline-flex';
+        } else {
+            if (wrap) wrap.style.display = 'none';
+            document.getElementById('formFilterHistory').submit();
+        }
+    }
+
+    function handleHistoryScanKeydown(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            var inputEl = document.getElementById('scanHistorySearchInput');
+            if (!inputEl) return;
+            var val = inputEl.value.trim();
+
+            if (val.includes('|') || val.startsWith('Z1') || val.startsWith('Z2') || val.startsWith('Z5')) {
+                var qr = parseBarcodeQR(val);
+                if (qr.Z5) {
+                    inputEl.value = qr.Z5;
+                } else if (qr.Z2) {
+                    inputEl.value = qr.Z2;
+                }
+            }
+
+            document.getElementById('formFilterHistory').submit();
         }
     }
     </script>

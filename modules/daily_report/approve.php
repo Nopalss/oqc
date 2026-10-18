@@ -146,6 +146,80 @@ try {
                 ]);
                 exit;
             }
+            break;
+
+        case 'approve_all_filtered':
+            $notes = sanitize($_POST['notes'] ?? 'Persetujuan massal oleh supervisor');
+            $sessionIdsRaw = $_POST['session_ids'] ?? '';
+            $startDate = sanitize($_POST['start_date'] ?? '');
+            $endDate = sanitize($_POST['end_date'] ?? '');
+            $inspId = (int)($_POST['inspector_id'] ?? 0);
+
+            // Jika daftar session_ids spesifik dikirim via comma-separated string atau array
+            $targetIds = [];
+            if (is_array($sessionIdsRaw)) {
+                $targetIds = array_filter(array_map('intval', $sessionIdsRaw));
+            } elseif (is_string($sessionIdsRaw) && trim($sessionIdsRaw) !== '') {
+                $targetIds = array_filter(array_map('intval', explode(',', $sessionIdsRaw)));
+            }
+
+            if (!empty($targetIds)) {
+                $placeholders = implode(',', array_fill(0, count($targetIds), '?'));
+                $stmt = $pdo->prepare("
+                    UPDATE inspection_sessions 
+                    SET is_approved = 1,
+                        approved_by = ?,
+                        approved_at = NOW(),
+                        approval_notes = ?
+                    WHERE is_approved = 0 AND id IN ($placeholders)
+                ");
+                $params = array_merge([$userId, $notes], $targetIds);
+                $stmt->execute($params);
+                $affected = $stmt->rowCount();
+            } else {
+                // Berdasarkan rentang tanggal & opsional inspector_id
+                $whereApprove = ["ss.is_approved = 0"];
+                $paramsApprove = [
+                    ':uid'   => $userId,
+                    ':notes' => $notes
+                ];
+
+                if (!empty($startDate) && !empty($endDate)) {
+                    $whereApprove[] = "DATE(ss.started_at) BETWEEN :sd AND :ed";
+                    $paramsApprove[':sd'] = $startDate;
+                    $paramsApprove[':ed'] = $endDate;
+                }
+
+                if ($inspId > 0) {
+                    $whereApprove[] = "ss.inspector_id = :insp_id";
+                    $paramsApprove[':insp_id'] = $inspId;
+                }
+
+                $whereApproveStr = implode(' AND ', $whereApprove);
+                $stmt = $pdo->prepare("
+                    UPDATE inspection_sessions ss
+                    SET ss.is_approved = 1,
+                        ss.approved_by = :uid,
+                        ss.approved_at = NOW(),
+                        ss.approval_notes = :notes
+                    WHERE {$whereApproveStr}
+                ");
+                $stmt->execute($paramsApprove);
+                $affected = $stmt->rowCount();
+            }
+
+            $msg = "Sebanyak {$affected} sesi inspeksi berhasil disetujui (ACC All).";
+            if ($isAjax) {
+                header('Content-Type: application/json');
+                echo json_encode([
+                    'success'         => true,
+                    'message'         => $msg,
+                    'affected_count'  => $affected,
+                    'supervisor_name' => $userName,
+                    'approved_at'     => date('d M Y H:i') . ' WIB'
+                ]);
+                exit;
+            }
             set_flash('success', $msg);
             break;
 

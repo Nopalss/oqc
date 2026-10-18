@@ -87,7 +87,8 @@ try {
         exit;
     }
 
-    // 3. Validasi jumlah box: Tidak boleh menghapus box jika itu satu-satunya box dalam sesi
+    // 3. Pengecekan jumlah box dalam sesi:
+    // Jika ini adalah satu-satunya box dalam sesi, membatalkan box ini akan otomatis membatalkan seluruh sesi in-progress!
     $stmtCount = $pdo->prepare("
         SELECT COUNT(*) 
         FROM inspection_session_lots 
@@ -97,11 +98,63 @@ try {
     $totalLotsInSession = (int)$stmtCount->fetchColumn();
 
     if ($totalLotsInSession <= 1) {
-        $pdo->rollBack();
+        // A. Kembalikan / Restore alokasi Safety Stock jika sesi ini pernah mengonsumsi Safety Stock
+        $stmtRestoreSS = $pdo->prepare("
+            UPDATE inspection_sessions 
+            SET auto_fulfilled_by_session_id = NULL 
+            WHERE auto_fulfilled_by_session_id = :sid
+        ");
+        $stmtRestoreSS->execute([':sid' => $sessionId]);
+
+        // Cek juga jika ada Safety Stock yang dialokasikan via part/ref
+        if (!empty($refNo)) {
+            $stmtRestoreRefSS = $pdo->prepare("
+                UPDATE inspection_sessions s
+                JOIN inspection_session_lots isl ON isl.inspection_session_id = s.id
+                SET s.auto_fulfilled_by_session_id = NULL
+                WHERE s.inspection_type = 'safety_stock'
+                  AND s.auto_fulfilled_by_session_id = :sid
+                  AND UPPER(isl.ref_number) = UPPER(:ref)
+            ");
+            $stmtRestoreRefSS->execute([':sid' => $sessionId, ':ref' => $refNo]);
+        }
+
+        // B. Hapus seluruh data terkait sesi in-progress ini
+        $stmtDelNg = $pdo->prepare("DELETE FROM inspection_ng_records WHERE inspection_session_id = :sid");
+        $stmtDelNg->execute([':sid' => $sessionId]);
+
+        $stmtDelSamples = $pdo->prepare("DELETE FROM inspection_samples WHERE inspection_session_id = :sid");
+        $stmtDelSamples->execute([':sid' => $sessionId]);
+
+        $stmtDelLots = $pdo->prepare("DELETE FROM inspection_session_lots WHERE inspection_session_id = :sid");
+        $stmtDelLots->execute([':sid' => $sessionId]);
+
+        $stmtDelSess = $pdo->prepare("DELETE FROM inspection_sessions WHERE id = :sid");
+        $stmtDelSess->execute([':sid' => $sessionId]);
+
+        // C. Sinkronisasi status Kanban
+        if ($kanbanItemId > 0 && function_exists('syncKanbanStatus')) {
+            syncKanbanStatus($pdo, $kanbanItemId);
+        }
+
+        $sessionDate = !empty($lot['created_at']) ? date('Y-m-d', strtotime($lot['created_at'])) : date('Y-m-d');
+        if (function_exists('syncDailySummaryForDate')) {
+            syncDailySummaryForDate($pdo, $sessionDate);
+        }
+
+        $pdo->commit();
+
+        $refStr = !empty($refNo) ? " (Ref: {$refNo})" : "";
         echo json_encode([
-            'success' => false,
-            'is_last_box' => true,
-            'message' => 'Box ini adalah satu-satunya box dalam sesi pemeriksaan. Sesi tidak boleh kosong (0 box). Jika ingin membatalkan seluruh pemeriksaan, silakan gunakan tombol "Kembali ke Jadwal".'
+            'success'           => true,
+            'session_deleted'   => true,
+            'message'           => "Box Lot #{$lotNo}{$refStr} adalah box terakhir pada sesi ini. Box berhasil dibatalkan dan seluruh sesi telah dibersihkan. Barcode/label bebas digunakan kembali.",
+            'session_id'        => $sessionId,
+            'removed_lot_id'    => $sessionLotId,
+            'remaining_lots'    => 0,
+            'total_scanned_qty' => 0,
+            'session_status'    => 'deleted',
+            'redirect_url'      => base_url('modules/inspection/index.php')
         ]);
         exit;
     }

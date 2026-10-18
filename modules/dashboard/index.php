@@ -2312,8 +2312,9 @@ $initialDashboardVersion = md5(implode('|', [
                 categoryPercentage: 0.7,
                 barPercentage: 0.6,
                 interaction: {
-                    mode: 'index',
-                    intersect: false
+                    mode: 'nearest',
+                    axis: 'xy',
+                    intersect: true
                 },
                 plugins: {
                     legend: {
@@ -2329,46 +2330,40 @@ $initialDashboardVersion = md5(implode('|', [
                         }
                     },
                     tooltip: {
-                        mode: 'index',
-                        intersect: false,
+                        mode: 'nearest',
+                        intersect: true,
                         backgroundColor: '#0f172a',
                         titleColor: '#f8fafc',
                         bodyColor: '#e2e8f0',
-                        footerColor: '#38bdf8',
-                        footerFont: { weight: '800' },
                         padding: 10,
                         cornerRadius: 8,
                         filter: function(tooltipItem) {
                             return Number(tooltipItem.raw || 0) > 0;
                         },
-                        itemSort: function(a, b) {
-                            return Number(b.raw || 0) - Number(a.raw || 0);
-                        },
                         callbacks: {
-                            label: function(context) {
-                                var val = Number(context.raw || 0).toLocaleString();
+                            title: function(tooltipItems) {
+                                if (!tooltipItems || !tooltipItems.length) return '';
+                                var item = tooltipItems[0];
+                                var val = Number(item.raw || 0).toLocaleString();
                                 var unitStr = (currentDefectMetricUnit === 'ppm') ? 'PPM' : activeUnit.toLowerCase();
+                                var dateLabel = item.label || '';
+                                return dateLabel + ' • ' + item.dataset.label + ' (' + val + ' ' + unitStr + ')';
+                            },
+                            label: function(context) {
                                 var ds = context.dataset;
-                                var lines = [' ' + ds.label + ': ' + val + ' ' + unitStr];
-
+                                var lines = [];
                                 var partMeta = (ds.part_meta && ds.part_meta[context.dataIndex]) ? ds.part_meta[context.dataIndex] : null;
                                 if (partMeta && Array.isArray(partMeta) && partMeta.length > 0) {
                                     partMeta.forEach(function(pm) {
                                         var pCode = pm.code || '-';
                                         var pName = pm.name || '-';
                                         var pQty  = Number(pm.qty || 0).toLocaleString();
-                                        lines.push('    └ Part: ' + pCode + ' (' + pName + ') • NG: ' + pQty + ' ' + activeUnit.toLowerCase());
+                                        lines.push('  └ Part: ' + pCode + ' (' + pName + ') • NG: ' + pQty + ' ' + activeUnit.toLowerCase());
                                     });
+                                } else {
+                                    lines.push('  (Tidak ada rincian spesifik part)');
                                 }
                                 return lines;
-                            },
-                            footer: function(tooltipItems) {
-                                var sum = 0;
-                                tooltipItems.forEach(function(item) {
-                                    sum += Number(item.raw || 0);
-                                });
-                                var unitStr = (currentDefectMetricUnit === 'ppm') ? 'PPM' : activeUnit.toLowerCase();
-                                return 'Total: ' + sum.toLocaleString() + ' ' + unitStr;
                             }
                         }
                     }

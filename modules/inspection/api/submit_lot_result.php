@@ -366,8 +366,96 @@ try {
     ]);
 
     // 4. Sinkronkan ke Daily Summary & Kanban Item & Auto Safety Stock
-    if ($newSessionStatus === 'passed' && function_exists('createAutoSafetyStockForSession')) {
-        createAutoSafetyStockForSession($pdo, $sessionId);
+    if ($newSessionStatus === 'passed') {
+        // Linkkan box Safety Stock asal jika box fisik ini berasal dari stok safety stock gudang
+        $stmtSessLots = $pdo->prepare("
+            SELECT isl.ref_number, isl.lot_number, isl.qty,
+                   COALESCE(did.part_code, ki.item_code, mp.part_code) AS part_code
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+            LEFT JOIN master_parts mp ON mp.id = s.part_id
+            WHERE s.id = :sid 
+              AND s.inspection_type = 'kanban'
+              AND (isl.lot_status != 'replaced' OR isl.lot_status IS NULL)
+        ");
+        $stmtSessLots->execute([':sid' => $sessionId]);
+        $kPassedLots = $stmtSessLots->fetchAll(PDO::FETCH_ASSOC);
+
+        $stmtFindSS = $pdo->prepare("
+            SELECT ss.id AS ss_session_id, ss.status AS ss_status, isl_ss.id AS ss_lot_id, isl_ss.qty AS ss_qty
+            FROM inspection_session_lots isl_ss
+            JOIN inspection_sessions ss ON ss.id = isl_ss.inspection_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            WHERE ss.inspection_type = 'safety_stock'
+              AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
+              AND (UPPER(did.part_code) = UPPER(:pcode) OR UPPER(ki.item_code) = UPPER(:pcode2))
+              AND UPPER(isl_ss.ref_number) = UPPER(:ref)
+            ORDER BY ss.id DESC
+            LIMIT 1
+        ");
+
+        $stmtLinkSS = $pdo->prepare("
+            UPDATE inspection_sessions 
+            SET auto_fulfilled_by_session_id = :ksid,
+                status = 'passed',
+                reinspection_notes = CASE 
+                    WHEN :old_st = 'rejected' THEN CONCAT(COALESCE(reinspection_notes, ''), ' [Re-inspeksi Lulus via Kanban]')
+                    ELSE reinspection_notes
+                END
+            WHERE id = :ssid AND (auto_fulfilled_by_session_id IS NULL OR auto_fulfilled_by_session_id = 0)
+        ");
+
+        $stmtUpdSSLot = $pdo->prepare("
+            UPDATE inspection_session_lots 
+            SET lot_status = 'reinspected',
+                lot_result = 'passed',
+                remarks = CONCAT(COALESCE(remarks, ''), ' [Digunakan Kanban #', :ksid, ']')
+            WHERE id = :lid
+        ");
+
+        foreach ($kPassedLots as $kpLot) {
+            if (empty($kpLot['ref_number']) || empty($kpLot['part_code'])) continue;
+            $stmtFindSS->execute([
+                ':pcode'  => $kpLot['part_code'],
+                ':pcode2' => $kpLot['part_code'],
+                ':ref'    => $kpLot['ref_number']
+            ]);
+            $ssMatched = $stmtFindSS->fetch(PDO::FETCH_ASSOC);
+            if ($ssMatched) {
+                $matchedSessId = (int)$ssMatched['ss_session_id'];
+                $matchedStatus = $ssMatched['ss_status'] ?? 'passed';
+                $matchedLotId  = (int)$ssMatched['ss_lot_id'];
+
+                // Hindari menimpa sesi pecahan sisa (parent_session_id) yang sengaja dibuat sebagai sisa stok
+                $stmtChkParent = $pdo->prepare("SELECT parent_session_id, auto_fulfilled_by_session_id FROM inspection_sessions WHERE id = :ssid");
+                $stmtChkParent->execute([':ssid' => $matchedSessId]);
+                $chkP = $stmtChkParent->fetch(PDO::FETCH_ASSOC);
+                if ($chkP && !empty($chkP['parent_session_id'])) {
+                    // Ini sesi sisa pecahan baru, jangan ditandai terpakai lagi ke sesi Kanban ini!
+                    continue;
+                }
+
+                $stmtLinkSS->execute([
+                    ':ksid'   => $sessionId,
+                    ':old_st' => $matchedStatus,
+                    ':ssid'   => $matchedSessId
+                ]);
+
+                if ($matchedLotId > 0) {
+                    $stmtUpdSSLot->execute([
+                        ':ksid' => $sessionId,
+                        ':lid'  => $matchedLotId
+                    ]);
+                }
+            }
+        }
+
+        if (function_exists('createAutoSafetyStockForSession')) {
+            createAutoSafetyStockForSession($pdo, $sessionId);
+        }
     }
     if (function_exists('syncDailySummaryForSession')) {
         syncDailySummaryForSession($pdo, $sessionId);

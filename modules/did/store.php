@@ -129,11 +129,7 @@ if ($entryType === 'manual') {
 
         if ($successCount > 0) {
             $pdo->commit();
-            $msg = 'Berhasil menyimpan ' . $successCount . ' baris data DID baru ke Riwayat Batch.';
-            if ($skipCount > 0) {
-                $msg .= ' (' . $skipCount . ' baris duplikat/invalid dilewati).';
-            }
-            set_flash('success', $msg);
+            set_flash('success', 'Selamat! Data DID berhasil disimpan.');
         } else {
             // Delete empty batch
             $pdo->rollBack();
@@ -256,7 +252,7 @@ if ($entryType === 'manual') {
         $stmtUpdBatch = $pdo->prepare("UPDATE did_batches SET total_items = :total, ok_count = :ok, ng_count = :ng WHERE id = :bid");
         $stmtUpdBatch->execute([':total' => $successCount, ':ok' => $okCount, ':ng' => $ngCount, ':bid' => $batchId]);
 
-        set_flash('success', 'Berhasil meng-import ' . $successCount . ' data DID baru ke Riwayat Batch. (' . $skipCount . ' data duplikat/invalid dilewati).');
+        set_flash('success', 'Selamat! Import data CSV berhasil diproses.');
     } catch (PDOException $e) {
         set_flash('error', 'Gagal memproses batch import: ' . $e->getMessage());
     }
@@ -426,8 +422,7 @@ if ($entryType === 'manual') {
 
         $pdo->commit();
 
-        $msg = '✅ Import Excel Berhasil (Selesai diproses)!' . "\n" . implode("\n", $summaryLines);
-        set_flash('success', $msg);
+        set_flash('success', 'Selamat! Import data Excel berhasil diproses.');
 
     } catch (Exception $e) {
         if ($pdo->inTransaction()) {

@@ -90,7 +90,7 @@ try {
                did.part_code as session_part_code, 
                did.part_name as session_part_name,
                p.aql_level as part_aql_level,
-               ki.kanban_no, ki.customer
+               ki.kanban_no, ki.customer, ki.qty as kanban_item_qty
         FROM inspection_sessions s
         LEFT JOIN daily_inspection_data did ON did.id = s.did_id
         LEFT JOIN master_parts p ON p.id = s.part_id
@@ -150,6 +150,14 @@ try {
 
     $effectivePartCode = !empty($partCodeInput) ? $partCodeInput : $sessionPartCode;
     $aqlLevel = !empty($sess['part_aql_level']) ? $sess['part_aql_level'] : (!empty($sess['aql_level']) ? $sess['aql_level'] : 'G-II');
+
+    $kanbanTargetQty = (int)($sess['kanban_item_qty'] ?? 0);
+    $isKanban = (($sess['inspection_type'] ?? 'kanban') === 'kanban' && $kanbanTargetQty > 0);
+
+    // Hitung Qty yang sudah teralokasi pada sesi ini (hanya lot yang aktif / belum replaced)
+    $stmtCurrLots = $pdo->prepare("SELECT COALESCE(SUM(qty), 0) FROM inspection_session_lots WHERE inspection_session_id = :sid AND (lot_status != 'replaced' OR lot_status IS NULL)");
+    $stmtCurrLots->execute([':sid' => $sessionId]);
+    $currSessionAllocatedQty = (int)$stmtCurrLots->fetchColumn();
 
     $insertedLotIds = [];
     $seenRefs = [];
@@ -417,7 +425,44 @@ try {
             $rawQr = "Z1{$effectivePartCode}|Z2{$lotNumber}|Z3{$qty}" . (!empty($refNumber) ? "|Z5{$refNumber}" : '');
         }
 
-        // 6. Masukkan Box ke inspection_session_lots
+        // 5.5 Deteksi apakah box berasal dari Safety Stock Gudang
+        $matchedSS = null;
+        if (($sess['inspection_type'] ?? 'kanban') === 'kanban' && !empty($refNumber)) {
+            $stmtFindSS = $pdo->prepare("
+                SELECT ss.id AS ss_session_id, ss.status AS ss_status, ss.total_scanned_qty,
+                       isl_ss.id AS ss_lot_id, isl_ss.qty AS ss_lot_qty, isl_ss.lot_result, isl_ss.lot_status
+                FROM inspection_session_lots isl_ss
+                JOIN inspection_sessions ss ON ss.id = isl_ss.inspection_session_id
+                JOIN daily_inspection_data did ON did.id = ss.did_id
+                WHERE ss.inspection_type = 'safety_stock'
+                  AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
+                  AND UPPER(did.part_code) = UPPER(:pcode)
+                  AND UPPER(isl_ss.ref_number) = UPPER(:ref)
+                ORDER BY ss.id DESC
+                LIMIT 1
+            ");
+            $stmtFindSS->execute([':pcode' => $effectivePartCode, ':ref' => $refNumber]);
+            $matchedSS = $stmtFindSS->fetch(PDO::FETCH_ASSOC);
+        }
+
+        // Jika box berasal dari Safety Stock dan sesi bertipe Kanban:
+        // PENTING: Qty box yang masuk ke Sesi Kanban HARUS TETAP UTUH sesuai fisik label box yang discan ($qty, misal 300 pcs)!
+        // Jangan pernah memotong qty box fisik menjadi 200 pcs.
+        $allocatedQtyForThisLot = $qty;
+        $ssAvailQty = $matchedSS ? (int)($matchedSS['ss_lot_qty'] ?: $matchedSS['total_scanned_qty']) : $qty;
+        $ssLeftoverQty = 0;
+
+        if ($matchedSS && $isKanban) {
+            $remainingKanbanQuota = max(0, $kanbanTargetQty - $currSessionAllocatedQty);
+            // Sisa stok Safety Stock yang masih ada di gudang jika ada kelebihan stok
+            if ($qty < $ssAvailQty) {
+                $ssLeftoverQty = $ssAvailQty - $qty;
+            }
+        }
+
+        $boxRemarks = $matchedSS ? "Alokasi Safety Stock Fisik (Sesi #{$matchedSS['ss_session_id']})" : "Box Tambahan";
+
+        // 6. Masukkan Box ke inspection_session_lots (Qty tetap utuh sesuai fisik box!)
         $stmtIns = $pdo->prepare("
             INSERT INTO inspection_session_lots (
                 inspection_session_id, ref_number, lot_number, qty,
@@ -426,46 +471,150 @@ try {
             ) VALUES (
                 :sid, :ref, :lot, :qty,
                 :aql_lvl, :scode, :ssize, :acc, :rej,
-                0, 'in_progress', 'ok', :raw_qr, 'Box Tambahan', NOW()
+                0, 'in_progress', 'ok', :raw_qr, :remarks, NOW()
             )
         ");
         $stmtIns->execute([
             ':sid'     => $sessionId,
             ':ref'     => !empty($refNumber) ? $refNumber : null,
             ':lot'     => $lotNumber,
-            ':qty'     => $qty,
+            ':qty'     => $allocatedQtyForThisLot,
             ':aql_lvl' => $aqlLevel,
             ':scode'   => $sampleCode,
             ':ssize'   => $sampleSize,
             ':acc'     => $acceptNumber,
             ':rej'     => $rejectNumber,
-            ':raw_qr'  => $rawQr
+            ':raw_qr'  => $rawQr,
+            ':remarks' => $boxRemarks
         ]);
         $insertedLotIds[] = (int)$pdo->lastInsertId();
+        $currSessionAllocatedQty += $allocatedQtyForThisLot;
 
-        // Auto-link source Safety Stock session if this box is taken from warehouse SS
-        if (($sess['inspection_type'] ?? 'kanban') === 'kanban' && !empty($refNumber)) {
-            $stmtFindSS = $pdo->prepare("
-                SELECT ss.id AS ss_session_id 
-                FROM inspection_session_lots isl_ss
-                JOIN inspection_sessions ss ON ss.id = isl_ss.inspection_session_id
-                JOIN daily_inspection_data did ON did.id = ss.did_id
-                WHERE ss.inspection_type = 'safety_stock'
-                  AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
-                  AND (isl_ss.lot_status IS NULL OR isl_ss.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                  AND UPPER(did.part_code) = UPPER(:pcode)
-                  AND UPPER(isl_ss.ref_number) = UPPER(:ref)
-                LIMIT 1
-            ");
-            $stmtFindSS->execute([':pcode' => $effectivePartCode, ':ref' => $refNumber]);
-            $matchedSsSessId = (int)$stmtFindSS->fetchColumn();
-            if ($matchedSsSessId > 0) {
-                $stmtLink = $pdo->prepare("UPDATE inspection_sessions SET auto_fulfilled_by_session_id = :ksid WHERE id = :ssid AND (auto_fulfilled_by_session_id IS NULL OR auto_fulfilled_by_session_id = 0)");
-                $stmtLink->execute([':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
+        // Auto-link atau kurangi kuota pada source Safety Stock session jika box diambil dari SS gudang
+        if ($matchedSS) {
+            $matchedSsSessId = (int)$matchedSS['ss_session_id'];
+            $matchedSsLotId  = (int)$matchedSS['ss_lot_id'];
+            $matchedSsStatus = $matchedSS['ss_status'] ?? 'passed';
 
-                $stmtAddSsQty = $pdo->prepare("UPDATE inspection_sessions SET use_safety_stock_qty = use_safety_stock_qty + :qty WHERE id = :ksid");
-                $stmtAddSsQty->execute([':qty' => $qty, ':ksid' => $sessionId]);
+            if ($ssLeftoverQty > 0) {
+                // SISA STOK DIPISAH KE BARIS SESI SAFETY STOCK BARU:
+                // Sesi awal tetap mencatat history asli (tidak dipotong angkanya), tapi ditandai auto_fulfilled_by_session_id ke sesi Kanban ini
+                $stmtLinkOld = $pdo->prepare("
+                    UPDATE inspection_sessions 
+                    SET auto_fulfilled_by_session_id = :ksid,
+                        status = 'passed',
+                        reinspection_notes = CONCAT(COALESCE(reinspection_notes, ''), ' [Terpakai {$allocatedQtyForThisLot} pcs ke Kanban #{$sess['kanban_no']}, sisa {$ssLeftoverQty} pcs]')
+                    WHERE id = :ssid
+                ");
+                $stmtLinkOld->execute([':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
+
+                // Query template data dari sesi SS asal untuk menduplikasi header sesi baru
+                $stmtOrigHeader = $pdo->prepare("SELECT * FROM inspection_sessions WHERE id = :ssid");
+                $stmtOrigHeader->execute([':ssid' => $matchedSsSessId]);
+                $origH = $stmtOrigHeader->fetch(PDO::FETCH_ASSOC);
+
+                // Buat baris SESI SAFETY STOCK BARU untuk sisa kuota (tersedia di gudang)
+                $stmtInsNewSs = $pdo->prepare("
+                    INSERT INTO inspection_sessions (
+                        inspection_type, flow_version, did_id, kanban_item_id, part_id,
+                        sample_size, total_scanned_qty, batch_sample_size, excess_qty,
+                        use_safety_stock_qty, reject_number, samples_checked, ng_count,
+                        status, auto_fulfilled_by_session_id, original_ss_session_id,
+                        parent_session_id, is_reinspection, reinspection_type, reinspection_notes,
+                        inspector_id, line_id, line_name, started_at, closed_at
+                    ) VALUES (
+                        'safety_stock', 2, :did_id, :kid, :part_id,
+                        :spl_size, :tot_qty, :batch_spl, 0,
+                        0, :rej, :samples_chk, 0,
+                        'passed', NULL, :orig_ssid,
+                        :parent_ssid, 0, NULL, :notes,
+                        :insp, :lid, :line, NOW(), NOW()
+                    )
+                ");
+                $stmtInsNewSs->execute([
+                    ':did_id'      => $origH['did_id'],
+                    ':kid'         => $origH['kanban_item_id'],
+                    ':part_id'     => $origH['part_id'],
+                    ':spl_size'    => $sampleSize,
+                    ':tot_qty'     => $ssLeftoverQty,
+                    ':batch_spl'   => $sampleSize,
+                    ':rej'         => $rejectNumber,
+                    ':samples_chk' => $sampleSize,
+                    ':orig_ssid'   => $matchedSsSessId,
+                    ':parent_ssid' => $matchedSsSessId,
+                    ':notes'       => "Sisa Stok ({$ssLeftoverQty} pcs) pecahan dari Sesi #{$matchedSsSessId}",
+                    ':insp'        => $origH['inspector_id'],
+                    ':lid'         => $origH['line_id'],
+                    ':line'        => $origH['line_name']
+                ]);
+                $newSsSessionId = (int)$pdo->lastInsertId();
+
+                // Buat baris LOT pada sesi Safety Stock baru
+                $stmtInsNewSsLot = $pdo->prepare("
+                    INSERT INTO inspection_session_lots (
+                        inspection_session_id, ref_number, lot_number, qty,
+                        aql_level, sample_code, sample_size, accept_number, reject_number,
+                        ng_count, lot_result, lot_status, scanned_qr_raw, remarks, created_at, closed_at
+                    ) VALUES (
+                        :ssid, :ref, :lot, :qty,
+                        :aql_lvl, :scode, :ssize, :acc, :rej,
+                        0, 'passed', 'ok', :raw_qr, :rem, NOW(), NOW()
+                    )
+                ");
+                $newQrRaw = "Z1{$effectivePartCode}|Z2{$lotNumber}|Z3{$ssLeftoverQty}|Z5{$refNumber}";
+                $stmtInsNewSsLot->execute([
+                    ':ssid'    => $newSsSessionId,
+                    ':ref'     => $refNumber,
+                    ':lot'     => $lotNumber,
+                    ':qty'     => $ssLeftoverQty,
+                    ':aql_lvl' => $aqlLevel,
+                    ':scode'   => $sampleCode,
+                    ':ssize'   => $sampleSize,
+                    ':acc'     => $acceptNumber,
+                    ':rej'     => $rejectNumber,
+                    ':raw_qr'  => $newQrRaw,
+                    ':rem'     => "Sisa Stok dari Sesi #{$matchedSsSessId}"
+                ]);
+            } else {
+                // HABIS TERPAKAI SELURUHNYA: Tandai fulfilled
+                $stmtLink = $pdo->prepare("
+                    UPDATE inspection_sessions 
+                    SET auto_fulfilled_by_session_id = :ksid,
+                        status = 'passed',
+                        reinspection_notes = CASE 
+                            WHEN :old_status = 'rejected' THEN CONCAT(COALESCE(reinspection_notes, ''), ' [Re-inspeksi Lulus via Kanban]')
+                            ELSE reinspection_notes
+                        END
+                    WHERE id = :ssid AND (auto_fulfilled_by_session_id IS NULL OR auto_fulfilled_by_session_id = 0)
+                ");
+                $stmtLink->execute([
+                    ':ksid'       => $sessionId, 
+                    ':old_status' => $matchedSsStatus,
+                    ':ssid'       => $matchedSsSessId
+                ]);
             }
+
+            // Update status sesi safety stock asal:
+            // Jika asalnya 'rejected', ubah menjadi 'reinspected'. Jika asalnya sudah 'passed', biarkan tetap 'ok' / 'passed'.
+            if ($matchedSsStatus === 'rejected' || ($matchedSS['lot_result'] ?? '') === 'rejected') {
+                $pdo->prepare("
+                    UPDATE inspection_session_lots 
+                    SET lot_status = 'reinspected',
+                        lot_result = 'passed'
+                    WHERE id = :lid
+                ")->execute([':lid' => $matchedSsLotId]);
+            } else {
+                // Barang memang sudah PASSED sejak awal, pastikan statusnya tetap OK
+                $pdo->prepare("
+                    UPDATE inspection_session_lots 
+                    SET lot_status = 'ok',
+                        lot_result = 'passed'
+                    WHERE id = :lid
+                ")->execute([':lid' => $matchedSsLotId]);
+            }
+
+            $stmtAddSsQty = $pdo->prepare("UPDATE inspection_sessions SET use_safety_stock_qty = use_safety_stock_qty + :qty WHERE id = :ksid");
+            $stmtAddSsQty->execute([':qty' => $allocatedQtyForThisLot, ':ksid' => $sessionId]);
         }
     }
 

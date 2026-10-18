@@ -1,0 +1,117 @@
+﻿        <!-- ── STEP 1: PILIH PLANNING ITEM (FULL-SCREEN TABLE ALIGNMENT WITH INDEX.PHP) ── -->
+        <div id="wizard-step-1-content" style="display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 12px 20px; overflow: hidden;" class="space-y-2.5">
+            
+            <!-- ── TOP KPI SUMMARY & PERSONAL WORK TRACKER (OPSI B) ── -->
+            <div class="flex flex-col lg:flex-row items-stretch gap-2.5 flex-shrink-0">
+                <!-- SISI KIRI: 5 KARTU STATUS KANBAN HARI INI -->
+                <div class="flex-1 grid grid-cols-2 sm:grid-cols-5 gap-2">
+                    <!-- Stat 1: Total Kanban -->
+                    <div id="kpi-btn-all" onclick="filterModalByStatus('all')" 
+                         class="cursor-pointer transition-all hover:-translate-y-0.5 rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50/90 to-blue-100/50 p-2 shadow-xs select-none"
+                         style="border-left: 3.5px solid #2563eb;" title="Klik untuk tampilkan semua Kanban">
+                        <div class="flex items-center justify-between gap-1">
+                            <span class="text-[9px] font-black text-blue-900 uppercase tracking-wider">TOTAL KANBAN</span>
+                            <span class="w-4 h-4 rounded bg-blue-200/80 text-blue-700 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-0.5 flex items-baseline gap-1">
+                            <span id="kpi-val-total" class="text-base font-black text-blue-950 font-mono">0</span>
+                            <span class="text-[10px] font-bold text-blue-700">Kanban</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 2: Belum Mulai -->
+                    <div id="kpi-btn-uninspected" onclick="filterModalByStatus('uninspected')" 
+                         class="cursor-pointer transition-all hover:-translate-y-0.5 rounded-xl border border-slate-200 bg-white p-2 shadow-xs select-none"
+                         style="border-left: 3.5px solid #64748b;" title="Klik untuk filter Kanban Belum Mulai">
+                        <div class="flex items-center justify-between gap-1">
+                            <span class="text-[9px] font-black text-slate-700 uppercase tracking-wider">BELUM MULAI</span>
+                            <span class="w-4 h-4 rounded bg-slate-100 text-slate-600 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-0.5 flex items-baseline gap-1">
+                            <span id="kpi-val-uninspected" class="text-base font-black text-slate-800 font-mono">0</span>
+                            <span class="text-[10px] font-bold text-slate-500">Kanban</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 3: Sedang Berjalan -->
+                    <div id="kpi-btn-in_progress" onclick="filterModalByStatus('in_progress')" 
+                         class="cursor-pointer transition-all hover:-translate-y-0.5 rounded-xl border border-amber-200 bg-gradient-to-br from-amber-50/90 to-amber-100/50 p-2 shadow-xs select-none"
+                         style="border-left: 3.5px solid #d97706;" title="Klik untuk filter Kanban Sedang Berjalan">
+                        <div class="flex items-center justify-between gap-1">
+                            <span class="text-[9px] font-black text-amber-900 uppercase tracking-wider">BERJALAN</span>
+                            <span class="w-4 h-4 rounded bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0 relative">
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping absolute"></span>
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
+                            </span>
+                        </div>
+                        <div class="mt-0.5 flex items-baseline gap-1">
+                            <span id="kpi-val-in_progress" class="text-base font-black text-amber-950 font-mono">0</span>
+                            <span class="text-[10px] font-bold text-amber-700">Kanban</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 4: Selesai -->
+                    <div id="kpi-btn-completed" onclick="filterModalByStatus('completed')" 
+                         class="cursor-pointer transition-all hover:-translate-y-0.5 rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50/90 to-emerald-100/50 p-2 shadow-xs select-none"
+                         style="border-left: 3.5px solid #059669;" title="Klik untuk filter Kanban Selesai">
+                        <div class="flex items-center justify-between gap-1">
+                            <span class="text-[9px] font-black text-emerald-900 uppercase tracking-wider">SELESAI</span>
+                            <span class="w-4 h-4 rounded bg-emerald-200/80 text-emerald-800 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-0.5 flex items-baseline gap-1">
+                            <span id="kpi-val-completed" class="text-base font-black text-emerald-950 font-mono">0</span>
+                            <span class="text-[10px] font-bold text-emerald-700">Kanban</span>
+                        </div>
+                    </div>
+
+                    <!-- Stat 5: Lot NG / Tindakan -->
+                    <div id="kpi-btn-rejected" onclick="filterModalByStatus('rejected')" 
+                         class="cursor-pointer transition-all hover:-translate-y-0.5 rounded-xl border border-rose-200 bg-gradient-to-br from-rose-50/90 to-rose-100/50 p-2 shadow-xs select-none"
+                         style="border-left: 3.5px solid #dc2626;" title="Klik untuk filter Kanban dengan Lot NG / Tindakan">
+                        <div class="flex items-center justify-between gap-1">
+                            <span class="text-[9px] font-black text-rose-900 uppercase tracking-wider">LOT NG / TINDAKAN</span>
+                            <span class="w-4 h-4 rounded bg-rose-200/80 text-rose-700 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                            </span>
+                        </div>
+                        <div class="mt-0.5 flex items-baseline gap-1">
+                            <span id="kpi-val-rejected" class="text-base font-black text-rose-950 font-mono">0</span>
+                            <span class="text-[10px] font-bold text-rose-700">Kanban</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SISI KANAN: PENCAPAIAN SAYA HARI INI (PERSONAL WORK TRACKER) -->
+                <div class="lg:w-80 flex-shrink-0 rounded-xl border border-indigo-200 bg-gradient-to-r from-indigo-50/95 via-purple-50/80 to-white p-2.5 flex flex-col justify-between shadow-xs">
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-1.5">
+                            <div class="w-5 h-5 rounded-md bg-indigo-600 text-white flex items-center justify-center font-bold text-[10px] shadow-xs">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                            </div>
+                            <span class="text-[10.5px] font-extrabold text-indigo-950 tracking-tight">Pencapaian Saya Hari Ini</span>
+                        </div>
+                        <span class="text-[9.5px] font-bold text-indigo-600 bg-indigo-100/70 border border-indigo-200 px-2 py-0.5 rounded-full truncate max-w-[110px]" title="<?= htmlspecialchars($currentUser['name'] ?? 'Saya') ?>">
+                            <?= htmlspecialchars($currentUser['name'] ?? 'Saya') ?>
+                        </span>
+                    </div>
+                    <div class="mt-1.5 flex items-center gap-2 text-xs">
+                        <!-- Format Tepat Sesuai Permintaan User: Kanban Selesai: X | Total Lot: Y Box (A Passed, B NG) -->
+                        <div class="w-full bg-white/90 border border-indigo-100 rounded-lg px-2.5 py-1 text-[11px] font-extrabold text-slate-800 shadow-2xs leading-snug">
+                            <span class="text-indigo-900">Kanban Selesai: <span id="user-stat-completed-kb" class="font-mono text-emerald-700 font-black">0</span></span>
+                            <span class="text-slate-300 mx-1.5 font-normal">|</span>
+                            <span class="text-slate-800">Total Lot: <span id="user-stat-total-lots" class="font-mono font-black text-indigo-800">0</span> Box 
+                                <span class="font-semibold text-slate-600">(<span id="user-stat-passed-lots" class="text-emerald-700 font-bold">0</span> Passed, <span id="user-stat-ng-lots" class="text-rose-600 font-bold">0</span> NG)</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PITA GELOMBANG / BATCH PADA TANGGAL HARI INI + TUNGGAKAN KEMARIN -->
+            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);" class="flex-shrink-0">

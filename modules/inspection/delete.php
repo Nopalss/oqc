@@ -42,6 +42,14 @@ try {
 
     $pdo->beginTransaction();
 
+    // 0. Kembalikan / Restore alokasi Safety Stock jika sesi ini pernah mengonsumsi Safety Stock
+    $stmtRestoreSS = $pdo->prepare("
+        UPDATE inspection_sessions 
+        SET auto_fulfilled_by_session_id = NULL 
+        WHERE auto_fulfilled_by_session_id = :sid
+    ");
+    $stmtRestoreSS->execute([':sid' => $sessionId]);
+
     // 1. Delete associated NG records
     $stmtDelNg = $pdo->prepare("DELETE FROM inspection_ng_records WHERE inspection_session_id = :sid");
     $stmtDelNg->execute([':sid' => $sessionId]);

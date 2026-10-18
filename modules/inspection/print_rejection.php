@@ -61,7 +61,7 @@ if ($sessionId > 0 && $pdo) {
         if ($session) {
             // Jika mencetak lembar rejection per-lot
             if ($targetLot) {
-                $session['lot_number'] = $targetLot['lot_number'] . (!empty($targetLot['ref_number']) ? ' (Ref: ' . $targetLot['ref_number'] . ')' : '');
+                $session['lot_number'] = $targetLot['lot_number'];
                 $session['sample_size'] = (int)$targetLot['sample_size'];
                 $session['total_scanned_qty'] = (int)$targetLot['qty'];
                 $session['ng_count'] = (int)$targetLot['ng_count'];
@@ -553,12 +553,12 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
                             <td class="font-mono font-bold" style="font-size: 11px; font-weight: 800;"><?= htmlspecialchars($session['model'] ?: '-') ?></td>
                         </tr>
                         <tr>
-                            <td class="bg-gray" style="font-weight: bold;">DATE</td>
-                            <td><?= date('d / m / Y', strtotime($session['started_at'])) ?></td>
+                            <td class="bg-gray" style="font-weight: bold;">LOT.NO</td>
+                            <td class="font-mono font-bold"><?= htmlspecialchars($session['lot_number'] ?: '-') ?></td>
                         </tr>
                         <tr>
-                            <td class="bg-gray" style="font-weight: bold;">TIME</td>
-                            <td><?= date('H:i', strtotime($session['closed_at'] ?: $session['started_at'])) ?> WIB</td>
+                            <td class="bg-gray" style="font-weight: bold;">DATE / TIME</td>
+                            <td><?= date('d / m / Y', strtotime($session['started_at'])) ?> &nbsp;<?= date('H:i', strtotime($session['closed_at'] ?: $session['started_at'])) ?> WIB</td>
                         </tr>
                         <tr>
                             <td class="bg-gray" style="font-weight: bold;">DIVISION</td>

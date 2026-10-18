@@ -195,70 +195,161 @@ if ($pdo) {
                         <input type="hidden" name="print_datetime" id="preview-printdt-input" value="">
                         <input type="hidden" name="kanban_json_data" id="kanban_json_data">
 
-                        <!-- Summary Banner Card with Header Metadata -->
-                        <div class="p-3.5 bg-blue-50/90 border border-blue-200/90 rounded-xl space-y-2.5 text-xs shadow-xs">
-                            <div class="flex items-center justify-between flex-wrap gap-2">
-                                <div class="flex items-center space-x-2 flex-wrap gap-1 text-slate-700">
-                                    <span class="font-bold text-blue-900 text-sm flex items-center gap-1">
-                                        📊 <span id="preview-filename">kanban.xlsx</span>
-                                    </span>
-                                    <span class="badge badge-blue text-[11px]" id="preview-sheetname">Tab: kanban</span>
-                                    <span class="px-2.5 py-0.5 rounded-md text-[11px] font-bold bg-slate-200/90 text-slate-800 border border-slate-300/80" id="preview-vendor-pill">
-                                        🏢 Vender: <b id="preview-vendor-val" class="font-mono">228746</b>
-                                    </span>
-                                    <span class="px-2.5 py-0.5 rounded-md text-[11px] font-bold bg-slate-200/90 text-slate-800 border border-slate-300/80" id="preview-printdt-pill">
-                                        🕒 Print Time: <b id="preview-printdt-val" class="font-mono">-</b>
-                                    </span>
+                        <!-- LEVEL 1: Header Dokumen & Tombol Aksi Utama -->
+                        <div class="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+                            <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                <div class="space-y-1">
+                                    <div class="flex items-center gap-2 flex-wrap">
+                                        <span class="inline-flex items-center justify-center p-2 rounded-xl bg-blue-50 text-blue-600 border border-blue-100">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                            </svg>
+                                        </span>
+                                        <h3 class="text-sm font-bold text-slate-800 tracking-tight" id="preview-filename">kanban.xlsx</h3>
+                                        <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200" id="preview-sheetname">Tab: kanban</span>
+                                    </div>
+                                    <div class="flex items-center gap-2 text-xs text-slate-500 flex-wrap">
+                                        <span class="inline-flex items-center gap-1 font-medium bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                                            🏢 Vendor: <strong id="preview-vendor-val" class="text-slate-800 font-mono">228746</strong>
+                                        </span>
+                                        <span class="inline-flex items-center gap-1 font-medium bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                                            🕒 Print: <strong id="preview-printdt-val" class="text-slate-800 font-mono">-</strong>
+                                        </span>
+                                        <span class="text-slate-400 text-[11px]">
+                                            (<span id="preview-skipped-rows">0</span> baris kosong diabaikan)
+                                        </span>
+                                    </div>
                                 </div>
-                                <div class="flex items-center space-x-2">
-                                    <span class="font-bold text-slate-700">No. Dokumen Batch:</span>
-                                    <input type="text" name="document_number" id="preview-doc-num" value="KANBAN-<?= date('Ymd-His') ?>" class="form-input py-1 text-xs font-mono font-bold max-w-[190px]">
-                                </div>
-                            </div>
-                            
-                            <!-- Status Statistics Pills & Top Action Buttons -->
-                            <div class="flex items-center justify-between flex-wrap gap-2 border-t border-blue-200/70 pt-2 text-xs">
-                                <div class="flex items-center space-x-2 flex-wrap gap-1.5 font-bold">
-                                    <span class="text-slate-600 bg-white/80 px-2.5 py-1 rounded-lg border border-slate-200">
-                                        Total File: <b id="preview-total-rows" class="text-slate-900 font-mono">0</b> baris
-                                    </span>
-                                    <span class="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                                        ✓ <b id="preview-new-rows" class="font-mono">0</b> Baris Baru (Akan Disimpan)
-                                    </span>
-                                    <span class="text-amber-800 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200" id="preview-dup-container">
-                                        ⚠️ <b id="preview-dup-rows" class="font-mono">0</b> Duplikat (Otomatis Dilewati)
-                                    </span>
-                                    <span class="text-slate-400 font-normal text-[11px]">
-                                        (<span id="preview-skipped-rows">0</span> baris header/kosong diabaikan)
-                                    </span>
-                                </div>
-                                <div class="flex items-center space-x-2">
-                                    <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-1.5 px-3 text-xs">Batal</a>
-                                    <button type="submit" id="btn-submit-preview-top" class="btn-primary py-1.5 px-4 text-xs font-bold shadow-md shadow-blue-600/20">
-                                        ✓ Simpan Baris Baru ke Database
+
+                                <div class="flex items-center gap-2 self-end md:self-auto flex-wrap">
+                                    <div class="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-xl border border-slate-200">
+                                        <label for="preview-doc-num" class="text-[11px] font-bold text-slate-500 whitespace-nowrap">No. Batch:</label>
+                                        <input type="text" name="document_number" id="preview-doc-num" value="KANBAN-<?= date('Ymd-His') ?>" class="form-input py-0.5 px-2 text-xs font-mono font-bold w-40 bg-white border-slate-300">
+                                    </div>
+                                    <a href="<?= base_url('modules/kanban/index.php') ?>" class="btn-secondary py-2 px-3 text-xs font-semibold">Batal</a>
+                                    <button type="submit" id="btn-submit-preview-top" class="btn-primary py-2 px-4 text-xs font-bold shadow-md shadow-blue-600/20">
+                                        ✓ Simpan Data ke Database
                                     </button>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Real-Time Search & Interactive Filter Tabs -->
-                        <div class="flex items-center justify-between gap-3 flex-wrap">
-                            <div class="flex-1 min-w-[280px] flex items-center gap-2">
-                                <input type="text" id="preview-search-input" onkeyup="filterPreviewRows()" placeholder="Cari cepat Kanban No, Item Code, Part Description, Customer..." class="form-input py-1.5 px-3 text-xs flex-1">
-                                <div class="flex items-center space-x-1 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs">
-                                    <button type="button" onclick="setPreviewFilter('all')" id="filter-btn-all" class="px-2.5 py-1 rounded text-xs font-bold bg-blue-600 text-white transition-all cursor-pointer">
-                                        Semua (<span id="count-filter-all">0</span>)
+                        <!-- LEVEL 2: 4 Kartu Filter Status Interaktif (Satu klik untuk filter) -->
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-left">
+                            <!-- Card 1: Semua Data -->
+                            <button type="button" onclick="setPreviewFilter('all')" id="card-filter-all" 
+                                    style="background: linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%) !important; border: 1.5px solid #93c5fd !important; border-left: 5px solid #2563eb !important; padding: 14px 18px !important; min-height: 105px !important; border-radius: 12px !important;"
+                                    class="transition-all cursor-pointer shadow-xs flex flex-col justify-between text-left hover:shadow-md">
+                                <div class="flex items-center justify-between gap-2 w-full">
+                                    <span class="text-xs font-bold text-blue-900 flex items-center gap-1.5">📋 Semua Data</span>
+                                    <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-blue-200/90 text-blue-800 border border-blue-300">Total File</span>
+                                </div>
+                                <div class="my-1.5 flex items-baseline">
+                                    <span class="text-2xl font-black text-blue-950 font-mono tracking-tight leading-none" id="count-card-all">0</span>
+                                    <span class="text-xs font-bold text-blue-700 ml-1.5">Baris</span>
+                                </div>
+                                <p class="text-[11px] font-semibold text-blue-700/80 leading-tight">Total baris yang terbaca</p>
+                            </button>
+
+                            <!-- Card 2: Baris Baru -->
+                            <button type="button" onclick="setPreviewFilter('new')" id="card-filter-new" 
+                                    style="background: linear-gradient(135deg, #dcfce7 0%, #d1fae5 100%) !important; border: 1.5px solid #86efac !important; border-left: 5px solid #10b981 !important; padding: 14px 18px !important; min-height: 105px !important; border-radius: 12px !important;"
+                                    class="transition-all cursor-pointer shadow-xs flex flex-col justify-between text-left hover:shadow-md">
+                                <div class="flex items-center justify-between gap-2 w-full">
+                                    <span class="text-xs font-bold text-emerald-900 flex items-center gap-1.5">✨ Baris Baru</span>
+                                    <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-emerald-200/90 text-emerald-800 border border-emerald-300">Akan Disimpan</span>
+                                </div>
+                                <div class="my-1.5 flex items-baseline">
+                                    <span class="text-2xl font-black text-emerald-950 font-mono tracking-tight leading-none" id="count-card-new">0</span>
+                                    <span class="text-xs font-bold text-emerald-700 ml-1.5">Baris</span>
+                                </div>
+                                <p class="text-[11px] font-semibold text-emerald-700/80 leading-tight">Data jadwal baru yang valid</p>
+                            </button>
+
+                            <!-- Card 3: Perubahan Qty -->
+                            <button type="button" onclick="setPreviewFilter('qty_change')" id="card-filter-qty_change" 
+                                    style="background: linear-gradient(135deg, #fef3c7 0%, #ffedd5 100%) !important; border: 1.5px solid #fcd34d !important; border-left: 5px solid #f59e0b !important; padding: 14px 18px !important; min-height: 105px !important; border-radius: 12px !important;"
+                                    class="transition-all cursor-pointer shadow-xs flex flex-col justify-between text-left hover:shadow-md relative overflow-hidden">
+                                <div class="flex items-center justify-between gap-2 w-full">
+                                    <span class="text-xs font-bold text-amber-950 flex items-center gap-1.5">🔄 Perubahan Qty</span>
+                                    <span class="text-[10px] font-black px-2 py-0.5 rounded-md bg-amber-300/90 text-amber-950 border border-amber-400">Perlu Pilihan</span>
+                                </div>
+                                <div class="my-1.5 flex items-baseline">
+                                    <span class="text-2xl font-black text-amber-950 font-mono tracking-tight leading-none" id="count-card-qty_change">0</span>
+                                    <span class="text-xs font-bold text-amber-700 ml-1.5">Baris</span>
+                                </div>
+                                <p class="text-[11px] font-semibold text-amber-800/80 leading-tight">Kuantitas beda dari database</p>
+                            </button>
+
+                            <!-- Card 4: Duplikat -->
+                            <button type="button" onclick="setPreviewFilter('dup')" id="card-filter-dup" 
+                                    style="background: linear-gradient(135deg, #ffe4e6 0%, #fecdd3 100%) !important; border: 1.5px solid #fda4af !important; border-left: 5px solid #e11d48 !important; padding: 14px 18px !important; min-height: 105px !important; border-radius: 12px !important;"
+                                    class="transition-all cursor-pointer shadow-xs flex flex-col justify-between text-left hover:shadow-md">
+                                <div class="flex items-center justify-between gap-2 w-full">
+                                    <span class="text-xs font-bold text-rose-900 flex items-center gap-1.5">⚠️ Duplikat</span>
+                                    <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-rose-200/90 text-rose-800 border border-rose-300">Dilewati</span>
+                                </div>
+                                <div class="my-1.5 flex items-baseline">
+                                    <span class="text-2xl font-black text-rose-950 font-mono tracking-tight leading-none" id="count-card-dup">0</span>
+                                    <span class="text-xs font-bold text-rose-700 ml-1.5">Baris</span>
+                                </div>
+                                <p class="text-[11px] font-semibold text-rose-700/80 leading-tight">Sama persis dengan data lama</p>
+                            </button>
+                        </div>
+
+                        <!-- LEVEL 3: Banner Panduan & Aksi Massal (Muncul saat ada baris perubahan Qty) -->
+                        <div id="bulk-qty-banner" class="hidden p-3.5 bg-gradient-to-r from-sky-50 to-blue-50 border border-sky-200 rounded-2xl shadow-xs space-y-2">
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                <div class="flex items-start gap-2.5">
+                                    <span class="inline-flex items-center justify-center p-1.5 rounded-xl bg-sky-500 text-white shadow-xs shrink-0 mt-0.5">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg>
+                                    </span>
+                                    <div>
+                                        <h4 class="text-xs font-bold text-sky-950">
+                                            Ditemukan <span id="banner-qtychange-count" class="font-extrabold text-blue-700">0</span> item dengan perubahan kuantitas (Qty)
+                                        </h4>
+                                        <p class="text-[11px] text-sky-800/80">
+                                            Pilih aksi massal untuk seluruh baris ini, atau ubah satu-per-satu lewat dropdown di kolom tabel:
+                                        </p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-2 flex-wrap shrink-0">
+                                    <button type="button" onclick="setAllQtyChangeActions('update_qty')" 
+                                            style="background-color: #0284c7 !important; color: #ffffff !important; border: 1px solid #0369a1 !important; display: inline-flex !important; align-items: center !important; gap: 6px !important; white-space: nowrap !important;"
+                                            class="px-3.5 py-2 rounded-xl text-xs font-bold hover:brightness-110 active:scale-98 transition-all shadow-sm cursor-pointer">
+                                        <span style="font-size: 14px;">🔄</span>
+                                        <span>Update Target Qty (Rekomendasi)</span>
                                     </button>
-                                    <button type="button" onclick="setPreviewFilter('new')" id="filter-btn-new" class="px-2.5 py-1 rounded text-xs font-bold text-slate-600 hover:bg-slate-200 transition-all cursor-pointer">
-                                        Baris Baru (<span id="count-filter-new">0</span>)
+                                    <button type="button" onclick="setAllQtyChangeActions('create_new_row')" 
+                                            style="background-color: #ffffff !important; color: #0369a1 !important; border: 1.5px solid #7dd3fc !important; display: inline-flex !important; align-items: center !important; gap: 6px !important; white-space: nowrap !important;"
+                                            class="px-3.5 py-2 rounded-xl text-xs font-bold hover:bg-sky-50 active:scale-98 transition-all shadow-2xs cursor-pointer">
+                                        <span style="font-size: 14px;">➕</span>
+                                        <span>Buat Baris Baru</span>
                                     </button>
-                                    <button type="button" onclick="setPreviewFilter('dup')" id="filter-btn-dup" class="px-2.5 py-1 rounded text-xs font-bold text-slate-600 hover:bg-slate-200 transition-all cursor-pointer">
-                                        Duplikat (<span id="count-filter-dup">0</span>)
+                                    <button type="button" onclick="setAllQtyChangeActions('skip')" 
+                                            style="background-color: #ffffff !important; color: #475569 !important; border: 1.5px solid #cbd5e1 !important; display: inline-flex !important; align-items: center !important; gap: 6px !important; white-space: nowrap !important;"
+                                            class="px-3.5 py-2 rounded-xl text-xs font-bold hover:bg-slate-100 active:scale-98 transition-all shadow-2xs cursor-pointer">
+                                        <span style="font-size: 14px;">⏭️</span>
+                                        <span>Abaikan</span>
                                     </button>
                                 </div>
                             </div>
-                            <div class="text-xs text-slate-500 font-semibold">
-                                Menampilkan <b id="preview-visible-count" class="text-blue-700">0</b> / <b id="preview-total-count">0</b> baris item
+                        </div>
+
+                        <!-- LEVEL 4: Toolbar & Kolom Pencarian Lega -->
+                        <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                            <div class="relative flex-1">
+                                <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                                    </svg>
+                                </span>
+                                <input type="text" id="preview-search-input" onkeyup="filterPreviewRows()" placeholder="Ketik untuk mencari cepat Kanban No, Item Code, Part Description, Customer..." class="form-input py-2 pl-9 pr-3 text-xs w-full bg-white border-slate-200 rounded-xl focus:border-blue-500">
+                            </div>
+                            <div class="flex items-center justify-between sm:justify-end gap-3 text-xs text-slate-500 font-semibold px-1">
+                                <span>Menampilkan <b id="preview-visible-count" class="text-blue-700 font-mono">0</b> dari <b id="preview-total-count" class="font-mono">0</b> baris</span>
                             </div>
                         </div>
 
@@ -527,41 +618,6 @@ if ($pdo) {
     }
 
     var previewRowIndex = 0;
-
-    function previewExcelKanbanFile() {
-        var fileInput = document.getElementById('excel-file-input');
-        if (!fileInput.files || fileInput.files.length === 0) {
-            alert('Silakan pilih file Excel (.xlsx / .csv) terlebih dahulu!');
-            return;
-        }
-
-        var formData = new FormData();
-        formData.append('excel_file', fileInput.files[0]);
-
-        document.getElementById('excel-loading').classList.remove('hidden');
-        document.getElementById('excel-preview-container').classList.add('hidden');
-
-        fetch('<?= base_url("modules/kanban/preview_excel.php") ?>', {
-            method: 'POST',
-            body: formData
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            document.getElementById('excel-loading').classList.add('hidden');
-            if (!data.success) {
-                alert('Gagal membaca file: ' + data.message);
-                return;
-            }
-
-            renderExcelPreviewTable(data);
-        })
-        .catch(function(err) {
-            document.getElementById('excel-loading').classList.add('hidden');
-            alert('Terjadi kesalahan koneksi server saat membaca file Excel!');
-        });
-    }
-
-    var previewRowIndex = 0;
     var activePreviewFilter = 'all';
 
     function previewExcelKanbanFile() {
@@ -611,25 +667,40 @@ if ($pdo) {
         var totalRows = data.total_parsed || 0;
         var totalNew  = (typeof data.total_new !== 'undefined') ? data.total_new : totalRows;
         var totalDup  = (typeof data.total_duplicate !== 'undefined') ? data.total_duplicate : 0;
+        var totalQtyChange = (typeof data.total_qty_change !== 'undefined') ? data.total_qty_change : 0;
 
-        document.getElementById('preview-total-rows').textContent = totalRows;
-        document.getElementById('preview-new-rows').textContent = totalNew;
-        document.getElementById('preview-dup-rows').textContent = totalDup;
+        document.getElementById('count-card-all').textContent = totalRows;
+        document.getElementById('count-card-new').textContent = totalNew;
+        document.getElementById('count-card-qty_change').textContent = totalQtyChange;
+        document.getElementById('count-card-dup').textContent = totalDup;
         document.getElementById('preview-skipped-rows').textContent = data.total_skipped || 0;
 
-        document.getElementById('count-filter-all').textContent = totalRows;
-        document.getElementById('count-filter-new').textContent = totalNew;
-        document.getElementById('count-filter-dup').textContent = totalDup;
+        // Toggle bulk action banner visibility & counter
+        var bulkBanner = document.getElementById('bulk-qty-banner');
+        var bannerQtyCount = document.getElementById('banner-qtychange-count');
+        if (bulkBanner) {
+            if (totalQtyChange > 0) {
+                bulkBanner.classList.remove('hidden');
+                if (bannerQtyCount) bannerQtyCount.textContent = totalQtyChange;
+            } else {
+                bulkBanner.classList.add('hidden');
+            }
+        }
 
         var submitBtn = document.getElementById('btn-submit-preview');
         var submitBtnTop = document.getElementById('btn-submit-preview-top');
 
         var updateSubmitBtnState = function(btn) {
             if (!btn) return;
-            if (totalNew > 0) {
+            var actionableCount = totalNew + totalQtyChange;
+            if (actionableCount > 0) {
                 btn.disabled = false;
                 btn.className = 'btn-primary py-1.5 px-5 text-xs font-bold shadow-md shadow-blue-600/20 cursor-pointer';
-                btn.innerHTML = '✓ Simpan ' + totalNew + ' Baris Baru ke Database';
+                var btnText = '✓ Simpan ' + actionableCount + ' Data ke Database';
+                if (totalQtyChange > 0) {
+                    btnText = '✓ Simpan (' + totalNew + ' Baru, ' + totalQtyChange + ' Revisi Qty)';
+                }
+                btn.innerHTML = btnText;
             } else {
                 btn.disabled = true;
                 btn.className = 'py-1.5 px-5 text-xs font-bold rounded-lg bg-slate-300 text-slate-500 cursor-not-allowed';
@@ -664,17 +735,84 @@ if ($pdo) {
             previewRowIndex++;
 
             var isDup = (r.is_duplicate === true);
-            var rowClass = isDup ? 'hover:bg-amber-50/80 bg-amber-50/40 is-duplicate-row transition-colors' : 'hover:bg-slate-50/80 is-new-row transition-colors';
-            var statusBadge = isDup 
-                ? '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300" title="' + escapeHtml(r.duplicate_source || 'Duplikat') + '">⚠️ Duplikat</span>'
-                : '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">✓ Baru</span>';
+            var isQtyChange = (r.is_qty_change === true);
+
+            var rowType = isDup ? 'dup' : (isQtyChange ? 'qty_change' : 'new');
+            var rowClass = 'hover:bg-slate-50/80 transition-colors';
+            if (isDup) {
+                rowClass = 'hover:bg-amber-50/80 bg-amber-50/40 is-duplicate-row transition-colors';
+            } else if (isQtyChange) {
+                rowClass = 'hover:bg-sky-50/90 bg-sky-50/50 is-qtychange-row transition-colors';
+            } else {
+                rowClass = 'hover:bg-slate-50/80 is-new-row transition-colors';
+            }
+
+            var statusBadge = '';
+            var actionControlHtml = '';
+
+            if (isDup) {
+                statusBadge = '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300" title="' + escapeHtml(r.duplicate_source || 'Duplikat') + '">⚠️ Duplikat</span>';
+            } else if (isQtyChange) {
+                var diffSign = r.qty_diff > 0 ? '+' : '';
+                var isDecrease = (r.qty_diff < 0);
+                var isBelowPassed = (r.new_qty < r.passed_qty);
+
+                var stColor = (r.current_status === 'completed') ? 'bg-emerald-100 text-emerald-800 border-emerald-300' : 'bg-amber-100 text-amber-800 border-amber-300';
+                var stLabel = (r.current_status === 'completed') ? 'Sudah Selesai' : ((r.current_status === 'in_progress') ? 'Sedang Dikerjakan' : ((r.current_status === 'partial') ? 'Parsial' : 'Belum Mulai'));
+
+                // Alert badge if target is below inspected passed items
+                var warningBadge = '';
+                if (isBelowPassed) {
+                    warningBadge = `
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[8.5px] font-black bg-rose-100 text-rose-800 border border-rose-300 text-center" title="Target baru lebih kecil daripada barang yang sudah lolos QC!">
+                            ⚠️ Target (${r.new_qty}) &lt; QC Lolos (${r.passed_qty})
+                        </span>
+                    `;
+                }
+
+                // If decrease, cannot create new row with negative qty
+                var createRowOption = '';
+                if (!isDecrease) {
+                    createRowOption = `<option value="create_new_row">➕ Buat Baris Baru (${diffSign}${r.qty_diff} pcs)</option>`;
+                }
+
+                statusBadge = `
+                    <div class="flex flex-col items-center gap-1">
+                        <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-extrabold bg-sky-100 text-sky-900 border border-sky-300 shadow-2xs whitespace-nowrap">
+                            ${isDecrease ? '🔻 Qty Berkurang' : '🔄 Qty Bertambah'} (${r.old_qty} → ${r.new_qty})
+                        </span>
+                        <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-bold border ${stColor}">
+                            DB: ${stLabel} (${r.passed_qty}/${r.old_qty})
+                        </span>
+                        ${warningBadge}
+                        <div class="mt-0.5">
+                            <select class="qty-action-select text-[10.5px] font-bold py-0.5 px-1.5 rounded border border-sky-300 bg-white text-sky-900 focus:ring-1 focus:ring-sky-500 cursor-pointer shadow-2xs" 
+                                    data-row-idx="${previewRowIndex}"
+                                    data-existing-id="${r.existing_id || 0}"
+                                    data-old-qty="${r.old_qty || 0}"
+                                    data-new-qty="${r.new_qty || 0}"
+                                    data-current-status="${escapeHtml(r.current_status || '')}"
+                                    data-passed-qty="${r.passed_qty || 0}"
+                                    data-is-decrease="${isDecrease ? '1' : '0'}"
+                                    data-is-below-passed="${isBelowPassed ? '1' : '0'}"
+                                    onchange="onRowActionChange(this, ${previewRowIndex})">
+                                <option value="update_qty" selected>🔄 Update Target Qty (${r.new_qty} pcs)</option>
+                                ${createRowOption}
+                                <option value="skip">⏭️ Abaikan (Pakai Qty Lama)</option>
+                            </select>
+                        </div>
+                    </div>
+                `;
+            } else {
+                statusBadge = '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">✓ Baru</span>';
+            }
 
             var searchString = (r.kanban_no + ' ' + r.item_code + ' ' + r.item_description + ' ' + (r.str_loc || '') + ' ' + (r.supply_area || '')).toLowerCase();
 
             htmlChunks.push(`
-                <tr id="preview-row-${previewRowIndex}" class="${rowClass}" data-duplicate="${isDup ? '1' : '0'}" data-search="${escapeHtml(searchString)}">
+                <tr id="preview-row-${previewRowIndex}" class="${rowClass}" data-row-type="${rowType}" data-duplicate="${isDup ? '1' : '0'}" data-qtychange="${isQtyChange ? '1' : '0'}" data-search="${escapeHtml(searchString)}">
                     <td class="px-3 py-2 text-center font-bold text-slate-400 preview-row-number" style="width: 40px; min-width: 40px;">${previewRowIndex}</td>
-                    <td class="px-3 py-2 text-center" style="width: 120px; min-width: 120px;">${statusBadge}</td>
+                    <td class="px-3 py-2 text-center" style="width: 170px; min-width: 170px;">${statusBadge}</td>
                     <td class="px-3 py-2" style="min-width: 160px;">
                         <input type="text" name="rows[${previewRowIndex}][kanban_no]" value="${escapeHtml(r.kanban_no)}" class="form-input py-1 text-xs font-mono font-bold" required>
                     </td>
@@ -728,15 +866,46 @@ if ($pdo) {
         setPreviewFilter('all');
     }
 
+    function setAllQtyChangeActions(action) {
+        var selects = document.querySelectorAll('.qty-action-select');
+        selects.forEach(function(sel) {
+            var isDecrease = (sel.getAttribute('data-is-decrease') === '1');
+            // Jika aksi yang dipilih adalah create_new_row, tapi baris ini kuantitasnya berkurang, biarkan tetap update_qty
+            if (action === 'create_new_row' && isDecrease) {
+                sel.value = 'update_qty';
+            } else {
+                sel.value = action;
+            }
+            var rowIdx = sel.getAttribute('data-row-idx');
+            onRowActionChange(sel, rowIdx);
+        });
+    }
+
+    function onRowActionChange(sel, rowIdx) {
+        var tr = document.getElementById('preview-row-' + rowIdx);
+        if (!tr) return;
+        var act = sel.value;
+        if (act === 'skip') {
+            tr.classList.add('opacity-50', 'line-through');
+        } else {
+            tr.classList.remove('opacity-50', 'line-through');
+        }
+    }
+
     function setPreviewFilter(filterType) {
         activePreviewFilter = filterType;
-        ['all', 'new', 'dup'].forEach(function(f) {
-            var btn = document.getElementById('filter-btn-' + f);
-            if (btn) {
+
+        ['all', 'new', 'qty_change', 'dup'].forEach(function(f) {
+            var card = document.getElementById('card-filter-' + f);
+            if (card) {
                 if (f === filterType) {
-                    btn.className = 'px-2.5 py-1 rounded text-xs font-bold bg-blue-600 text-white transition-all cursor-pointer';
+                    card.style.transform = 'translateY(-2px)';
+                    card.style.boxShadow = '0 6px 14px rgba(0, 0, 0, 0.08), 0 0 0 2px rgba(37, 99, 235, 0.35)';
+                    card.style.opacity = '1';
                 } else {
-                    btn.className = 'px-2.5 py-1 rounded text-xs font-bold text-slate-600 hover:bg-slate-200 transition-all cursor-pointer';
+                    card.style.transform = 'translateY(0)';
+                    card.style.boxShadow = '0 1px 2px rgba(0, 0, 0, 0.04)';
+                    card.style.opacity = '0.75';
                 }
             }
         });
@@ -752,10 +921,12 @@ if ($pdo) {
         for (var i = 0; i < rows.length; i++) {
             var tr = rows[i];
             var isDup = (tr.getAttribute('data-duplicate') === '1');
+            var isQtyChange = (tr.getAttribute('data-qtychange') === '1');
 
             var matchFilter = true;
-            if (activePreviewFilter === 'new' && isDup) matchFilter = false;
-            if (activePreviewFilter === 'dup' && !isDup) matchFilter = false;
+            if (activePreviewFilter === 'new' && (isDup || isQtyChange)) matchFilter = false;
+            if (activePreviewFilter === 'qty_change' && !isQtyChange) matchFilter = false;
+            if (activePreviewFilter === 'dup' && (!isDup || isQtyChange)) matchFilter = false;
 
             if (!matchFilter) {
                 tr.style.display = 'none';
@@ -787,6 +958,7 @@ if ($pdo) {
         tr.id = 'preview-row-' + previewRowIndex;
         tr.className = 'hover:bg-slate-50/80 is-new-row transition-colors';
         tr.setAttribute('data-duplicate', '0');
+        tr.setAttribute('data-qtychange', '0');
 
         var custOptionsHtml = '<option value="">-- Pilih Customer --</option>';
         for (var k = 0; k < masterCustomersData.length; k++) {
@@ -799,7 +971,7 @@ if ($pdo) {
 
         tr.innerHTML = `
             <td class="px-3 py-2 text-center font-bold text-slate-400 preview-row-number" style="width: 40px; min-width: 40px;">${tbody.children.length + 1}</td>
-            <td class="px-3 py-2 text-center" style="width: 120px; min-width: 120px;">
+            <td class="px-3 py-2 text-center" style="width: 170px; min-width: 170px;">
                 <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">✓ Baru</span>
             </td>
             <td class="px-3 py-2" style="min-width: 160px;">
@@ -896,14 +1068,41 @@ if ($pdo) {
         var rows = tbody.querySelectorAll('tr');
         var data = [];
         var skippedDuplicates = 0;
+        var skippedQtyChanges = 0;
+        var completedToReopenCount = 0;
 
         for (var i = 0; i < rows.length; i++) {
             var tr = rows[i];
             var isDup = (tr.getAttribute('data-duplicate') === '1');
+            var isQtyChange = (tr.getAttribute('data-qtychange') === '1');
 
-            if (isDup) {
+            var actSelect = tr.querySelector('.qty-action-select');
+            var actionType = 'insert';
+            var existingId = 0;
+            var oldQty = 0;
+            var newQty = 0;
+            var currentStatus = '';
+            var passedQty = 0;
+
+            if (isQtyChange && actSelect) {
+                actionType = actSelect.value; // 'update_qty' | 'create_new_row' | 'skip'
+                existingId = parseInt(actSelect.getAttribute('data-existing-id')) || 0;
+                oldQty = parseInt(actSelect.getAttribute('data-old-qty')) || 0;
+                newQty = parseInt(actSelect.getAttribute('data-new-qty')) || 0;
+                currentStatus = actSelect.getAttribute('data-current-status') || '';
+                passedQty = parseInt(actSelect.getAttribute('data-passed-qty')) || 0;
+
+                if (actionType === 'skip') {
+                    skippedQtyChanges++;
+                    continue;
+                }
+
+                if (actionType === 'update_qty' && currentStatus === 'completed') {
+                    completedToReopenCount++;
+                }
+            } else if (isDup) {
                 skippedDuplicates++;
-                continue; // Automatically skip duplicate rows from being inserted
+                continue; // Automatically skip exact duplicate rows from being inserted
             }
 
             var kanbanNoInput = tr.querySelector('input[name*="[kanban_no]"]');
@@ -931,14 +1130,29 @@ if ($pdo) {
             }
             if (!custVal) custVal = 'PT. Astra Honda Motor';
 
+            var submitQty = qtyInput ? (parseInt(qtyInput.value) || 1) : 1;
+            if (isQtyChange && actionType === 'create_new_row') {
+                // If creating a new split row for qty difference, default to difference if valid
+                var diff = submitQty - oldQty;
+                if (diff > 0) {
+                    submitQty = diff;
+                }
+            }
+
             data.push({
+                action_type: actionType,
+                existing_id: existingId,
+                old_qty: oldQty,
+                new_qty: newQty,
+                current_status: currentStatus,
+                passed_qty: passedQty,
                 kanban_no: kNo,
                 item_code: iCode,
                 item_description: itemDescInput ? itemDescInput.value.trim() : iCode,
                 customer: custVal,
                 req_date: reqDateInput ? reqDateInput.value : '',
                 eta: etaInput ? etaInput.value : '',
-                qty: qtyInput ? parseInt(qtyInput.value) || 1 : 1,
+                qty: submitQty,
                 str_loc: strLocInput ? strLocInput.value.trim() : '',
                 supply_area: supplyAreaInput ? supplyAreaInput.value.trim() : '',
                 check_type: checkTypeInput ? checkTypeInput.value.trim() : '',
@@ -948,12 +1162,42 @@ if ($pdo) {
 
         if (data.length === 0) {
             if (e) e.preventDefault();
-            if (skippedDuplicates > 0) {
-                alert('Semua baris (' + skippedDuplicates + ' baris) terdeteksi sebagai data duplikat yang sudah ada di database. Tidak ada data baru yang perlu disimpan.');
+            var skipMsg = [];
+            if (skippedDuplicates > 0) skipMsg.push(skippedDuplicates + ' baris duplikat');
+            if (skippedQtyChanges > 0) skipMsg.push(skippedQtyChanges + ' baris perubahan qty diabaikan');
+            if (skipMsg.length > 0) {
+                alert('Semua baris (' + skipMsg.join(', ') + ') dilewati. Tidak ada data baru atau revisi yang perlu disimpan.');
             } else {
                 alert('Tidak ada baris data valid untuk disimpan!');
             }
             return false;
+        }
+
+        var belowPassedCount = 0;
+        for (var i = 0; i < rows.length; i++) {
+            var tr = rows[i];
+            var actSelect = tr.querySelector('.qty-action-select');
+            if (actSelect && actSelect.value === 'update_qty' && actSelect.getAttribute('data-is-below-passed') === '1') {
+                belowPassedCount++;
+            }
+        }
+
+        // Confirmation warning if target is decreased below passed inspected items
+        if (belowPassedCount > 0) {
+            var warningPassedMsg = 'Peringatan Khusus:\nAda ' + belowPassedCount + ' Kanban yang target Qty-nya DITURUNKAN di bawah jumlah barang yang SUDAH LOLOS QC fisik!\n\nBarang fisik yang sudah selesai diperiksa QC akan melebihi target baru.\n\nApakah Anda yakin ingin tetap memperbarui target ini?';
+            if (!confirm(warningPassedMsg)) {
+                if (e) e.preventDefault();
+                return false;
+            }
+        }
+
+        // Confirmation warning if any completed kanban is being reopened to partial
+        if (completedToReopenCount > 0) {
+            var confirmMsg = 'Perhatian: Ada ' + completedToReopenCount + ' Kanban yang sebelumnya SUDAH SELESAI (Completed) akan diupdate target Qty-nya.\n\nStatusnya akan otomatis dibuka kembali menjadi PARSIAL agar operator QC dapat melanjutkan inspeksi sisa kekurangannya.\n\nApakah Anda yakin ingin melanjutkan?';
+            if (!confirm(confirmMsg)) {
+                if (e) e.preventDefault();
+                return false;
+            }
         }
 
         document.getElementById('kanban_json_data').value = JSON.stringify(data);

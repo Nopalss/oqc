@@ -308,6 +308,21 @@ if (!empty($roundLotIds)) {
     }
 }
 
+// Fetch Administrative Quarantine Closure from lot_quarantine_closures
+$quarantineClosure = null;
+if (!empty($roundLotIds)) {
+    $inRoundLotIdsClosure = implode(',', array_map('intval', $roundLotIds));
+    $stmtQC = $pdo->query("
+        SELECT lqc.*, u.name AS closed_by_name 
+        FROM lot_quarantine_closures lqc
+        LEFT JOIN users u ON u.id = lqc.closed_by
+        WHERE lqc.session_lot_id IN ($inRoundLotIdsClosure)
+        ORDER BY lqc.id DESC
+        LIMIT 1
+    ");
+    $quarantineClosure = $stmtQC->fetch(PDO::FETCH_ASSOC);
+}
+
 // Calculate NG counts across all rounds
 $activeQtyNG  = 0;
 $initialQtyNG = 0;
@@ -388,6 +403,11 @@ $displayLotStatusClass = 'bg-rose-100 text-rose-800 border-rose-200';
 if ($latestResult === 'passed') {
     $displayLotStatus      = 'Lulus Re-Inspeksi';
     $displayLotStatusClass = 'bg-emerald-100 text-emerald-800 border-emerald-200';
+} elseif ($quarantineClosure) {
+    $displayLotStatus      = 'Disposisi Selesai (Divisi)';
+    $displayLotStatusClass = 'bg-sky-100 text-sky-800 border-sky-300';
+    $handlingLabel         = 'Disposisi Selesai (Divisi)';
+    $handlingBadgeClass    = 'bg-sky-100 text-sky-800 border-sky-300';
 } elseif ($hasReplacementBox && $totalRoundsCount == 1) {
     $displayLotStatus      = 'Diganti Lot Baru';
     $displayLotStatusClass = 'bg-indigo-100 text-indigo-800 border-indigo-200';
@@ -981,6 +1001,32 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                 </div>
             </div>
+
+            <!-- Card Penutupan Karantina Administratif (Divisi Lain) -->
+            <?php if ($quarantineClosure): ?>
+            <div class="bg-sky-50 rounded-xl shadow-sm border border-sky-200 p-5 space-y-3 h-fit">
+                <div class="border-b border-sky-200 pb-3 flex items-center justify-between">
+                    <h3 class="text-sm font-bold text-sky-950 flex items-center gap-2 uppercase tracking-wider">
+                        <svg class="w-4 h-4 text-sky-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        Disposisi Selesai (Divisi)
+                    </h3>
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-200 text-sky-900 border border-sky-300">
+                        MEMO / SELESAI
+                    </span>
+                </div>
+                <div class="text-xs space-y-2 text-sky-900">
+                    <p class="leading-relaxed bg-white p-3 rounded-lg border border-sky-200 font-medium">
+                        <?= nl2br(sanitize($quarantineClosure['notes'])) ?>
+                    </p>
+                    <div class="pt-2 border-t border-sky-200/70 text-[11px] text-sky-800 flex justify-between">
+                        <span>Ditutup Oleh: <b><?= sanitize($quarantineClosure['closed_by_name'] ?? 'Admin QC') ?></b></span>
+                        <span class="font-mono"><?= date('d M Y H:i', strtotime($quarantineClosure['closed_at'])) ?> WIB</span>
+                    </div>
+                </div>
+            </div>
+            <?php endif; ?>
 
             <!-- Right 1 Col: Supervisor Action Form / Quick Notes -->
             <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4 h-fit">

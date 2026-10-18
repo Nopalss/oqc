@@ -131,6 +131,9 @@ function render_flash() {
 
     $class = $colorClasses[$type] ?? $colorClasses['info'];
 
+    $swalType = ($type === 'danger') ? 'error' : $type;
+    $safeMsg = json_encode($msg);
+
     return '
     <div class="mb-4 p-3 rounded-xl border flex items-center justify-between shadow-xs transition-all duration-300 ' . $class . '" id="flash-alert">
         <div class="flex items-center space-x-2">
@@ -144,7 +147,14 @@ function render_flash() {
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
             </svg>
         </button>
-    </div>';
+    </div>
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {
+        if (typeof showToast === "function") {
+            showToast(' . json_encode($swalType) . ', ' . $safeMsg . ');
+        }
+    });
+    </script>';
 }
 
 /**

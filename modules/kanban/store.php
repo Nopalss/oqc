@@ -125,10 +125,56 @@ if ($entryType === 'manual') {
 
         $seenBatchFingerprints = [];
         $successCount = 0;
+        $updatedQtyCount = 0;
+        $reopenedCount = 0;
         $skipCount = 0;
         $duplicateCount = 0;
 
         foreach ($rows as $r) {
+            $actionType = sanitize($r['action_type'] ?? 'insert');
+            $existingId = !empty($r['existing_id']) ? (int)$r['existing_id'] : 0;
+            $oldQty     = !empty($r['old_qty']) ? (int)$r['old_qty'] : 0;
+            $newQty     = !empty($r['new_qty']) ? (int)$r['new_qty'] : 0;
+            $currStatus = sanitize($r['current_status'] ?? '');
+            $passedQty  = !empty($r['passed_qty']) ? (int)$r['passed_qty'] : 0;
+
+            if ($actionType === 'skip') {
+                $skipCount++;
+                continue;
+            }
+
+            if ($actionType === 'update_qty' && $existingId > 0 && $newQty > 0) {
+                // Update target Qty on existing kanban row
+                $qtyLabel = ($newQty > $oldQty) ? 'Penambahan' : 'Pengurangan';
+                $revisiRemark = ' [Revisi Qty: ' . $oldQty . ' -> ' . $newQty . ' pcs (' . $qtyLabel . ')]';
+
+                // Hitung status baru di PHP agar tidak menduplikasi named parameter di SQL
+                $newStatus = $currStatus;
+                if ($currStatus === 'completed' && $newQty > $passedQty) {
+                    $newStatus = 'partial';
+                } elseif ($newQty <= $passedQty && $passedQty > 0) {
+                    $newStatus = 'completed';
+                }
+                
+                $stmtUpdateQtySingle = $pdo->prepare("UPDATE kanban_items SET 
+                    qty = :new_qty,
+                    status = :new_status,
+                    remark = CONCAT(COALESCE(remark, ''), :rev_remark)
+                    WHERE id = :existing_id");
+
+                $stmtUpdateQtySingle->execute([
+                    ':new_qty'     => $newQty,
+                    ':new_status'  => $newStatus,
+                    ':rev_remark'  => $revisiRemark,
+                    ':existing_id' => $existingId
+                ]);
+                $updatedQtyCount++;
+                if ($currStatus === 'completed' && $newQty > $passedQty) {
+                    $reopenedCount++;
+                }
+                continue;
+            }
+
             $kanbanNo   = strtoupper(trim(sanitize($r['kanban_no'] ?? '')));
             $directCode = strtoupper(trim(sanitize($r['item_code'] ?? '')));
             $selectCode = trim(sanitize($r['item_code_select'] ?? ''));
@@ -182,6 +228,10 @@ if ($entryType === 'manual') {
             $checkType  = trim(sanitize($r['check_type'] ?? ''));
             $remark     = trim(sanitize($r['remark'] ?? ''));
 
+            if ($actionType === 'create_new_row' && !empty($oldQty)) {
+                $remark = trim($remark . ' [Split Penambahan Qty dari Kanban ' . $oldQty . ' pcs]');
+            }
+
             if ($planType === 'safety_stock') {
                 if (empty($itemCode) || empty($itemDesc) || $qty <= 0) {
                     $skipCount++;
@@ -194,7 +244,7 @@ if ($entryType === 'manual') {
                 }
             }
 
-            // Check 7 criteria duplicate match
+            // Check 7 criteria duplicate match (only if not explicit create_new_row split)
             $itemFingerprint = md5(
                 $kanbanNo . '|' .
                 $itemCode . '|' .
@@ -205,7 +255,7 @@ if ($entryType === 'manual') {
                 strtoupper($supplyArea)
             );
 
-            if (isset($dbFingerprints[$itemFingerprint]) || isset($seenBatchFingerprints[$itemFingerprint])) {
+            if ($actionType !== 'create_new_row' && (isset($dbFingerprints[$itemFingerprint]) || isset($seenBatchFingerprints[$itemFingerprint]))) {
                 $duplicateCount++;
                 continue; // Reject & skip duplicate row
             }
@@ -245,15 +295,26 @@ if ($entryType === 'manual') {
             $successCount++;
         }
 
-        if ($successCount > 0) {
+        $totalAffected = $successCount + $updatedQtyCount;
+        if ($totalAffected > 0) {
             $pdo->commit();
-            $msg = 'Berhasil menyimpan ' . $successCount . ' baris data Kanban baru.';
+            $msgParts = [];
+            if ($successCount > 0) {
+                $msgParts[] = $successCount . ' baris data Kanban baru disimpan';
+            }
+            if ($updatedQtyCount > 0) {
+                $msgParts[] = $updatedQtyCount . ' baris target Qty diupdate';
+            }
+            if ($reopenedCount > 0) {
+                $msgParts[] = $reopenedCount . ' Kanban dibuka kembali ke status Parsial';
+            }
+            $msg = 'Berhasil memproses data: ' . implode(', ', $msgParts) . '.';
             $details = [];
             if ($duplicateCount > 0) {
                 $details[] = $duplicateCount . ' baris duplikat ditolak/dilewati';
             }
             if ($skipCount > 0) {
-                $details[] = $skipCount . ' baris invalid dilewati';
+                $details[] = $skipCount . ' baris diabaikan/invalid';
             }
             if (!empty($details)) {
                 $msg .= ' (' . implode(', ', $details) . ').';
@@ -262,9 +323,9 @@ if ($entryType === 'manual') {
         } else {
             $pdo->rollBack();
             if ($duplicateCount > 0) {
-                set_flash('warning', 'Tidak ada data baru yang disimpan. Seluruh ' . $duplicateCount . ' baris terdeteksi duplikat dan sudah ada sebelumnya!');
+                set_flash('warning', 'Tidak ada data yang disimpan. Seluruh ' . $duplicateCount . ' baris terdeteksi duplikat dan sudah ada sebelumnya!');
             } else {
-                set_flash('warning', 'Gagal menyimpan data Kanban! Seluruh baris tidak valid.');
+                set_flash('warning', 'Gagal memproses data Kanban! Seluruh baris diabaikan atau tidak valid.');
             }
         }
     } catch (PDOException $e) {

@@ -57,10 +57,217 @@ $pdo = getDB();
 if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) {
     header('Content-Type: application/json');
     $items = [];
+    $todayBatches = [];
+    $pendingYesterdayCount = 0;
+    
     $selectedId = (int)($_GET['selected_id'] ?? $_GET['kanban_id'] ?? 0);
+    $batchFilter = trim(sanitize($_GET['batch_id'] ?? 'all'));
+    $scopeFilter = trim(sanitize($_GET['scope'] ?? 'today')); // 'today' | 'pending_yesterday' | 'all'
+    $todayDate = date('Y-m-d');
+    
     try {
-        $stmtPlan = $pdo->prepare("
-            SELECT k.*, b.document_number, b.vendor, b.plan_type as batch_plan_type,
+        // 1. Ambil daftar batch aktif hari ini
+        $batchSql = "
+            SELECT b.id, b.document_number, b.vendor, b.imported_at, b.import_method,
+                   COUNT(k.id) as item_count,
+                   SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                   SUM(CASE WHEN k.status IN ('in_progress', 'partial', 'rejected') THEN 1 ELSE 0 END) as in_progress_count
+            FROM kanban_batches b
+            JOIN kanban_items k ON k.batch_id = b.id
+            WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+              AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+              AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+              AND (
+                  DATE(b.imported_at) = :b_today 
+                  OR DATE(k.created_at) = :b_today2
+              )
+            GROUP BY b.id, b.document_number, b.vendor, b.imported_at, b.import_method
+            ORDER BY b.imported_at ASC, b.id ASC
+        ";
+        $stmtB = $pdo->prepare($batchSql);
+        $stmtB->execute([
+            ':b_today'  => $todayDate,
+            ':b_today2' => $todayDate
+        ]);
+        $todayBatches = $stmtB->fetchAll(PDO::FETCH_ASSOC);
+        
+        // 2. Hitung jumlah tunggakan kemarin (sebelum hari ini yang belum selesai / reject / in_progress)
+        $stmtPy = $pdo->prepare("
+            SELECT COUNT(DISTINCT k.id)
+            FROM kanban_items k
+            WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+              AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+              AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+              AND DATE(k.created_at) < :py_date
+              AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')
+        ");
+        $stmtPy->execute([':py_date' => $todayDate]);
+        $pendingYesterdayCount = (int)$stmtPy->fetchColumn();
+
+        // 2.A Hitung 5 KPI Utama Status (Disesuaikan dengan Scope / Batch yang Sedang Dipilih)
+        $kpiStats = [
+            'total'       => 0,
+            'uninspected' => 0,
+            'in_progress' => 0,
+            'completed'   => 0,
+            'rejected'    => 0
+        ];
+        try {
+            $kpiWhere = [
+                "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+                "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+                "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')"
+            ];
+            $kpiParams = [];
+
+            if ($scopeFilter === 'pending_yesterday') {
+                $kpiWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :kpi_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                $kpiParams[':kpi_py_date'] = $todayDate;
+            } elseif ($scopeFilter === 'today') {
+                $kpiWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kpi_today";
+                $kpiParams[':kpi_today'] = $todayDate;
+                if ($batchFilter !== 'all' && is_numeric($batchFilter)) {
+                    $kpiWhere[] = "k.batch_id = :kpi_batch_id";
+                    $kpiParams[':kpi_batch_id'] = (int)$batchFilter;
+                }
+            } elseif ($batchFilter !== 'all' && is_numeric($batchFilter)) {
+                $kpiWhere[] = "k.batch_id = :kpi_batch_id";
+                $kpiParams[':kpi_batch_id'] = (int)$batchFilter;
+            }
+
+            $kpiWhereSql = implode(' AND ', $kpiWhere);
+
+            $stmtKpi = $pdo->prepare("
+                SELECT 
+                    COUNT(DISTINCT k.id) as total_count,
+                    SUM(CASE WHEN k.status IN ('uninspected', 'pending') OR (k.status IS NULL) THEN 1 ELSE 0 END) as uninspected_count,
+                    SUM(CASE WHEN k.status IN ('in_progress', 'partial') THEN 1 ELSE 0 END) as in_progress_count,
+                    SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                    SUM(CASE WHEN k.status = 'rejected' OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_ng 
+                        JOIN inspection_session_lots isl_ng ON isl_ng.inspection_session_id = s_ng.id
+                        WHERE s_ng.kanban_item_id = k.id AND (isl_ng.lot_result = 'rejected' OR isl_ng.lot_result = 'ng')
+                    ) THEN 1 ELSE 0 END) as rejected_count
+                FROM kanban_items k
+                LEFT JOIN kanban_batches b ON b.id = k.batch_id
+                WHERE {$kpiWhereSql}
+            ");
+            $stmtKpi->execute($kpiParams);
+            $kRow = $stmtKpi->fetch(PDO::FETCH_ASSOC);
+            if ($kRow) {
+                $kpiStats['total']       = (int)($kRow['total_count'] ?? 0);
+                $kpiStats['uninspected'] = (int)($kRow['uninspected_count'] ?? 0);
+                $kpiStats['in_progress'] = (int)($kRow['in_progress_count'] ?? 0);
+                $kpiStats['completed']   = (int)($kRow['completed_count'] ?? 0);
+                $kpiStats['rejected']    = (int)($kRow['rejected_count'] ?? 0);
+            }
+        } catch (Exception $eKpi) {}
+
+        // 2.B Hitung Statistik Personal User Hari Ini (Kanban Selesai, Total Lot Box, Passed, NG)
+        $userDailyStats = [
+            'inspector_name'    => $currentUser['name'] ?? 'Inspector QC',
+            'completed_kanban'  => 0,
+            'total_lots'        => 0,
+            'passed_lots'       => 0,
+            'ng_lots'           => 0
+        ];
+        try {
+            // Jumlah Kanban yang diselesaikan oleh user ini hari ini
+            $stmtUserKb = $pdo->prepare("
+                SELECT COUNT(DISTINCT s.kanban_item_id)
+                FROM inspection_sessions s
+                WHERE s.inspector_id = :uid
+                  AND s.status = 'completed'
+                  AND s.kanban_item_id IS NOT NULL
+                  AND (DATE(s.finished_at) = :today_date OR (s.finished_at IS NULL AND DATE(s.created_at) = :today_date2))
+            ");
+            $stmtUserKb->execute([
+                ':uid'         => $currentUserId,
+                ':today_date'  => $todayDate,
+                ':today_date2' => $todayDate
+            ]);
+            $userDailyStats['completed_kanban'] = (int)$stmtUserKb->fetchColumn();
+
+            // Total Lot box yang discan & diinspeksi oleh user ini hari ini (Passed vs NG)
+            $stmtUserLots = $pdo->prepare("
+                SELECT 
+                    COUNT(isl.id) as total_lots,
+                    SUM(CASE WHEN isl.lot_result IN ('passed', 'skipped') THEN 1 ELSE 0 END) as passed_lots,
+                    SUM(CASE WHEN isl.lot_result IN ('rejected', 'ng') THEN 1 ELSE 0 END) as ng_lots
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                WHERE s.inspector_id = :uid
+                  AND (DATE(isl.created_at) = :today_date OR DATE(s.created_at) = :today_date2)
+            ");
+            $stmtUserLots->execute([
+                ':uid'         => $currentUserId,
+                ':today_date'  => $todayDate,
+                ':today_date2' => $todayDate
+            ]);
+            $lotRow = $stmtUserLots->fetch(PDO::FETCH_ASSOC);
+            if ($lotRow) {
+                $userDailyStats['total_lots']  = (int)($lotRow['total_lots'] ?? 0);
+                $userDailyStats['passed_lots'] = (int)($lotRow['passed_lots'] ?? 0);
+                $userDailyStats['ng_lots']     = (int)($lotRow['ng_lots'] ?? 0);
+            }
+        } catch (Exception $eUsrStats) {}
+
+        // 3. Susun query Kanban Items
+        $where = [
+            "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+            "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+            "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')"
+        ];
+        $params = [];
+
+        $selCondWhere = "";
+        $selCondHaving = "";
+        $orderSel = "COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id DESC";
+
+        if ($selectedId > 0) {
+            $params[':sel_id_1'] = $selectedId;
+            $params[':sel_id_2'] = $selectedId;
+            $params[':sel_id_3'] = $selectedId;
+            $selCondWhere = " OR k.id = :sel_id_1";
+            $selCondHaving = " OR k.id = :sel_id_2";
+            $orderSel = "CASE WHEN k.id = :sel_id_3 THEN 0 ELSE 1 END ASC, " . $orderSel;
+        }
+
+        $searchQuery = trim(sanitize($_GET['search_query'] ?? ''));
+
+        if ($searchQuery !== '') {
+            // Jika ada pencarian spesifik (misal scan barcode QR / part code / no kanban),
+            // cari di seluruh batch aktif dan tunggakan hari kemarin tanpa dibatasi tanggal tunggal
+            $where[] = "(k.item_code = :search_exact_code OR k.kanban_no = :search_exact_kb OR k.item_code LIKE :search_like_code OR k.kanban_no LIKE :search_like_kb)";
+            $cleanSearch = ltrim($searchQuery, '#');
+            $params[':search_exact_code'] = $cleanSearch;
+            $params[':search_exact_kb'] = $cleanSearch;
+            $params[':search_like_code'] = '%' . $cleanSearch . '%';
+            $params[':search_like_kb'] = '%' . $cleanSearch . '%';
+        } else {
+            if ($scopeFilter === 'pending_yesterday') {
+                $where[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :py_target_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                $params[':py_target_date'] = $todayDate;
+            } elseif ($scopeFilter === 'today') {
+                $where[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :today_target_date";
+                $params[':today_target_date'] = $todayDate;
+                if ($batchFilter !== 'all' && is_numeric($batchFilter)) {
+                    $where[] = "k.batch_id = :filter_batch_id";
+                    $params[':filter_batch_id'] = (int)$batchFilter;
+                }
+            } elseif ($batchFilter !== 'all' && is_numeric($batchFilter)) {
+                $where[] = "k.batch_id = :filter_batch_id";
+                $params[':filter_batch_id'] = (int)$batchFilter;
+            }
+        }
+
+        // Tampilkan item yang belum completed ATAU merupakan item yang sedang dipilih
+        $whereSql = implode(' AND ', $where);
+
+        $sql = "
+            SELECT k.*, 
+                   COALESCE(NULLIF(mp.part_name, ''), k.item_description) as display_part_name,
+                   b.document_number, b.vendor, b.imported_at as batch_imported_at, b.plan_type as batch_plan_type,
                    (SELECT COALESCE(SUM(s.total_scanned_qty), 0)
                     FROM inspection_sessions s
                     LEFT JOIN daily_inspection_data d ON d.id = s.did_id
@@ -80,30 +287,44 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
                        END
                    ), 0)
                     FROM inspection_sessions s
-                    WHERE s.kanban_item_id = k.id) AS total_passed_qty
+                    WHERE s.kanban_item_id = k.id) AS total_passed_qty,
+                   (SELECT s_act.id 
+                    FROM inspection_sessions s_act 
+                    WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress' 
+                    ORDER BY s_act.id DESC LIMIT 1) as active_session_id,
+                   (SELECT u_act.name 
+                    FROM inspection_sessions s_act2 
+                    JOIN users u_act ON u_act.id = s_act2.inspector_id 
+                    WHERE s_act2.kanban_item_id = k.id AND s_act2.status = 'in_progress' 
+                    ORDER BY s_act2.id DESC LIMIT 1) as active_inspector_name,
+                    (SELECT 1 FROM inspection_sessions s_my WHERE s_my.kanban_item_id = k.id AND s_my.inspector_id = :my_uid LIMIT 1) as is_my_kanban
             FROM kanban_items k
             JOIN kanban_batches b ON b.id = k.batch_id
-            WHERE (
-                k.status IN ('uninspected', 'partial', 'rejected')
-                OR (:sel_id1 > 0 AND k.id = :sel_id2)
-            )
-              AND k.status != 'completed'
-            HAVING total_passed_qty < k.qty
-            ORDER BY 
-                CASE WHEN :sel_id3 > 0 AND k.id = :sel_id4 THEN 0 ELSE 1 END ASC,
-                COALESCE(k.eta, k.req_date, '9999-12-31') ASC, 
-                k.id DESC
-            LIMIT 100
-        ");
-        $stmtPlan->execute([
-            ':sel_id1' => $selectedId,
-            ':sel_id2' => $selectedId,
-            ':sel_id3' => $selectedId,
-            ':sel_id4' => $selectedId,
-        ]);
+            LEFT JOIN master_parts mp ON mp.part_code = k.item_code
+            WHERE ({$whereSql}{$selCondWhere})
+              AND (k.status != 'completed'{$selCondWhere})
+            HAVING total_passed_qty < qty{$selCondHaving}
+            ORDER BY {$orderSel}
+            LIMIT 250
+        ";
+
+        $params[':my_uid'] = $currentUserId;
+        $stmtPlan = $pdo->prepare($sql);
+        $stmtPlan->execute($params);
         $items = $stmtPlan->fetchAll(PDO::FETCH_ASSOC);
-    } catch (PDOException $ePlan) {}
-    echo json_encode(['success' => true, 'items' => $items]);
+    } catch (PDOException $ePlan) {
+        $items = [];
+    }
+    echo json_encode([
+        'success' => true,
+        'today_batches' => $todayBatches,
+        'pending_yesterday_count' => $pendingYesterdayCount,
+        'kpi_stats' => $kpiStats ?? [],
+        'user_daily_stats' => $userDailyStats ?? [],
+        'scope' => $scopeFilter,
+        'batch_id' => $batchFilter,
+        'items' => $items
+    ]);
     exit;
 }
 
@@ -427,6 +648,38 @@ if ($session && !empty($session['kanban_item_id'])) {
     }
 }
 
+// Prefetch initial auto kanban item jika kanban_id diteruskan di URL (agar langsung lompat ke Langkah 2)
+$autoKanbanIdParam = (int)($_GET['kanban_id'] ?? $_GET['kanban_item_id'] ?? 0);
+$initialAutoKanbanItem = null;
+if ($autoKanbanIdParam > 0 && $pdo) {
+    try {
+        $stmtAutoKb = $pdo->prepare("
+            SELECT k.*, 
+                   COALESCE(NULLIF(mp.part_name, ''), k.item_description) as display_part_name,
+                   b.document_number, b.vendor, b.imported_at as batch_imported_at, b.plan_type as batch_plan_type,
+                   (SELECT COALESCE(SUM(
+                       CASE 
+                           WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s.id) THEN
+                               COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                         FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s.id), 0) - COALESCE(s.excess_qty, 0)
+                           WHEN s.status = 'passed' THEN
+                               (s.total_scanned_qty - COALESCE(s.excess_qty, 0))
+                           ELSE 0
+                       END
+                   ), 0)
+                    FROM inspection_sessions s
+                    WHERE s.kanban_item_id = k.id) AS total_passed_qty
+            FROM kanban_items k
+            JOIN kanban_batches b ON b.id = k.batch_id
+            LEFT JOIN master_parts mp ON mp.part_code = k.item_code
+            WHERE k.id = :auto_kid
+            LIMIT 1
+        ");
+        $stmtAutoKb->execute([':auto_kid' => $autoKanbanIdParam]);
+        $initialAutoKanbanItem = $stmtAutoKb->fetch(PDO::FETCH_ASSOC) ?: null;
+    } catch (Exception $eAutoKb) {}
+}
+
 // Spectator / Read-Only Mode Detection
 $isExplicitReadOnly = (isset($_GET['view_mode']) && $_GET['view_mode'] === 'readonly') || (isset($_GET['spectator']) && $_GET['spectator'] == 1);
 $sessionInspectorName = 'QC Inspector';
@@ -562,9 +815,9 @@ require_once __DIR__ . '/../../layouts/header.php';
     <!-- Top Bar Navigation Header -->
     <header style="flex-shrink: 0; min-height: 52px;" class="bg-white border-b border-slate-200/80 px-4 py-2 flex items-center justify-between z-20 shadow-xs">
         <div class="flex items-center space-x-3 min-w-0">
-            <a href="<?= base_url('modules/inspection/index.php') ?>" id="btn-header-back" class="btn-secondary py-1.5 px-3.5 text-xs font-bold flex items-center flex-shrink-0 text-slate-700 hover:bg-slate-100 shadow-2xs" title="Kembali ke Riwayat Inspeksi">
+            <button type="button" onclick="handleWorkbenchHeaderBack(event)" id="btn-header-back" class="btn-secondary py-1.5 px-3.5 text-xs font-bold flex items-center flex-shrink-0 text-slate-700 hover:bg-slate-100 shadow-2xs" title="Kembali ke Riwayat Inspeksi">
                 &larr; Kembali
-            </a>
+            </button>
 
             <div class="min-w-0">
                 <div class="flex items-center space-x-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
@@ -1152,26 +1405,273 @@ require_once __DIR__ . '/../../layouts/header.php';
     </div>
 </div>
 
-<!-- Scan & Validation Dead-Center Modal Overlay (2-Step Wizard: Step 1 Pilih Planning -> Step 2 Scan Label) -->
-<div id="scan-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 999999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="<?= $showScanOverlay ? '' : 'hidden' ?>">
-    
-    <div style="background-color: #ffffff; border-radius: 24px; max-width: 1160px; width: 96vw; max-height: 90vh; padding: 28px 32px; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); position: relative; margin: auto; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto;" class="animate-fadeIn space-y-5">
-        
-        <button type="button" onclick="closeScanModal(false)" style="position: absolute; right: 20px; top: 20px; width: 34px; height: 34px; border-radius: 50%; background-color: #fef2f2; border: 1px solid #fecaca; color: #dc2626; font-size: 22px; font-weight: 800; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 20; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor='#fee2e2'; this.style.borderColor='#fca5a5'; this.style.color='#b91c1c';" onmouseout="this.style.backgroundColor='#fef2f2'; this.style.borderColor='#fecaca'; this.style.color='#dc2626';" title="Tutup Modal">&times;</button>
+<style>
+/* ── EXCEL-STYLE COLUMN FILTERS FOR MODAL BOX TABLE (MATCHING INSPECTION/INDEX.PHP) ── */
+.th-filter-wrapper {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    position: relative;
+    gap: 4px;
+}
+.th-filter-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    color: #475569 !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    background-color: #ffffff !important;
+    border: 1.5px solid #cbd5e1 !important;
+    flex-shrink: 0;
+    padding: 0;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.th-filter-btn:hover {
+    color: #1d4ed8 !important;
+    background-color: #dbeafe !important;
+    border-color: #3b82f6 !important;
+}
+.th-filter-btn.active {
+    color: #ffffff !important;
+    background-color: #2563eb !important;
+    border-color: #1d4ed8 !important;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.4);
+}
+.excel-filter-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    z-index: 99999 !important;
+    background-color: #ffffff !important;
+    border: 1.5px solid #94a3b8 !important;
+    border-radius: 9px;
+    box-shadow: 0 15px 25px -4px rgba(0, 0, 0, 0.25), 0 8px 10px -6px rgba(0, 0, 0, 0.15) !important;
+    width: 220px;
+    padding: 8px 10px;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: normal;
+    color: #0f172a;
+    display: none;
+    text-align: left;
+}
+.excel-filter-dropdown.align-right {
+    right: 0;
+    left: auto;
+}
+.excel-filter-dropdown.align-left {
+    left: 0;
+    right: auto;
+}
+.excel-filter-search {
+    width: 100%;
+    padding: 5px 8px;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 11px;
+    outline: none;
+    margin-bottom: 6px;
+    background-color: #ffffff;
+    color: #0f172a;
+    box-sizing: border-box;
+}
+.excel-filter-search:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px #bfdbfe;
+}
+.excel-quick-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2.5px 7px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 800;
+    cursor: pointer;
+    background-color: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    color: #334155;
+    transition: all 0.15s ease;
+}
+.excel-quick-btn:hover {
+    background-color: #e2e8f0;
+    border-color: #94a3b8;
+}
+.excel-reset-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 9.5px;
+    font-weight: 800;
+    cursor: pointer;
+    background-color: #fee2e2;
+    border: 1px solid #fca5a5;
+    color: #b91c1c;
+    transition: all 0.15s ease;
+}
+.excel-reset-btn:hover {
+    background-color: #fecaca;
+    border-color: #f87171;
+}
+.excel-apply-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 800;
+    cursor: pointer;
+    background-color: #2563eb;
+    border: 1px solid #1d4ed8;
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(37,99,235,0.3);
+    transition: all 0.15s ease;
+}
+.excel-apply-btn:hover {
+    background-color: #1d4ed8;
+}
+.excel-filter-list {
+    max-height: 120px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 3px 5px;
+    margin-bottom: 6px;
+    background-color: #f8fafc;
+}
+.excel-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2.5px 4px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #1e293b;
+    cursor: pointer;
+    user-select: none;
+}
+.excel-filter-item:hover {
+    background-color: #e2e8f0;
+}
+.excel-filter-item input[type="checkbox"] {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    accent-color: #2563eb;
+    cursor: pointer;
+}
 
-        <!-- Wizard Step Indicator Header -->
-        <div class="text-center space-y-2 flex-shrink-0">
-            <div class="flex items-center justify-center space-x-3 flex-wrap gap-y-1">
-                <button type="button" id="step-pill-1" onclick="backToStep1()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();backToStep1();}" style="background-color: #2563eb; color: #ffffff; padding: 5px 16px; border-radius: 9999px; font-size: 13px; font-weight: 800; display: inline-block; cursor: pointer; border: none; outline: none; transition: all 0.15s ease;" title="Klik atau tekan Enter untuk memilih Planning (Step 1)">
-                    1. Pilih Planning
+/* ── KPI INTERACTIVE CARD (HOVER & ACTIVE PRESS / MENCET EFFECT) ── */
+.kpi-interactive-card {
+    cursor: pointer !important;
+    user-select: none;
+    transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.12s ease, filter 0.12s ease !important;
+}
+.kpi-interactive-card:hover {
+    transform: translateY(-2.5px) !important;
+    box-shadow: 0 6px 14px -2px rgba(0, 0, 0, 0.12) !important;
+    filter: brightness(1.03);
+}
+.kpi-interactive-card:active {
+    transform: translateY(1.5px) scale(0.97) !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2) inset !important;
+    filter: brightness(0.95);
+}
+.kpi-interactive-card.kpi-active-selected {
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25) !important;
+}
+</style>
+
+<!-- Scan & Validation Dead-Center Modal Overlay (2-Step Wizard: Full Screen Workbench Edition) -->
+<div id="scan-modal-overlay" style="position: fixed; inset: 0; width: 100vw; height: 100vh; background-color: #0f172a; z-index: 999999; display: flex; flex-direction: column; padding: 0; margin: 0; overflow: hidden;" class="<?= $showScanOverlay ? '' : 'hidden' ?>">
+    
+    <div style="background-color: #f8fafc; width: 100vw; height: 100vh; display: flex; flex-direction: column; overflow: hidden;" class="animate-fadeIn">
+        
+        <!-- Header Bar Full-Screen (Option B: Minimalist Modern Enterprise Workbench) -->
+        <div style="background-color: #ffffff; border-bottom: 1.5px solid #e2e8f0; padding: 10px 22px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">
+            <!-- Title & Dynamic Step Context -->
+            <div class="flex items-center gap-3">
+                <div style="width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #ffffff; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 4px rgba(0,0,0,0.15);" class="flex-shrink-0">
+                    <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="flex items-center gap-2">
+                        <h2 class="text-sm font-black text-slate-900 leading-tight tracking-tight">OQC Inspection Workbench</h2>
+                        <span id="wizard-step-tag" style="background-color: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; font-size: 10px; font-weight: 800; padding: 1.5px 7px; border-radius: 9999px;">Langkah 1 dari 2</span>
+                    </div>
+                    <p id="wizard-modal-subtitle" class="text-[11.5px] text-slate-500 font-medium mt-0.5">Pilih Kanban atau Safety Stock yang akan diinspeksi</p>
+                </div>
+            </div>
+
+            <!-- Compact Minimalist Stepper Navigation -->
+            <div class="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg p-1">
+                <button type="button" id="step-pill-1" onclick="backToStep1()" 
+                        style="padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #2563eb; color: #ffffff;" 
+                        class="inline-flex items-center gap-1.5 shadow-xs" title="Langkah 1: Pilih Planning">
+                    <span style="width: 15px; height: 15px; border-radius: 9999px; background-color: rgba(255,255,255,0.25); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900;">1</span>
+                    <span>Pilih Planning</span>
                 </button>
-                <span style="color: #cbd5e1; font-weight: 800;" class="hidden sm:inline">&rarr;</span>
-                <button type="button" id="step-pill-2" onclick="goToStep2IfSelected()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();goToStep2IfSelected();}" style="background-color: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; padding: 5px 16px; border-radius: 9999px; font-size: 13px; font-weight: 700; display: inline-block; cursor: pointer; outline: none; transition: all 0.15s ease;" title="Klik atau tekan Enter untuk lanjut ke Scan Label QR (Step 2)">
-                    2. Scan Label QR
+                <svg class="w-3.5 h-3.5 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/>
+                </svg>
+                <button type="button" id="step-pill-2" onclick="goToStep2IfSelected()" 
+                        style="padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: transparent; color: #64748b;" 
+                        class="inline-flex items-center gap-1.5 hover:text-slate-900" title="Langkah 2: Scan Barcode Label">
+                    <span style="width: 15px; height: 15px; border-radius: 9999px; background-color: #e2e8f0; display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 800; color: #475569;">2</span>
+                    <span>Scan Barcode</span>
                 </button>
             </div>
-            <h2 id="wizard-modal-title" class="text-lg font-black text-slate-900 leading-tight">Step 1: Pilih Item Planning Aktif</h2>
-            <p id="wizard-modal-subtitle" class="text-sm text-slate-500 font-medium">Pilih Kanban / Safety Stock yang akan diinspeksi sebelum melakukan scan label</p>
+
+            <!-- Action Buttons Kanan Header -->
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <!-- Tombol Solid: Ganti Item (Hanya muncul saat berada di Step 2 Scan Barcode) -->
+                <button type="button" id="btn-change-item-header" onclick="backToStep1()" 
+                        style="display: none; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); color: #ffffff; border: 1.5px solid #0f172a; padding: 6px 14px; border-radius: 8px; font-size: 11.5px; font-weight: 800; cursor: pointer; align-items: center; gap: 6px; box-shadow: 0 2px 5px rgba(15, 23, 42, 0.25); transition: all 0.15s ease;"
+                        onmouseover="this.style.filter='brightness(1.15)'; this.style.transform='translateY(-1px)';"
+                        onmouseout="this.style.filter='none'; this.style.transform='translateY(0)';"
+                        title="Kembali ke Langkah 1 untuk memilih Kanban / Item lain">
+                    <svg style="width: 14px; height: 14px; color: #93c5fd; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                    <span>Ganti Item</span>
+                </button>
+
+                <!-- Tombol Ungu Eye-Catching: Safety Stock Gudang -->
+                <button type="button" onclick="toggleSafetyStockTab()" 
+                        style="background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); color: #ffffff; border: 1.5px solid #5b21b6; padding: 6px 14px; border-radius: 8px; font-size: 11.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(109, 40, 217, 0.35); transition: all 0.15s ease;"
+                        onmouseover="this.style.filter='brightness(1.1)'; this.style.transform='translateY(-1px)';"
+                        onmouseout="this.style.filter='none'; this.style.transform='translateY(0)';"
+                        title="Klik untuk inspeksi cek fisik stok gudang (Direct Safety Stock)">
+                    <svg style="width: 14px; height: 14px; color: #ede9fe; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+                    </svg>
+                    <span>+ Cek Safety Stock Gudang</span>
+                </button>
+
+                <!-- Tombol Tutup / Kembali -->
+                <button type="button" onclick="closeScanModal(false)" 
+                        style="background-color: #fef2f2; border: 1.5px solid #fecaca; color: #dc2626; font-size: 12px; font-weight: 800; padding: 6px 14px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.15s ease;" 
+                        onmouseover="this.style.backgroundColor='#fee2e2'; this.style.borderColor='#fca5a5';" 
+                        onmouseout="this.style.backgroundColor='#fef2f2'; this.style.borderColor='#fecaca';" 
+                        title="Tutup Modal">
+                    <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                    <span>Tutup</span>
+                </button>
+            </div>
         </div>
 
         <datalist id="modal-parts-list">
@@ -1180,27 +1680,149 @@ require_once __DIR__ . '/../../layouts/header.php';
             <?php endforeach; ?>
         </datalist>
 
-        <!-- ── STEP 1: PILIH PLANNING ITEM ─────────────────────────── -->
-        <div id="wizard-step-1-content" style="display: flex; flex-direction: column; min-height: 0; flex: 1;" class="space-y-3 overflow-hidden">
+        <!-- ── STEP 1: PILIH PLANNING ITEM (FULL-SCREEN TABLE ALIGNMENT WITH INDEX.PHP) ── -->
+        <div id="wizard-step-1-content" style="display: flex; flex-direction: column; min-height: 0; flex: 1; padding: 12px 20px; overflow: hidden;" class="space-y-2.5">
             
-            <!-- Tab Filter Tipe Planning (Default Prioritas Utama: KANBAN) -->
-            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;" class="flex-shrink-0">
-                <button type="button" id="tab-plan-kanban" onclick="setPlanningTypeTab('kanban')" style="background-color: #2563eb; color: #ffffff; border: 1px solid #1d4ed8; font-weight: 800; padding: 5px 12px; border-radius: 8px; font-size: 11px; cursor: pointer; box-shadow: 0 2px 4px rgba(37,99,235,0.3); display: inline-flex; align-items: center; gap: 5px;">
-                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                    <span>Kanban (Utama)</span>
-                </button>
-                <button type="button" id="tab-plan-partial" onclick="setPlanningTypeTab('partial')" style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; font-weight: 700; padding: 5px 12px; border-radius: 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
-                    <svg style="width: 13px; height: 13px; color: #f59e0b;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-                    <span>Cicilan (Parsial)</span>
-                </button>
-                <button type="button" id="tab-plan-safety_stock" onclick="setPlanningTypeTab('safety_stock')" style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; font-weight: 700; padding: 5px 12px; border-radius: 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
-                    <svg style="width: 13px; height: 13px; color: #7c3aed;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                    <span>Safety Stock</span>
-                </button>
+            <!-- ── TOP KPI SUMMARY & PERSONAL WORK TRACKER (STRICT 1 ROW WITH SIGNATURE BACKGROUNDS) ── -->
+            <div class="flex items-center gap-2 flex-shrink-0 w-full overflow-x-auto pb-0.5 custom-scrollbar select-none">
+                
+                <!-- Stat 1: Total Kanban (Khas: Blue Gradient) -->
+                <div id="kpi-btn-all" onclick="filterModalByStatus('all')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                     style="background: linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%); border: 1px solid #93c5fd; border-left: 4.5px solid #2563eb;" 
+                     title="Klik untuk tampilkan semua Kanban">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-blue-900 uppercase tracking-wider truncate">TOTAL KANBAN</span>
+                        <span class="w-4 h-4 rounded bg-blue-200/80 text-blue-700 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-total" class="text-sm font-black text-blue-950 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-blue-700">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Stat 2: Belum Mulai (Khas: Slate Gradient) -->
+                <div id="kpi-btn-uninspected" onclick="filterModalByStatus('uninspected')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                     style="background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%); border: 1px solid #cbd5e1; border-left: 4.5px solid #64748b;" 
+                     title="Klik untuk filter Kanban Belum Mulai">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-slate-700 uppercase tracking-wider truncate">BELUM MULAI</span>
+                        <span class="w-4 h-4 rounded bg-slate-200/90 text-slate-600 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-uninspected" class="text-sm font-black text-slate-800 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-slate-500">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Stat 3: Sedang Berjalan (Khas: Amber Gradient) -->
+                <div id="kpi-btn-in_progress" onclick="filterModalByStatus('in_progress')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                     style="background: linear-gradient(135deg, #fef3c7 0%, #ffedd5 100%); border: 1px solid #fcd34d; border-left: 4.5px solid #f59e0b;" 
+                     title="Klik untuk filter Kanban Sedang Berjalan">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-amber-900 uppercase tracking-wider truncate">BERJALAN</span>
+                        <span class="w-4 h-4 rounded bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0 relative">
+                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping absolute"></span>
+                            <span class="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-in_progress" class="text-sm font-black text-amber-950 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-amber-700">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Stat 4: Selesai (Khas: Emerald Gradient) -->
+                <div id="kpi-btn-completed" onclick="filterModalByStatus('completed')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                     style="background: linear-gradient(135deg, #dcfce7 0%, #d1fae5 100%); border: 1px solid #86efac; border-left: 4.5px solid #10b981;" 
+                     title="Klik untuk filter Kanban Selesai">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-emerald-900 uppercase tracking-wider truncate">SELESAI</span>
+                        <span class="w-4 h-4 rounded bg-emerald-200/80 text-emerald-800 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-completed" class="text-sm font-black text-emerald-950 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-emerald-700">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Stat 5: Lot NG / Tindakan (Khas: Rose Gradient) -->
+                <div id="kpi-btn-rejected" onclick="filterModalByStatus('rejected')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[125px]"
+                     style="background: linear-gradient(135deg, #ffe4e6 0%, #fecdd3 100%); border: 1px solid #fda4af; border-left: 4.5px solid #e11d48;" 
+                     title="Klik untuk filter Kanban dengan Lot NG / Tindakan">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-rose-900 uppercase tracking-wider truncate">LOT NG / TINDAKAN</span>
+                        <span class="w-4 h-4 rounded bg-rose-200/80 text-rose-700 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-rejected" class="text-sm font-black text-rose-950 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-rose-700">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Work Tracker: Pencapaian Saya Hari Ini (Khas: Indigo-Purple Gradient) -->
+                <div id="kpi-btn-my_kanban" onclick="filterModalByStatus('my_kanban')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-initial min-w-[340px]"
+                     style="background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-left: 4.5px solid #6366f1;"
+                     title="Klik untuk tampilkan hanya Kanban yang saya kerjakan hari ini">
+                    <div class="flex items-center justify-between gap-1 mb-1">
+                        <div class="flex items-center gap-1.5">
+                            <span class="w-1.5 h-1.5 rounded-full bg-indigo-600 animate-pulse"></span>
+                            <span class="text-[8.5px] font-black text-indigo-950 uppercase tracking-wider">PENCAPAIAN SAYA HARI INI</span>
+                        </div>
+                        <span class="text-[9px] font-black text-indigo-700 bg-indigo-100/90 border border-indigo-200 px-1.5 py-0.2 rounded truncate max-w-[120px]">
+                            <?= htmlspecialchars($currentUser['name'] ?? 'Saya') ?>
+                        </span>
+                    </div>
+                    <div class="bg-white/95 border border-indigo-100 rounded-md px-2.5 py-1 text-[11px] font-bold text-slate-700 shadow-3xs flex items-center justify-between gap-2 whitespace-nowrap">
+                        <div class="flex items-center gap-1">
+                            <span class="text-slate-600 font-semibold">Selesai:</span>
+                            <span class="font-mono font-black text-emerald-700"><span id="user-stat-completed-kb">0</span> Kanban</span>
+                        </div>
+                        <span class="text-slate-300 font-normal">|</span>
+                        <div class="flex items-center gap-1">
+                            <span class="text-slate-600 font-semibold">Lot:</span>
+                            <span class="font-mono font-black text-indigo-900"><span id="user-stat-total-lots">0</span> Box</span>
+                            <span class="text-[10px] text-slate-500 font-medium ml-0.5">(<span id="user-stat-passed-lots" class="text-emerald-700 font-black">0</span> P, <span id="user-stat-ng-lots" class="text-rose-600 font-black">0</span> NG)</span>
+                        </div>
+                    </div>
+                </div>
+
             </div>
 
-            <!-- Direct Safety Stock Scanning Banner (Tampil saat Tab Safety Stock dipilih) -->
-            <div id="safety-stock-direct-card" class="p-3.5 bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-300 rounded-xl space-y-2 text-xs shadow-xs hidden flex-shrink-0">
+            <!-- PITA GELOMBANG / BATCH PADA TANGGAL HARI INI + TUNGGAKAN KEMARIN -->
+            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);" class="flex-shrink-0">
+                <div class="flex items-center justify-between gap-2 mb-1.5">
+                    <div class="flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-blue-600 animate-pulse"></span>
+                        <span class="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                            Gelombang / Batch (Hari Ini - <?= date('d M Y') ?>):
+                        </span>
+                    </div>
+                    <span class="text-[11px] text-slate-500 font-medium hidden sm:inline">Pilih batch lembar fisik atau periksa tunggakan kemarin</span>
+                </div>
+
+                <!-- Container Tombol Tab Batch Dinamis -->
+                <div id="modal-batch-pills-bar" class="flex items-center gap-2 overflow-x-auto pb-1 custom-scrollbar">
+                    <!-- Default Spinner / Placeholder saat AJAX memuat batch -->
+                    <span class="text-xs text-slate-400 font-medium py-1">Memuat daftar batch hari ini...</span>
+                </div>
+            </div>
+
+            <!-- Direct Safety Stock Scanning Banner (Tampil HANYA jika tab Safety Stock aktif) -->
+            <div id="safety-stock-direct-card" class="p-3 bg-gradient-to-r from-purple-50 to-indigo-50 border-2 border-purple-300 rounded-xl space-y-2 text-xs shadow-xs hidden flex-shrink-0">
                 <div class="flex items-center space-x-2">
                     <span class="p-1.5 bg-purple-600 text-white rounded-lg flex items-center justify-center">
                         <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
@@ -1209,361 +1831,52 @@ require_once __DIR__ . '/../../layouts/header.php';
                         <h4 class="font-extrabold text-purple-900 text-xs">Cek Direct Safety Stock Barang Gudang</h4>
                         <p class="text-[10px] text-purple-700 font-medium">Inspeksi barang gudang tanpa planning list Excel. Langsung scan barcode QR (Z1..Z5) atau ketik form manual label barang.</p>
                     </div>
-                </div>
-                <button type="button" onclick="startDirectSafetyStockScan()" class="w-full py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white font-extrabold text-xs rounded-lg shadow-sm flex items-center justify-center space-x-1.5 transition-all">
-                    <span>Mulai Scan / Input Label Safety Stock Gudang &rarr;</span>
-                </button>
-            </div>
-
-            <div class="relative flex-shrink-0">
-                <input type="text" id="planning-search-input" autofocus autocomplete="off" onkeydown="handlePlanningSearchKeydown(event)" oninput="handlePlanningSearchInput()" placeholder="Cari Part Code, Item Description, Customer, atau No. Kanban... (Scan / Ketik)" class="form-input py-2.5 px-4 text-sm w-full font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none">
-            </div>
-
-            <!-- Planning Cards List Container (Strictly Scrollable Flex-1 Container) -->
-            <div id="planning-cards-container" style="flex: 1; min-height: 0; max-height: 48vh; overflow-y: auto; -webkit-overflow-scrolling: touch;" class="space-y-2 pr-1 divide-y divide-slate-100 border border-slate-200/80 rounded-xl p-2 bg-slate-50/50">
-                <?php if (empty($activePlanningItems)): ?>
-                    <div class="text-center py-6 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                        Belum ada data Planning (Kanban / Safety Stock) tersimpan di sistem.
-                    </div>
-                <?php else: ?>
-                    <?php foreach ($activePlanningItems as $idx => $plan): 
-                        $pCode = htmlspecialchars($plan['item_code']);
-                        $pDesc = htmlspecialchars($plan['item_description']);
-                        $pCust = htmlspecialchars($plan['customer'] ?? 'PT. Indonesia Epson Industry');
-                        
-                        $targetTotalQty = (int)$plan['qty'];
-                        $totalPassedQty = (int)($plan['total_passed_qty'] ?? 0);
-                        $remainingQty = max(0, $targetTotalQty - $totalPassedQty);
-                        $pQty = number_format($remainingQty);
-                        
-                        $isSafetyStock = ($plan['plan_type'] === 'safety_stock' || ($plan['batch_plan_type'] ?? '') === 'safety_stock' || strpos(strtoupper($plan['kanban_no'] ?? ''), 'SS') === 0);
-                        $pType = $isSafetyStock ? 'Safety Stock' : 'Kanban';
-                        $pCek  = !empty($plan['check_type']) ? htmlspecialchars($plan['check_type']) : '';
-                        
-                        // Format ETA (Human-Friendly Relative)
-                        $rawPlanEta = !empty($plan['eta']) ? $plan['eta'] : (!empty($plan['req_date']) ? $plan['req_date'] : '');
-                        $etaFormatted = format_relative_eta($rawPlanEta);
-                        $isEarliest = ($idx === 0);
-                    ?>
-                    <?php $isPartial = (!$isSafetyStock && $totalPassedQty > 0); ?>
-                    <div class="planning-card p-4 bg-white hover:bg-blue-50/80 border border-slate-200 hover:border-blue-400 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-4 shadow-2xs"
-                         data-plan-type="<?= $isSafetyStock ? 'safety_stock' : 'kanban' ?>"
-                         data-partial="<?= $isPartial ? 'true' : 'false' ?>"
-                         data-plan-code="<?= htmlspecialchars($plan['item_code'], ENT_QUOTES) ?>"
-                         data-plan-kanban-no="<?= htmlspecialchars($plan['kanban_no'] ?? '', ENT_QUOTES) ?>"
-                         onclick="selectPlanningItem(<?= (int)$plan['id'] ?>, '<?= addslashes($plan['item_code']) ?>', '<?= addslashes($plan['item_description']) ?>', '<?= addslashes($pCust) ?>', <?= (int)$remainingQty ?>, '<?= addslashes($pCek) ?>', '<?= $isSafetyStock ? 'safety_stock' : 'kanban' ?>', <?= (int)($plan['avail_ss_qty'] ?? 0) ?>, <?= $totalPassedQty ?>, <?= $targetTotalQty ?>, '<?= addslashes($plan['kanban_no'] ?? '') ?>', '<?= addslashes($plan['eta'] ?? $plan['req_date'] ?? '') ?>')">
-                        <div class="min-w-0 flex-1 space-y-1.5">
-                            <div class="flex items-center space-x-2 flex-wrap gap-y-1">
-                                <span class="font-mono font-black text-blue-700 text-sm"><?= $pCode ?></span>
-                                <span class="badge text-xs <?= $isSafetyStock ? 'bg-purple-100 text-purple-800 border border-purple-200 font-bold' : 'bg-blue-100 text-blue-800 border border-blue-200 font-bold' ?>"><?= $pType ?></span>
-                                <?php if ($pCek): ?>
-                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300"><?= $pCek ?> Cek</span>
-                                <?php endif; ?>
-                                <?php if ($totalPassedQty > 0 && !$isSafetyStock): ?>
-                                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-800 border border-indigo-300" title="Kanban ini diinspeksi secara bertahap / dicicil">Inspeksi Parsial: <?= number_format($totalPassedQty) ?> / <?= number_format($targetTotalQty) ?> pcs (Sisa <?= number_format($remainingQty) ?> pcs)</span>
-                                <?php endif; ?>
-
-
-                                <!-- ETA Schedule & Prioritas Badge -->
-                                <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold <?= $isEarliest ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-600 border border-slate-200' ?>">
-                                    <svg style="width: 12px; height: 12px; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                    <span>ETA: <?= $etaFormatted ?> <?= $isEarliest ? '(Prioritas P1)' : '' ?></span>
-                                </span>
-                            </div>
-                            <div class="font-bold text-slate-800 text-sm truncate"><?= $pDesc ?></div>
-                            <div class="text-xs text-slate-500 flex items-center space-x-2 flex-wrap">
-                                <span>Cust: <b><?= $pCust ?></b></span>
-                                <span>&middot;</span>
-                                <span>Target Sisa Qty: <b class="text-blue-700 font-extrabold"><?= $pQty ?> pcs</b> <?= ($totalPassedQty > 0) ? '(dari total ' . number_format($targetTotalQty) . ' pcs)' : '' ?></span>
-                                <?php if (!empty($plan['kanban_no']) && $plan['kanban_no'] !== '-'): ?>
-                                    <span>&middot;</span>
-                                    <span class="font-mono">No. Kanban: <b>#<?= htmlspecialchars($plan['kanban_no']) ?></b></span>
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                        <button type="button" class="btn-primary py-2 px-4 text-sm font-bold flex-shrink-0 shadow-2xs">
-                            Pilih &rarr;
-                        </button>
-                    </div>
-                    <?php endforeach; ?>
-                <?php endif; ?>
-            </div>
-
-            <!-- Step 1 Footer Action Bar (Batal / Kembali Button) -->
-            <div style="display: flex; align-items: center; justify-content: flex-end; padding-top: 10px; border-top: 1px solid #e2e8f0;" class="flex-shrink-0">
-                <button type="button" onclick="closeScanModal(false)" style="background-color: #fef2f2; color: #dc2626; border: 1.5px solid #fecaca; font-weight: 700; padding: 8px 18px; border-radius: 9px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor='#fee2e2'; this.style.borderColor='#fca5a5';" onmouseout="this.style.backgroundColor='#fef2f2'; this.style.borderColor='#fecaca';">
-                    Batal / Tutup
-                </button>
-            </div>
-        </div>
-
-        <!-- ── STEP 2: SCAN BARCODE LABEL ─────────────────────────── -->
-        <div id="wizard-step-2-content" style="flex: 1; min-height: 0; max-height: 62vh; overflow-x: hidden; overflow-y: auto;" class="space-y-3 hidden pr-0.5">
-            
-            <?php
-            $initKanbanNo = ($session && !empty($session['kanban_no'])) ? $session['kanban_no'] : '-';
-            $rawEta = ($session && !empty($session['kanban_eta'])) ? $session['kanban_eta'] : (($session && !empty($session['kanban_req_date'])) ? $session['kanban_req_date'] : '');
-            $initEtaStr = !empty($rawEta) ? format_relative_eta($rawEta) : '-';
-            ?>
-            <!-- Selected Planning Summary Banner (Industrial QC Cockpit Card - Compact Edition) -->
-            <div style="background-color: #ffffff; border: 1.5px solid #bfdbfe; border-radius: 12px; box-shadow: 0 2px 8px -2px rgba(37, 99, 235, 0.08); margin-bottom: 8px; overflow: hidden;">
-                
-                <!-- Header Baris Atas: Indikator Status & Aksi -->
-                <div style="background: linear-gradient(90deg, #eff6ff 0%, #f8fafc 100%); padding: 6px 14px; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <!-- Badge Aktif Status dengan Pulsing Dot -->
-                        <span style="display: inline-flex; align-items: center; gap: 5px; background-color: #1e40af; color: #ffffff; padding: 2.5px 9px; border-radius: 14px; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;">
-                            <span style="width: 6px; height: 6px; border-radius: 50%; background-color: #60a5fa; box-shadow: 0 0 6px #93c5fd;"></span>
-                            PLANNING AKTIF
-                        </span>
-
-                        <!-- Tipe Cek Badge (100% Cek / Sampling) -->
-                        <span id="selected-plan-tag" style="display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 800; color: #1e293b; background-color: #ffffff; border: 1px solid #cbd5e1; padding: 2px 8px; border-radius: 5px; text-transform: uppercase;">
-                            100% Cek
-                        </span>
-
-                        <span style="color: #64748b; font-size: 10.5px; font-weight: 600;">
-                            Pastikan label fisik box yang discan cocok dengan part berikut:
-                        </span>
-                    </div>
-
-                    <!-- Tombol Aksi Kanan -->
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <button type="button" onclick="backToStep1()" style="padding: 4px 10px; font-size: 11px; font-weight: 800; color: #1d4ed8; background-color: #ffffff; border: 1.5px solid #93c5fd; border-radius: 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor='#eff6ff'; this.style.borderColor='#3b82f6';" onmouseout="this.style.backgroundColor='#ffffff'; this.style.borderColor='#93c5fd';">
-                            <svg style="width: 12px; height: 12px; color: #2563eb;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                            <span>Ganti</span>
-                        </button>
-                        <button type="button" onclick="closeScanModal(false)" style="padding: 4px 9px; font-size: 11px; font-weight: 700; color: #dc2626; background-color: #ffffff; border: 1.5px solid #fecaca; border-radius: 7px; cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 3px;" onmouseover="this.style.backgroundColor='#fef2f2'; this.style.borderColor='#f87171';" onmouseout="this.style.backgroundColor='#ffffff'; this.style.borderColor='#fecaca';">
-                            <svg style="width: 12px; height: 12px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
-                            <span>Batal</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Body Utama: 3 Panel Grid Modern (Hero Part Info, ETA Schedule, Target & Customer) -->
-                <div style="padding: 10px 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: stretch;">
-                    
-                    <!-- PANEL 1: HERO PART INFO (KODE PART & NAMA PART) -->
-                    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border: 1.5px solid #334155; border-radius: 10px; padding: 9px 12px; color: #ffffff; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12);">
-                        <div>
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">
-                                <span style="font-size: 9px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; display: inline-flex; align-items: center; gap: 4px;">
-                                    <svg style="width: 12px; height: 12px; color: #38bdf8;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
-                                    KODE PART (Z1)
-                                </span>
-                                <span style="font-size: 8.5px; font-weight: 800; color: #38bdf8; background-color: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 6px; border-radius: 4px;">
-                                    VERIFIKASI
-                                </span>
-                            </div>
-                            <!-- KODE PART UTAMA BESAR -->
-                            <div style="padding: 4px 9px; background-color: rgba(0, 0, 0, 0.35); border: 1.5px solid rgba(56, 189, 248, 0.35); border-radius: 6px; margin: 2px 0 5px 0;">
-                                <span id="selected-plan-part-code" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 18px; font-weight: 900; color: #38bdf8; letter-spacing: 0.03em; display: block; line-height: 1.15; word-break: break-all;">
-                                    <?= htmlspecialchars($session['part_code'] ?? 'PART-CODE') ?>
-                                </span>
-                            </div>
-                        </div>
-                        
-                        <div style="border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 5px; margin-top: 2px;">
-                            <span style="font-size: 8.5px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; display: block; margin-bottom: 1px;">
-                                NAMA PART / MODEL:
-                            </span>
-                            <span id="selected-plan-desc" style="font-size: 13px; font-weight: 800; color: #f8fafc; line-height: 1.25; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="<?= htmlspecialchars($session['display_part_name'] ?? $session['part_name'] ?? '') ?>">
-                                <?= htmlspecialchars($session['display_part_name'] ?? $session['part_name'] ?? 'Description') ?>
-                            </span>
-                        </div>
-                    </div>
-
-                    <!-- PANEL 2: JADWAL PENGIRIMAN & KANBAN (ETA SCHEDULE) -->
-                    <div style="background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border: 1.5px solid #fcd34d; border-radius: 10px; padding: 9px 12px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 1px 4px rgba(245, 158, 11, 0.06);">
-                        <div>
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">
-                                <span style="font-size: 9px; font-weight: 800; color: #92400e; text-transform: uppercase; letter-spacing: 0.08em; display: inline-flex; align-items: center; gap: 4px;">
-                                    <svg style="width: 12px; height: 12px; color: #b45309;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                                    JADWAL PENGIRIMAN (ETA)
-                                </span>
-                            </div>
-                            <!-- WAKTU ETA BESAR -->
-                            <div id="selected-plan-eta-badge" style="padding: 4px 9px; background-color: #ffffff; border: 1.5px solid #f59e0b; border-radius: 6px; margin: 2px 0 5px 0; box-shadow: 0 1px 2px rgba(245, 158, 11, 0.08);">
-                                <span id="selected-plan-eta" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13.5px; font-weight: 900; color: #b45309; line-height: 1.2; display: block;">
-                                    <?= htmlspecialchars($initEtaStr) ?>
-                                </span>
-                            </div>
-                        </div>
-
-                        <div style="border-top: 1px solid #fde68a; padding-top: 5px; margin-top: 2px;">
-                            <span style="font-size: 8.5px; font-weight: 700; color: #92400e; text-transform: uppercase; letter-spacing: 0.05em; display: block; margin-bottom: 2px;">
-                                NOMOR IDENTIFIKASI KANBAN:
-                            </span>
-                            <span id="selected-plan-kanban-badge" style="display: inline-flex; align-items: center; gap: 5px; background-color: #0f172a; color: #ffffff; padding: 2.5px 8px; border-radius: 5px; font-size: 11px; font-weight: 800;">
-                                <svg style="width: 11px; height: 11px; color: #93c5fd; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                                <span style="color: #94a3b8; font-size: 9px; text-transform: uppercase;">No. KB:</span>
-                                <span id="selected-plan-kanban-no" style="font-family: monospace; font-size: 11.5px; color: #ffffff; font-weight: 900;"><?= htmlspecialchars($initKanbanNo) ?></span>
-                            </span>
-                        </div>
-                    </div>
-
-                    <!-- PANEL 3: CUSTOMER & TARGET KUOTA -->
-                    <div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 10px; padding: 9px 12px; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);">
-                        <div>
-                            <span style="font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; display: inline-flex; align-items: center; gap: 4px; margin-bottom: 2px;">
-                                <svg style="width: 12px; height: 12px; color: #64748b;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
-                                CUSTOMER / TUJUAN
-                            </span>
-                            <span id="selected-plan-cust" style="font-size: 12.5px; font-weight: 800; color: #1e293b; line-height: 1.25; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                                <?= htmlspecialchars($session['customer'] ?? '-') ?>
-                            </span>
-                        </div>
-
-                        <div style="border-top: 1px solid #e2e8f0; padding-top: 5px; margin-top: 4px;">
-                            <span style="font-size: 8.5px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; display: block; margin-bottom: 1px;">
-                                TARGET KUOTA INSPEKSI:
-                            </span>
-                            <div style="display: flex; align-items: baseline; gap: 4px;">
-                                <span id="selected-plan-qty" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 16px; font-weight: 900; color: #2563eb; line-height: 1.15;">
-                                    <?= number_format($session['kanban_qty'] ?? 0) ?> pcs
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-
-            </div>
-
-
-
-            <!-- Multi-Label Accumulation Progress & KPI Dashboard Card -->
-            <div style="background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
-                <!-- 3 KPI Metric Cards Grid (Strict 1 Horizontal Line: 3 Columns) -->
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                    
-                    <!-- KPI 1: Total Lot / Label Scanned (Blue/Sky Theme) -->
-                    <div style="background-color: #f0f9ff; border: 1.5px solid #bae6fd; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                        <div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.04em;">
-                            <span>TOTAL LOT / LABEL SCAN</span>
-                            <svg style="width: 17px; height: 17px; color: #0284c7;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
-                        </div>
-                        <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                            <span style="font-family: monospace; font-weight: 900; color: #0c4a6e; font-size: 20px;" id="kpi-label-count">0 Label</span>
-                            <span style="font-size: 11px; font-weight: 800; color: #0284c7;" id="kpi-unique-lots">0 Lot Unik</span>
-                        </div>
-                        <div id="kpi-ss-badge-container" class="hidden" style="font-size: 10.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; padding: 2.5px 8px; border-radius: 6px; border: 1px solid #ddd6fe; display: inline-block;">
-                            + <span id="kpi-ss-used-qty">0</span> pcs Safety Stock
-                        </div>
-                    </div>
-
-                    <!-- KPI 2: Total Qty Scanned vs Target (Emerald/Teal Theme) -->
-                    <div style="background-color: #ecfdf5; border: 1.5px solid #a7f3d0; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                        <div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 800; color: #047857; text-transform: uppercase; letter-spacing: 0.04em;">
-                            <span>TOTAL QTY AKUMULASI</span>
-                            <svg style="width: 17px; height: 17px; color: #059669;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-                        </div>
-                        <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                            <span style="font-family: monospace; font-weight: 900; color: #064e3b; font-size: 20px; white-space: nowrap;" id="scan-progress-counter">
-                                <span id="scanned-total-qty">0</span> / <span id="target-kanban-qty-display">0</span> <span style="font-size: 11px; font-weight: 800; color: #047857;">pcs</span>
-                            </span>
-                        </div>
-                        <div style="font-size: 11px; font-weight: 700; color: #059669; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="kpi-source-breakdown">
-                            0 pcs Scan Fisik
-                        </div>
-                    </div>
-
-                    <!-- KPI 3: Progress Percentage & Status (Indigo/Purple Theme) -->
-                    <div style="background-color: #f5f3ff; border: 1.5px solid #ddd6fe; border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                        <div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; font-weight: 800; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.04em;">
-                            <span id="kpi-3-title-label">PERSENTASE TERPENUHI</span>
-                            <svg style="width: 17px; height: 17px; color: #7c3aed;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        </div>
-                        <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                            <span style="font-family: monospace; font-weight: 900; color: #4c1d95; font-size: 20px;" id="kpi-progress-percent">0%</span>
-                            <span style="font-size: 11px; font-weight: 800; color: #b45309;" id="kpi-status-tag">Belum Lengkap</span>
-                        </div>
-                        <div style="font-size: 11px; font-weight: 700; color: #6d28d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="kpi-remain-detail">
-                            Sisa 0 pcs lagi
-                        </div>
-                    </div>
-
-                </div>
-
-                <!-- Progress Bar Container -->
-                <div id="scan-progress-bar-container" style="display: flex; flex-direction: column; gap: 4px; padding-top: 2px;">
-                    <div style="width: 100%; background-color: #cbd5e1; height: 10px; border-radius: 9999px; overflow: hidden;">
-                        <div id="scan-progress-bar" style="height: 100%; width: 0%; background-color: #2563eb; transition: all 0.3s ease;"></div>
-                    </div>
-                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: #64748b; font-weight: 600;">
-                        <span id="scan-status-msg">Scan label QR untuk mengumpulkan Qty...</span>
-                        <span id="scan-excess-msg" class="hidden" style="color: #4c1d95; font-weight: 800;">Sisa 0 pcs akan menjadi Safety Stock</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Smart QR Barcode Multi-Scan Input -->
-            <form id="modal-scan-form" onsubmit="event.preventDefault(); handleManualAddLabel();" class="space-y-3 text-xs w-full min-w-0">
-                
-                <div class="p-2.5 bg-blue-50/50 border border-blue-200 rounded-xl space-y-1">
-                    <label class="block font-extrabold text-slate-900 text-[11px] flex items-center justify-between">
-                        <span class="flex items-center">
-                            <svg class="w-3.5 h-3.5 mr-1 text-blue-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
-                            Scan Barcode / QR Code Label
-                        </span>
-                        <div class="flex items-center space-x-2">
-                            <button type="button" id="btn-toggle-autostart" onclick="toggleAutoStartMode()" class="px-2.5 py-1 rounded-lg text-[10px] font-extrabold bg-blue-600 text-white border border-blue-700 shadow-2xs cursor-pointer flex items-center space-x-1" title="Dalam mode ini, setelah 1 label QR di-scan, inspeksi langsung otomatis dimulai (tanpa perlu klik button). Tekan Alt+M untuk ubah.">
-                                <span>⚡ Mode Auto-Start (1 Label)</span>
-                            </button>
-                        </div>
-                    </label>
-                    <input type="text" id="scan-qr-raw" autofocus oninput="parseBarcodeQRInput(this.value, false)" onkeydown="handleScanInputKeydown(event)" placeholder="Tempel atau Scan Barcode / QR Code Label di sini..." class="form-input py-2 px-3 text-xs font-mono font-bold bg-white border-blue-400 focus:border-blue-600 w-full min-w-0 box-border" autocomplete="off">
-                    <p id="scan-help-text" class="text-[10px] text-slate-500 font-medium">Sistem membaca Ref No, Lot No, Qty secara otomatis. Scan bertahap hingga target Qty terpenuhi. Shortcut Mode: <kbd class="px-1 py-0.5 bg-slate-200 text-slate-700 rounded text-[9px] font-mono">Alt + M</kbd></p>
-                </div>
-
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full min-w-0">
-                    <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Part Code <span class="text-rose-500">*</span></label>
-                        <input type="text" id="scan-part-code" list="modal-parts-list" placeholder="190041102" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase w-full min-w-0 box-border" autocomplete="off">
-                    </div>
-                    <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Lot Number <span class="text-rose-500">*</span></label>
-                        <input type="text" id="scan-lot-number" value="064" placeholder="06426817" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase w-full min-w-0 box-border" autocomplete="off">
-                    </div>
-                    <div class="min-w-0">
-                        <label class="block font-extrabold text-slate-700 mb-1 text-[10px] truncate">Qty Box <span class="text-rose-500">*</span></label>
-                        <input type="number" id="scan-label-qty" min="1" placeholder="20" class="form-input py-1.5 px-2 text-xs font-mono font-bold w-full min-w-0 box-border" autocomplete="off">
-                    </div>
-                    <div class="min-w-0">
-                        <label class="block font-extrabold text-blue-700 mb-1 text-[10px] truncate">Ref Number <span class="text-rose-500">*</span></label>
-                        <input type="text" id="scan-ref-number" placeholder="KSKA" class="form-input py-1.5 px-2 text-xs font-mono font-bold uppercase bg-blue-50/50 border-blue-300 w-full min-w-0 box-border" autocomplete="off">
-                    </div>
-                </div>
-
-                <div class="flex items-center justify-between gap-2">
-                    <button type="button" onclick="handleManualAddLabel()" class="btn-secondary py-1.5 px-3 text-xs font-semibold flex items-center">
-                        + Tambah Label Manual
+                    <button type="button" onclick="startDirectSafetyStockScan()" class="py-2 px-4 bg-purple-600 hover:bg-purple-700 text-white font-extrabold text-xs rounded-lg shadow-sm flex items-center space-x-1.5 transition-all flex-shrink-0">
+                        <span>Mulai Scan Label Safety Stock &rarr;</span>
                     </button>
-                    <input type="hidden" id="scan-remarks" value="">
                 </div>
-            </form>
+            </div>
 
-            <!-- Table List Scanned Labels -->
-            <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs font-bold text-slate-800">
-                    <span>Daftar Label / Box yang Discan (<span id="scanned-labels-count" class="font-extrabold text-blue-700">0</span> Label):</span>
-                    <button type="button" onclick="clearAllScannedLabels()" class="text-xs text-rose-600 hover:text-rose-800 hover:underline font-bold cursor-pointer" id="btn-clear-labels" style="display: none;">Reset Scan</button>
+            <!-- SEARCH BAR + FILTER STATS -->
+            <div class="flex items-center gap-3 flex-shrink-0">
+                <div class="relative flex-1">
+                    <input type="text" id="planning-search-input" autofocus autocomplete="off" onkeydown="handlePlanningSearchKeydown(event)" oninput="handlePlanningSearchInput()" placeholder="Cari Part Code, Item Description, Customer, atau No. Kanban... (Scan Barcode / Ketik)" class="form-input py-2 px-4 text-xs w-full font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none rounded-lg border border-slate-300 bg-white">
                 </div>
-                <div class="border border-slate-200 rounded-xl overflow-hidden max-h-56 overflow-y-auto bg-white shadow-2xs">
-                    <table class="w-full text-left text-xs">
-                        <thead class="bg-slate-100 text-slate-700 font-extrabold border-b border-slate-200 uppercase text-[11px] tracking-wider">
+                <div id="planning-table-counter" class="text-xs font-bold text-slate-500 bg-slate-200/60 px-3 py-1.5 rounded-lg flex-shrink-0">
+                    Total: <span id="planning-visible-count" class="text-blue-700 font-extrabold">0</span> Part
+                </div>
+            </div>
+
+            <!-- TABEL KANBAN UTAMA (IDENTIK DENGAN INDEX.PHP) -->
+            <div style="flex: 1; min-height: 0; background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 12px; overflow: hidden; display: flex; flex-direction: column;" class="shadow-xs">
+                <div style="flex: 1; overflow-y: auto; overflow-x: auto;" class="custom-scrollbar">
+                    <table class="w-full text-left text-xs text-slate-700 table-fixed" style="border-collapse: collapse; min-width: 900px;">
+                        <colgroup>
+                            <col style="width: 45px;">
+                            <col style="width: 22%;">
+                            <col style="width: 26%;">
+                            <col style="width: 17%;">
+                            <col style="width: 15%;">
+                            <col style="width: 10%;">
+                            <col style="width: 100px;">
+                        </colgroup>
+                        <thead class="bg-slate-100 text-slate-700 font-extrabold border-b border-slate-200 uppercase tracking-wider text-[10.5px] sticky top-0 z-10 select-none">
                             <tr>
-                                <th class="px-3 py-2 text-center" style="width: 45px;">No</th>
-                                <th class="px-3 py-2">Ref No</th>
-                                <th class="px-3 py-2">Lot No</th>
-                                <th class="px-3 py-2 text-right" style="width: 120px;">Qty</th>
-                                <th class="px-3 py-2 text-center" style="width: 75px;">Aksi</th>
+                                <th class="text-center px-1.5 py-2.5">#</th>
+                                <th class="px-3 py-2.5">Kanban</th>
+                                <th class="px-3 py-2.5">Part</th>
+                                <th class="px-2.5 py-2.5 whitespace-nowrap">Jadwal &amp; ETA</th>
+                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap">Progres</th>
+                                <th class="px-2.5 py-2.5 text-center whitespace-nowrap">Status</th>
+                                <th class="px-3 py-2.5 text-center whitespace-nowrap">Aksi</th>
                             </tr>
                         </thead>
-                        <tbody id="scanned-labels-table-body" class="divide-y divide-slate-100 text-slate-700">
+                        <tbody id="planning-table-body" class="divide-y divide-slate-100">
+                            <!-- Di-render dinamis oleh JavaScript renderPlanningTableRows() -->
                             <tr>
-                                <td colspan="5" class="px-3 py-5 text-center text-slate-400 italic font-medium">
-                                    Belum ada label QR fisik yang discan. Silakan scan barcode label di atas.
+                                <td colspan="7" class="px-4 py-12 text-center text-slate-400">
+                                    <div class="inline-block animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2"></div>
+                                    <p class="font-bold text-slate-600 text-xs">Memuat data jadwal Kanban...</p>
                                 </td>
                             </tr>
                         </tbody>
@@ -1571,21 +1884,363 @@ require_once __DIR__ . '/../../layouts/header.php';
                 </div>
             </div>
 
-            <!-- Submit Final Button -->
-            <button type="button" id="btn-submit-scan-modal" onclick="triggerModalValidation()" class="btn-primary w-full py-2.5 text-xs font-bold flex items-center justify-center shadow-md shadow-blue-600/20" disabled style="opacity: 0.6;">
-                Validasi Matching & Muat Inspeksi
-            </button>
-
-            <div id="modal-loading" class="hidden text-center py-4 space-y-2">
-                <div class="inline-block animate-spin rounded-full h-7 w-7 border-4 border-blue-600 border-t-transparent"></div>
-                <p class="text-xs font-semibold text-slate-600">Memeriksa ketersediaan status DID & Matching Planning...</p>
+            <!-- Footer Status Bar -->
+            <div style="display: flex; align-items: center; justify-content: space-between; padding-top: 6px;" class="flex-shrink-0 text-[11px] text-slate-500">
+                <div class="flex items-center gap-2">
+                    <span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-slate-400"></span> Abu-abu: Belum Mulai</span>
+                    <span class="inline-flex items-center gap-1 ml-2"><span class="w-2 h-2 rounded-full bg-amber-500"></span> Kuning: Berjalan / Parsial</span>
+                    <span class="inline-flex items-center gap-1 ml-2"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> Hijau: Selesai</span>
+                    <span class="inline-flex items-center gap-1 ml-2"><span class="w-2 h-2 rounded-full bg-rose-600"></span> Merah: Reject / Lot NG</span>
+                </div>
+                <div>
+                    Tekan <b>Enter</b> pada kolom cari untuk auto-select baris pertama yang cocok
+                </div>
             </div>
+        </div>
 
-            <div id="modal-error-box" class="hidden p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 font-medium space-y-1">
-                <span class="font-bold block text-rose-900">⚠️ Validasi Gagal:</span>
-                <span id="modal-error-msg" class="whitespace-pre-line"></span>
+        <!-- ── STEP 2: SCAN BARCODE LABEL (SPLIT-SCREEN WORKBENCH: ZERO-SCROLL EDITION) ── -->
+        <div id="wizard-step-2-content" style="flex: 1; min-height: 0; padding: 12px 20px; overflow: hidden; display: flex; flex-direction: column;" class="hidden">
+            
+            <?php
+            $initKanbanNo = ($session && !empty($session['kanban_no'])) ? $session['kanban_no'] : '-';
+            $rawEta = ($session && !empty($session['kanban_eta'])) ? $session['kanban_eta'] : (($session && !empty($session['kanban_req_date'])) ? $session['kanban_req_date'] : '');
+            $initEtaStr = !empty($rawEta) ? format_relative_eta($rawEta) : '-';
+            ?>
+
+            <!-- Main 2-Column Split-Screen Workspace (Fills 100% Remaining Height, Zero-Scroll) -->
+            <div style="flex: 1; min-height: 0; display: flex; gap: 16px; overflow: hidden;">
+                
+                <!-- ◀ KOLOM KIRI: SCANNER OPERATIONS & PERSISTENT LIVE ALERT (~42% Width) -->
+                <div style="flex: 0 0 42%; min-width: 320px; max-width: 480px; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow-y: auto;" class="pr-1">
+                    
+                    <!-- 1. Compact Part & Kanban Identity Card -->
+                    <div style="background-color: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 10px; padding: 10px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.03); flex-shrink: 0;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                            <div style="display: flex; align-items: center; gap: 6px;">
+                                <span style="background-color: #1e293b; color: #ffffff; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 4px; text-transform: uppercase;">
+                                    PLANNING
+                                </span>
+                                <span id="selected-plan-tag" style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; font-size: 9.5px; font-weight: 800; padding: 2px 6px; border-radius: 4px; text-transform: uppercase;">
+                                    100% Cek
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Big Part Code Monospace -->
+                        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 8px; padding: 6px 12px; margin-bottom: 6px;">
+                            <span style="font-size: 9px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; display: block;">KODE PART (Z1)</span>
+                            <span id="selected-plan-part-code" style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 17px; font-weight: 900; color: #38bdf8; display: block; line-height: 1.2; word-break: break-all;">
+                                <?= htmlspecialchars($session['part_code'] ?? 'PART-CODE') ?>
+                            </span>
+                            <span id="selected-plan-desc" style="font-size: 11.5px; font-weight: 700; color: #f1f5f9; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px;" title="<?= htmlspecialchars($session['display_part_name'] ?? $session['part_name'] ?? '') ?>">
+                                <?= htmlspecialchars($session['display_part_name'] ?? $session['part_name'] ?? 'Description') ?>
+                            </span>
+                        </div>
+
+                        <!-- 2 Sub-data Row: No Kanban & ETA -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 10.5px;">
+                            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px;">
+                                <span style="color: #64748b; font-size: 9px; font-weight: 700; display: block;">NO. KANBAN</span>
+                                <span id="selected-plan-kanban-no" style="font-family: monospace; font-weight: 900; color: #0f172a; font-size: 11.5px;">#<?= htmlspecialchars($initKanbanNo) ?></span>
+                            </div>
+                            <div style="background-color: #fefce8; border: 1px solid #fef08a; border-radius: 6px; padding: 4px 8px;">
+                                <span style="color: #854d0e; font-size: 9px; font-weight: 700; display: block;">JADWAL (ETA)</span>
+                                <span id="selected-plan-eta" style="font-family: monospace; font-weight: 800; color: #a16207; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block;"><?= htmlspecialchars($initEtaStr) ?></span>
+                            </div>
+                        </div>
+                        <input type="hidden" id="selected-plan-cust" value="<?= htmlspecialchars($session['customer'] ?? '-') ?>">
+                        <input type="hidden" id="selected-plan-qty" value="<?= number_format($session['kanban_qty'] ?? 0) ?> pcs">
+                    </div>
+
+                    <!-- 2. Fast Scanner Primary Input (Auto-Focus, Eye-Level) -->
+                    <div style="background-color: #ffffff; border: 2px solid #3b82f6; border-radius: 10px; padding: 10px 14px; box-shadow: 0 2px 6px rgba(59, 130, 246, 0.12); flex-shrink: 0;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                            <label for="scan-qr-raw" style="font-size: 11.5px; font-weight: 900; color: #1e3a8a; display: inline-flex; align-items: center; gap: 5px;">
+                                <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                                <span>SCAN BARCODE / QR LABEL</span>
+                            </label>
+                            <button type="button" id="btn-toggle-manual-form" onclick="toggleManualFormVisibility()" style="font-size: 10px; font-weight: 700; color: #475569; background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 5px; padding: 2px 7px; cursor: pointer;" title="Klik jika scanner barcode rusak untuk input manual">
+                                ⌨️ Input Manual
+                            </button>
+                        </div>
+                        <input type="text" id="scan-qr-raw" autofocus oninput="parseBarcodeQRInput(this.value, false)" onkeydown="handleScanInputKeydown(event)" placeholder="Tempel / Scan Barcode Label di sini..." style="width: 100%; padding: 8px 12px; font-family: monospace; font-size: 13px; font-weight: 800; border: 1.5px solid #93c5fd; border-radius: 7px; outline: none; background-color: #f8fafc; color: #0f172a; box-sizing: border-box;" class="focus:bg-white focus:border-blue-600" autocomplete="off">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px; font-size: 10px; color: #64748b;">
+                            <span>Sistem membaca Ref No, Lot No, Qty otomatis</span>
+                            <button type="button" id="btn-toggle-autostart" onclick="toggleAutoStartMode()" style="color: #2563eb; font-weight: 800; background: none; border: none; cursor: pointer;">
+                                ⚡ Mode Auto-Start
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible Manual Input Form (Toggled via button if hardware scanner fails) -->
+                    <div id="manual-scan-form-container" class="hidden" style="background-color: #f8fafc; border: 1px dashed #94a3b8; border-radius: 8px; padding: 8px 12px; flex-shrink: 0;">
+                        <form id="modal-scan-form" onsubmit="event.preventDefault(); handleManualAddLabel();" class="space-y-2 text-xs">
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="block font-bold text-slate-700 text-[9.5px]">Part Code <span class="text-rose-500">*</span></label>
+                                    <input type="text" id="scan-part-code" list="modal-parts-list" class="form-input py-1 px-2 text-xs font-mono font-bold uppercase w-full box-border" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label class="block font-bold text-slate-700 text-[9.5px]">Lot Number <span class="text-rose-500">*</span></label>
+                                    <input type="text" id="scan-lot-number" value="064" class="form-input py-1 px-2 text-xs font-mono font-bold uppercase w-full box-border" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label class="block font-bold text-slate-700 text-[9.5px]">Qty Box <span class="text-rose-500">*</span></label>
+                                    <input type="number" id="scan-label-qty" min="1" placeholder="20" class="form-input py-1 px-2 text-xs font-mono font-bold w-full box-border" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label class="block font-bold text-blue-700 text-[9.5px]">Ref Number <span class="text-rose-500">*</span></label>
+                                    <input type="text" id="scan-ref-number" placeholder="KSKA" class="form-input py-1 px-2 text-xs font-mono font-bold uppercase w-full box-border" autocomplete="off">
+                                </div>
+                            </div>
+                            <input type="hidden" id="scan-remarks" value="">
+                            <div class="flex justify-end pt-1">
+                                <button type="button" onclick="handleManualAddLabel()" style="background-color: #2563eb; color: #ffffff; border: none; padding: 4px 12px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer;">
+                                    + Tambah Box Manual
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- 3. 🎯 DEDICATED IN-PLACE LIVE SCAN STATUS PANEL (Compact, Auto-Height) -->
+                    <div id="scan-live-status-panel" style="flex-shrink: 0; background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 9px; padding: 8px 12px; display: flex; flex-direction: column; justify-content: center; box-shadow: 0 1px 3px rgba(0,0,0,0.02); transition: all 0.2s ease;">
+                        <!-- Initial Neutral State -->
+                        <div id="live-status-content-neutral" style="text-align: center; color: #64748b; padding: 4px 0;">
+                            <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                                <div style="width: 24px; height: 24px; border-radius: 50%; background-color: #f1f5f9; display: inline-flex; align-items: center; justify-content: center;">
+                                    <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
+                                </div>
+                                <span style="font-size: 11px; font-weight: 700; color: #475569;">Siap Menembak Barcode Label Box</span>
+                            </div>
+                        </div>
+
+                        <!-- Success State Container (Filled via JS) -->
+                        <div id="live-status-content-success" class="hidden">
+                            <!-- Injected dynamically -->
+                        </div>
+
+                        <!-- Scan History Feed Container (Collapsible / Toggleable) -->
+                        <div id="live-status-content-history" class="hidden">
+                            <!-- Injected dynamically via renderScanHistoryDrawer() -->
+                        </div>
+
+                        <!-- Rejected State Container (Filled via JS) -->
+                        <div id="live-status-content-rejected" class="hidden">
+                            <!-- Injected dynamically -->
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- ▶ KOLOM KANAN: ACCUMULATION TARGET, BOX TABLE & ACTION BUTTON (~58% Width) -->
+                <div style="flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden; background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.03);">
+                    
+                    <!-- 1. Mini KPI Dashboard Cards & Progres Akumulasi (3 Compact Cards) -->
+                    <div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 10px; padding: 10px 12px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;">
+                        <!-- 3 Mini Cards Grid -->
+                        <div style="display: grid; grid-template-columns: 1.15fr 1.1fr 1fr; gap: 8px;">
+                            <!-- Card 1: Akumulasi Scan vs Target Kanban -->
+                            <div style="background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 8.5px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em;">TOTAL QTY / TARGET KANBAN</span>
+                                    <span id="kpi-progress-percent" style="font-family: monospace; font-size: 11px; font-weight: 900; color: #2563eb;">0%</span>
+                                </div>
+                                <div style="margin-top: 2px;">
+                                    <span id="scan-progress-counter" style="font-family: monospace; font-size: 16px; font-weight: 900; color: #0f172a; line-height: 1.2;">
+                                        <span id="scanned-total-qty">0</span> / <span id="target-kanban-qty-display">0</span> <span style="font-size: 10px; font-weight: 700; color: #64748b;">pcs</span>
+                                    </span>
+                                </div>
+                                <div style="font-size: 9.5px; font-weight: 700; color: #64748b; margin-top: 2px;" id="kpi-card1-subtext">
+                                    Menunggu scan box...
+                                </div>
+                            </div>
+
+                            <!-- Card 2: Total Box & Komposisi Sumber Box (Box Baru, Safety Stock) -->
+                            <div style="background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 8.5px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em;">TOTAL BOX TERVERIFIKASI</span>
+                                    <span style="font-size: 8.5px; font-weight: 800; color: #64748b; text-transform: uppercase;">SUMBER ASAL BOX</span>
+                                </div>
+                                <div style="margin-top: 2px;">
+                                    <span id="kpi-label-count" style="font-family: monospace; font-size: 16px; font-weight: 900; color: #0f172a; line-height: 1.2;">
+                                        0 <span style="font-size: 10px; font-weight: 700; color: #64748b;">Box</span>
+                                    </span>
+                                </div>
+                                <div id="kpi-lot-composition-badges" style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 2px;">
+                                    <span style="font-size: 9px; font-weight: 800; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 1.5px 6px; border-radius: 4px;">0 Box Baru</span>
+                                    <span style="font-size: 9px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 1.5px 6px; border-radius: 4px;">0 Box SS</span>
+                                </div>
+                                <span id="kpi-unique-lots" class="hidden"></span>
+                            </div>
+
+                            <!-- Card 3: Status Sesi & Surplus Safety Stock -->
+                            <div style="background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="font-size: 8.5px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em;">STATUS & SURPLUS</span>
+                                    <span id="kpi-status-tag" style="font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 9999px; background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a;">
+                                        Belum Lengkap
+                                    </span>
+                                </div>
+                                <div style="margin-top: 2px;">
+                                    <span id="kpi-remain-detail" style="font-family: monospace; font-size: 13.5px; font-weight: 800; color: #0f172a; display: block; line-height: 1.2;">
+                                        Sisa 0 pcs lagi
+                                    </span>
+                                </div>
+                                <div style="font-size: 9.5px; font-weight: 700; color: #64748b; margin-top: 2px;" id="scan-excess-msg">
+                                    Sesuai Kuota
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Progress Bar & Status Text Line -->
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <div style="width: 100%; background-color: #e2e8f0; height: 7px; border-radius: 9999px; overflow: hidden;" id="scan-progress-bar-container">
+                                <div id="scan-progress-bar" style="height: 100%; width: 0%; background-color: #2563eb; transition: width 0.3s ease;"></div>
+                            </div>
+                            <div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: #64748b;">
+                                <span id="scan-status-msg" style="font-weight: 600;">Scan barcode box fisik untuk mengakumulasi kuota</span>
+                                <span id="kpi-source-breakdown" style="font-weight: 700; color: #334155;"></span>
+                            </div>
+                        </div>
+
+                        <!-- Compatibility placeholders -->
+                        <div id="kpi-ss-badge-container" class="hidden"><span id="kpi-ss-used-qty">0</span></div>
+                    </div>
+
+                    <!-- 2. Scanned Boxes Table with Dedicated Internal Auto-Scroll -->
+                    <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; flex-shrink: 0;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-size: 11.5px; font-weight: 800; color: #1e293b;">
+                                    Daftar Box Terverifikasi (<span id="scanned-labels-count" style="color: #2563eb;">0</span> Box):
+                                </span>
+                                <button type="button" id="btn-reset-box-filters" onclick="resetAllModalBoxExcelFilters()" style="display: none; font-size: 9.5px; font-weight: 800; color: #2563eb; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 2px 7px; border-radius: 5px; cursor: pointer;" title="Reset filter kolom yang sedang aktif">
+                                    <span style="display: inline-flex; align-items: center; gap: 3px;">
+                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                                        <span>Reset Filter</span>
+                                    </span>
+                                </button>
+                            </div>
+                            <button type="button" onclick="clearAllScannedLabels()" id="btn-clear-labels" style="display: none; font-size: 10px; font-weight: 800; color: #b91c1c; background-color: #fee2e2; border: 1.5px solid #f87171; padding: 3px 9px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor='#fecaca'; this.style.borderColor='#ef4444';" onmouseout="this.style.backgroundColor='#fee2e2'; this.style.borderColor='#f87171';" title="Hapus semua label terverifikasi">
+                                <span style="display: inline-flex; align-items: center; gap: 4px;">
+                                    <svg style="width: 12px; height: 12px;" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                    Reset Semua
+                                </span>
+                            </button>
+                        </div>
+
+                        <div id="scanned-table-scroll-container" style="flex: 1; min-height: 0; overflow-y: auto; border: 1.5px solid #cbd5e1; border-radius: 8px; background-color: #ffffff; position: relative;">
+                            <table class="w-full text-left text-xs" style="border-collapse: collapse;">
+                                <thead style="position: sticky; top: 0; background-color: #f1f5f9; z-index: 20; border-bottom: 1.5px solid #cbd5e1;" class="text-[10.5px] font-extrabold text-slate-700 uppercase">
+                                    <tr>
+                                        <th class="px-2.5 py-2 text-center" style="width: 35px;">#</th>
+                                        
+                                        <!-- Kolom Lot Number dengan Excel Filter -->
+                                        <th class="px-3 py-2" style="position: relative;">
+                                            <div class="th-filter-wrapper">
+                                                <span>Lot Number</span>
+                                                <button type="button" class="th-filter-btn" data-box-col="lot" title="Filter Lot Number" onclick="toggleModalBoxExcelFilter(event, 'lot')">
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                                </button>
+                                            </div>
+                                            <!-- Dropdown Filter Lot -->
+                                            <div id="filter-dropdown-box-lot" class="excel-filter-dropdown align-left">
+                                                <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 5px; margin-bottom: 6px; border-bottom: 1px solid #e2e8f0;">
+                                                    <span style="font-size: 10.5px; font-weight: 800; color: #0f172a;">FILTER LOT NUMBER</span>
+                                                    <button type="button" class="excel-reset-btn" onclick="resetSingleModalBoxFilter('lot')">Reset</button>
+                                                </div>
+                                                <input type="text" class="excel-filter-search" placeholder="Cari Lot..." oninput="onSearchModalBoxFilterOptions('lot', this.value)">
+                                                <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('lot', true)">✓ Semua</button>
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('lot', false)">✕ Kosongkan</button>
+                                                </div>
+                                                <div id="filter-list-box-lot" class="excel-filter-list"></div>
+                                                <button type="button" class="excel-apply-btn" onclick="applyModalBoxExcelFilters()">Terapkan</button>
+                                            </div>
+                                        </th>
+
+                                        <!-- Kolom Ref No dengan Excel Filter -->
+                                        <th class="px-3 py-2" style="width: 120px; position: relative;">
+                                            <div class="th-filter-wrapper">
+                                                <span>Ref No</span>
+                                                <button type="button" class="th-filter-btn" data-box-col="ref" title="Filter Ref Number" onclick="toggleModalBoxExcelFilter(event, 'ref')">
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                                </button>
+                                            </div>
+                                            <!-- Dropdown Filter Ref -->
+                                            <div id="filter-dropdown-box-ref" class="excel-filter-dropdown align-left">
+                                                <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 5px; margin-bottom: 6px; border-bottom: 1px solid #e2e8f0;">
+                                                    <span style="font-size: 10.5px; font-weight: 800; color: #0f172a;">FILTER REF NO</span>
+                                                    <button type="button" class="excel-reset-btn" onclick="resetSingleModalBoxFilter('ref')">Reset</button>
+                                                </div>
+                                                <input type="text" class="excel-filter-search" placeholder="Cari Ref..." oninput="onSearchModalBoxFilterOptions('ref', this.value)">
+                                                <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('ref', true)">✓ Semua</button>
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('ref', false)">✕ Kosongkan</button>
+                                                </div>
+                                                <div id="filter-list-box-ref" class="excel-filter-list"></div>
+                                                <button type="button" class="excel-apply-btn" onclick="applyModalBoxExcelFilters()">Terapkan</button>
+                                            </div>
+                                        </th>
+
+                                        <!-- Kolom Asal / Riwayat dengan Excel Filter -->
+                                        <th class="px-3 py-2" style="width: 135px; position: relative;">
+                                            <div class="th-filter-wrapper">
+                                                <span>Asal / Riwayat</span>
+                                                <button type="button" class="th-filter-btn" data-box-col="origin" title="Filter Asal / Riwayat" onclick="toggleModalBoxExcelFilter(event, 'origin')">
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                                                </button>
+                                            </div>
+                                            <!-- Dropdown Filter Origin -->
+                                            <div id="filter-dropdown-box-origin" class="excel-filter-dropdown align-right">
+                                                <div style="display: flex; align-items: center; justify-content: space-between; padding-bottom: 5px; margin-bottom: 6px; border-bottom: 1px solid #e2e8f0;">
+                                                    <span style="font-size: 10.5px; font-weight: 800; color: #0f172a;">FILTER ASAL / RIWAYAT</span>
+                                                    <button type="button" class="excel-reset-btn" onclick="resetSingleModalBoxFilter('origin')">Reset</button>
+                                                </div>
+                                                <input type="text" class="excel-filter-search" placeholder="Cari Asal..." oninput="onSearchModalBoxFilterOptions('origin', this.value)">
+                                                <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('origin', true)">✓ Semua</button>
+                                                    <button type="button" class="excel-quick-btn" onclick="toggleSelectAllModalBoxFilter('origin', false)">✕ Kosongkan</button>
+                                                </div>
+                                                <div id="filter-list-box-origin" class="excel-filter-list"></div>
+                                                <button type="button" class="excel-apply-btn" onclick="applyModalBoxExcelFilters()">Terapkan</button>
+                                            </div>
+                                        </th>
+
+                                        <th class="px-3 py-2 text-right" style="width: 90px;">Qty Box</th>
+                                        <th class="px-2.5 py-2 text-center" style="width: 65px;">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="scanned-labels-table-body" class="divide-y divide-slate-100 text-slate-700">
+                                    <tr>
+                                        <td colspan="6" class="px-3 py-8 text-center text-slate-400 italic font-medium">
+                                            Belum ada label QR fisik yang discan. Silakan scan barcode box di sebelah kiri.
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 3. Sticky Bottom Action Controls (Always Visible, Zero-Scroll) -->
+                    <div style="flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding-top: 4px;">
+                        <button type="button" id="btn-submit-scan-modal" onclick="triggerModalValidation()" 
+                                style="flex: 1; background-color: #2563eb; color: #ffffff; border: none; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 2px 6px rgba(37,99,235,0.3); transition: all 0.15s ease;"
+                                onmouseover="this.style.backgroundColor='#1d4ed8';" onmouseout="this.style.backgroundColor='#2563eb';"
+                                disabled>
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                            <span>Validasi Matching & Mulai Inspeksi</span>
+                        </button>
+                    </div>
+
+                    <div id="modal-loading" class="hidden text-center py-2 space-y-1">
+                        <div class="inline-block animate-spin rounded-full h-5 w-5 border-2 border-blue-600 border-t-transparent"></div>
+                        <p class="text-[11px] font-semibold text-slate-600">Memeriksa ketersediaan status DID & Matching Planning...</p>
+                    </div>
+
+                </div>
+
             </div>
-
         </div>
 
     </div>
@@ -2172,7 +2827,7 @@ require_once __DIR__ . '/../../layouts/header.php';
                     </div>
                     <div style="grid-column: span 2;">
                         <button type="button" onclick="addManualBatchLabel()" style="padding: 7px 14px; background-color: #ffffff; border: 1.5px solid #cbd5e1; color: #334155; border-radius: 8px; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.15s;" onmouseover="this.style.backgroundColor='#f1f5f9'" onmouseout="this.style.backgroundColor='#ffffff'">
-                            + Tambah Label Manual
+                            + Input Label Manual
                         </button>
                     </div>
                 </div>
@@ -2436,6 +3091,7 @@ var currentSessionId = <?= $sessionId ?: 0 ?>;
 var currentSessionPartCode = '<?= htmlspecialchars($session['part_code'] ?? '', ENT_QUOTES) ?>';
 var currentSessionInspectionType = '<?= htmlspecialchars($session['inspection_type'] ?? 'kanban', ENT_QUOTES) ?>';
 var autoKanbanId = <?= (int)($_GET['kanban_id'] ?? $_GET['kanban_item_id'] ?? 0) ?>;
+var initialAutoKanbanItem = <?= json_encode($initialAutoKanbanItem ?? null) ?>;
 var autoScanType = '<?= htmlspecialchars(sanitize($_GET['type'] ?? $_GET['plan_type'] ?? ''), ENT_QUOTES) ?>';
 var prefilledScannedLot = '<?= htmlspecialchars(sanitize($_GET['scanned_lot'] ?? $_GET['lot_number'] ?? ''), ENT_QUOTES) ?>';
 var prefilledScannedRef = '<?= htmlspecialchars(sanitize($_GET['scanned_ref'] ?? $_GET['ref_number'] ?? ''), ENT_QUOTES) ?>';
@@ -2446,7 +3102,32 @@ var DEFECT_TYPES_LIST = <?= json_encode($defectTypes ?? []) ?>;
 <?php if ($showScanOverlay): ?>
 document.addEventListener('DOMContentLoaded', function() {
     setTimeout(function() {
-        openScanModal(0, autoScanType);
+        openScanModal(autoKanbanId, autoScanType);
+        
+        // Jika ada pre-fetched kanban item dari server, langsung lompat ke Langkah 2 (Scan Barcode Box)
+        if (initialAutoKanbanItem && parseInt(initialAutoKanbanItem.id) > 0) {
+            var targetTotalQty = parseInt(initialAutoKanbanItem.qty) || 0;
+            var totalPassedQty = parseInt(initialAutoKanbanItem.total_passed_qty) || 0;
+            var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);
+            var isSafetyStock = (initialAutoKanbanItem.plan_type === 'safety_stock' || (initialAutoKanbanItem.batch_plan_type || '') === 'safety_stock' || (initialAutoKanbanItem.kanban_no || '').toUpperCase().indexOf('SS') === 0);
+            var planTypeAttr = isSafetyStock ? 'safety_stock' : 'kanban';
+
+            selectPlanningItem(
+                parseInt(initialAutoKanbanItem.id),
+                initialAutoKanbanItem.item_code,
+                initialAutoKanbanItem.display_part_name || initialAutoKanbanItem.item_description,
+                initialAutoKanbanItem.customer || 'PT. Indonesia Epson Industry',
+                remainingQty,
+                initialAutoKanbanItem.check_type || '',
+                planTypeAttr,
+                0,
+                totalPassedQty,
+                targetTotalQty,
+                initialAutoKanbanItem.kanban_no || '',
+                initialAutoKanbanItem.eta || initialAutoKanbanItem.req_date || ''
+            );
+        }
+
         if (prefilledPartCode && document.getElementById('scan-part-code')) {
             document.getElementById('scan-part-code').value = prefilledPartCode;
         }
@@ -2590,16 +3271,16 @@ function parseBarcodeQR(code) {
     let parts = code.split('|');
     parts.forEach(function(p) {
         p = p.trim();
-        if (p.startsWith('Z1')) obj.Z1 = p.substring(2);
-        if (p.startsWith('Z2')) obj.Z2 = p.substring(2);
+        if (p.startsWith('Z1')) obj.Z1 = p.substring(2).trim().toUpperCase();
+        if (p.startsWith('Z2')) obj.Z2 = p.substring(2).trim().toUpperCase();
         if (p.startsWith('Z3')) {
             let valZ3 = parseInt(p.substring(2), 10);
             if (!isNaN(valZ3) && valZ3 > 0) {
                 obj.Z3 = valZ3;
             }
         }
-        if (p.startsWith('Z4')) obj.Z4 = p.substring(2);
-        if (p.startsWith('Z5')) obj.Z5 = p.substring(2);
+        if (p.startsWith('Z4')) obj.Z4 = p.substring(2).trim().toUpperCase();
+        if (p.startsWith('Z5')) obj.Z5 = p.substring(2).trim().toUpperCase();
     });
     return obj;
 }
@@ -2840,123 +3521,58 @@ function showDuplicatePassedModal(data, fallbackInfo, onClosedCallback) {
     var closedAt = details.closed_at || '-';
     var boxQty = parseInt(details.qty || fallbackInfo.qty || 0, 10);
 
-    var modalHtml = 
-        '<div style="text-align: left; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">' +
-            '<!-- Top Banner -->' +
-            '<div style="background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 50%, #fef2f2 100%); border: 1.5px solid #fda4af; border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(225,29,72,0.08);">' +
-                '<div style="display: flex; align-items: center; gap: 10px;">' +
-                    '<div style="width: 40px; height: 40px; border-radius: 11px; background: #e11d48; color: #ffffff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 4px 10px rgba(225,29,72,0.35);">' +
-                        '<svg style="width: 22px; height: 22px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>' +
-                    '</div>' +
-                    '<div style="flex: 1; min-width: 0;">' +
-                        '<div style="font-size: 11px; font-weight: 900; letter-spacing: 0.05em; color: #be123c; text-transform: uppercase;">DUPLIKASI DATA / LABEL SUDAH PASSED!</div>' +
-                        '<div style="font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; line-height: 1.3;">' +
-                            'Label box ini <span style="color: #e11d48; text-decoration: underline; text-decoration-color: #f43f5e;">sudah pernah diinspeksi & dinyatakan PASSED</span>.' +
-                        '</div>' +
-                    '</div>' +
+    // Render langsung ke In-Place Live Scan Alert Panel (Bawah Form Scan, Zero-Modal)
+    var panel = document.getElementById('scan-live-status-panel');
+    var neutralEl = document.getElementById('live-status-content-neutral');
+    var successEl = document.getElementById('live-status-content-success');
+    var rejectedEl = document.getElementById('live-status-content-rejected');
+
+    if (panel && neutralEl && successEl && rejectedEl) {
+        neutralEl.classList.add('hidden');
+        successEl.classList.add('hidden');
+        panel.style.backgroundColor = '#fff1f2';
+        panel.style.borderColor = '#f43f5e';
+
+        rejectedEl.innerHTML = 
+            '<!-- Header Status -->' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #fecdd3; padding-bottom: 5px; margin-bottom: 6px;">' +
+                '<div style="display: flex; align-items: center; gap: 6px;">' +
+                    '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: #e11d48; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(225,29,72,0.35);">✕</span>' +
+                    '<span style="font-size: 11.5px; font-weight: 900; color: #be123c; text-transform: uppercase; letter-spacing: 0.03em;">DUPLIKASI DATA / LABEL SUDAH PASSED!</span>' +
+                '</div>' +
+                '<span style="background-color: #0f172a; color: #34d399; border: 1px solid #334155; font-size: 9px; font-weight: 900; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">✓ ' + escapeHtml(sessBadgeText) + '</span>' +
+            '</div>' +
+            '<!-- Keterangan -->' +
+            '<div style="font-size: 11px; font-weight: 700; color: #881337; margin-bottom: 6px; line-height: 1.35;">' +
+                'Label box ini <span style="text-decoration: underline;">sudah pernah diinspeksi & dinyatakan PASSED</span>. Tidak dapat digunakan/discan ulang.' +
+            '</div>' +
+            '<!-- 3 Parameter Boxes: Lot No -> Ref No -> Qty Box (Urutan Standar OQC) -->' +
+            '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px;">' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">LOT NUMBER</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">#' + escapeHtml(lNum) + '</span>' +
+                '</div>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">REF NUMBER</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #be123c; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(rNum) + '</span>' +
+                '</div>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">QTY BOX</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2;">' + (boxQty > 0 ? boxQty.toLocaleString() : '-') + ' <span style="font-size: 9.5px; font-weight: 700; color: #64748b;">pcs</span></span>' +
                 '</div>' +
             '</div>' +
+            '<!-- Audit Info -->' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: #9f1239; background-color: #ffe4e6; padding: 3px 8px; border-radius: 5px;">' +
+                '<span>Part: <b>' + escapeHtml(pCode) + '</b> (' + escapeHtml(pName) + ')</span>' +
+                '<span>Inspector: <b>' + escapeHtml(inspector) + '</b></span>' +
+            '</div>';
 
-            '<!-- 4 Core Identifiers Cards Grid (2x2) -->' +
-            '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">' +
-                '<!-- 1. PART CODE -->' +
-                '<div style="background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">' +
-                    '<div style="font-size: 10px; font-weight: 800; letter-spacing: 0.05em; color: #475569; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 5px;">' +
-                        '<svg style="width: 13px; height: 13px; color: #0284c7;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"/></svg>' +
-                        'PART CODE' +
-                    '</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #0f172a; word-break: break-all; letter-spacing: 0.02em;">' +
-                        escapeHtml(pCode) +
-                    '</div>' +
-                '</div>' +
+        rejectedEl.classList.remove('hidden');
+    }
 
-                '<!-- 2. PART NAME -->' +
-                '<div style="background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">' +
-                    '<div style="font-size: 10px; font-weight: 800; letter-spacing: 0.05em; color: #475569; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 5px;">' +
-                        '<svg style="width: 13px; height: 13px; color: #059669;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>' +
-                        'PART NAME' +
-                    '</div>' +
-                    '<div style="font-size: 12px; font-weight: 800; color: #1e293b; line-height: 1.3; word-break: break-word;">' +
-                        escapeHtml(pName) +
-                    '</div>' +
-                '</div>' +
-
-                '<!-- 3. LOT NUMBER -->' +
-                '<div style="background: #eef2ff; border: 1.5px solid #c7d2fe; border-radius: 12px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">' +
-                    '<div style="font-size: 10px; font-weight: 800; letter-spacing: 0.05em; color: #4338ca; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 5px;">' +
-                        '<svg style="width: 13px; height: 13px; color: #6366f1;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>' +
-                        'LOT NUMBER' +
-                    '</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #312e81; word-break: break-all;">' +
-                        escapeHtml(lNum) +
-                    '</div>' +
-                '</div>' +
-
-                '<!-- 4. REF NUMBER (Z5) -->' +
-                '<div style="background: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 12px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">' +
-                    '<div style="font-size: 10px; font-weight: 800; letter-spacing: 0.05em; color: #be123c; text-transform: uppercase; margin-bottom: 4px; display: flex; align-items: center; gap: 5px;">' +
-                        '<svg style="width: 13px; height: 13px; color: #f43f5e;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"/></svg>' +
-                        'REF NUMBER (Z5)' +
-                    '</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #881337; word-break: break-all;">' +
-                        escapeHtml(rNum) +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
-
-            '<!-- Prior Session Inspection Audit Card -->' +
-            '<div style="background: #0f172a; border: 1.5px solid #1e293b; border-radius: 12px; padding: 11px 14px; color: #f8fafc; margin-bottom: 12px; box-shadow: 0 4px 12px rgba(15,23,42,0.15);">' +
-                '<div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; padding-bottom: 6px; margin-bottom: 8px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;">Riwayat Inspeksi Sebelumnya</div>' +
-                    '<span style="display: inline-block; font-size: 10px; font-weight: 900; background: rgba(16,185,129,0.2); color: #34d399; border: 1px solid rgba(16,185,129,0.4); padding: 1.5px 7px; border-radius: 9999px;">' +
-                        'PASSED (LOLOS OQC)' +
-                    '</span>' +
-                '</div>' +
-                '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 11px;">' +
-                    '<div>' +
-                        '<span style="color: #94a3b8; font-size: 9.5px; display: block;">Tercatat Pada:</span>' +
-                        '<span style="font-weight: 800; color: #ffffff; font-size: 11.5px;">' + escapeHtml(sessBadgeText) + '</span>' +
-                    '</div>' +
-                    '<div>' +
-                        '<span style="color: #94a3b8; font-size: 9.5px; display: block;">Inspector / PIC:</span>' +
-                        '<span style="font-weight: 700; color: #e2e8f0; font-size: 11px;">' + escapeHtml(inspector) + '</span>' +
-                    '</div>' +
-                    '<div>' +
-                        '<span style="color: #94a3b8; font-size: 9.5px; display: block;">Waktu Selesai:</span>' +
-                        '<span style="font-weight: 600; color: #cbd5e1; font-size: 10.5px;">' + escapeHtml(closedAt) + '</span>' +
-                    '</div>' +
-                    '<div>' +
-                        '<span style="color: #94a3b8; font-size: 9.5px; display: block;">Kuantitas Box:</span>' +
-                        '<span style="font-weight: 800; color: #fbbf24; font-size: 11.5px;">' + (boxQty > 0 ? (boxQty + ' pcs') : '-') + '</span>' +
-                    '</div>' +
-                '</div>' +
-            '</div>' +
-
-            '<!-- Policy Notice -->' +
-            '<div style="background: #fffbeb; border: 1.5px solid #fde68a; border-radius: 10px; padding: 9px 12px; font-size: 11px; color: #92400e; line-height: 1.45; display: flex; align-items: flex-start; gap: 8px;">' +
-                '<span style="font-size: 14px; line-height: 1; flex-shrink: 0; margin-top: 1px;">⚠️</span>' +
-                '<div>' +
-                    'Demi menjaga integritas data OQC dan mencegah <b>penghitungan ganda (double-counting)</b>, label yang sudah berstatus PASSED <b>tidak dapat digunakan atau discan ulang</b>. Silakan gunakan box/label lain.' +
-                '</div>' +
-            '</div>' +
-        '</div>';
-
-    Swal.fire({
-        html: modalHtml,
-        showConfirmButton: true,
-        confirmButtonText: 'OK, Mengerti',
-        confirmButtonColor: '#e11d48',
-        width: '560px',
-        padding: '1.25rem',
-        allowOutsideClick: false,
-        customClass: {
-            popup: 'rounded-2xl shadow-2xl border border-slate-100'
-        }
-    }).then(function() {
-        if (typeof onClosedCallback === 'function') {
-            onClosedCallback();
-        }
-    });
+    if (typeof onClosedCallback === 'function') {
+        onClosedCallback();
+    }
 }
 
 /**
@@ -3001,71 +3617,317 @@ function showDuplicateInProgressModal(data, fallbackInfo, onClosedCallback) {
     var lineName = details.line_name || '-';
     var inspector = details.inspector_name || 'Inspector QC';
 
-    var modalHtml = 
-        '<div style="text-align: left; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">' +
-            '<div style="background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 50%, #eff6ff 100%); border: 1.5px solid #93c5fd; border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; box-shadow: 0 2px 6px rgba(37,99,235,0.08);">' +
-                '<div style="display: flex; align-items: center; gap: 10px;">' +
-                    '<div style="width: 40px; height: 40px; border-radius: 11px; background: #2563eb; color: #ffffff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 4px 10px rgba(37,99,235,0.35);">' +
-                        '<svg style="width: 22px; height: 22px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
-                    '</div>' +
-                    '<div style="flex: 1; min-width: 0;">' +
-                        '<div style="font-size: 11px; font-weight: 900; letter-spacing: 0.05em; color: #1d4ed8; text-transform: uppercase;">LABEL SEDANG DALAM PROSES INSPEKSI!</div>' +
-                        '<div style="font-size: 12.5px; font-weight: 700; color: #1e293b; margin-top: 2px; line-height: 1.3;">' +
-                            'Label box ini sedang <span style="color: #2563eb; text-decoration: underline;">aktif diinspeksi pada sesi lain</span>.' +
-                        '</div>' +
-                    '</div>' +
+    // Render langsung ke In-Place Live Scan Alert Panel (Bawah Form Scan, Zero-Modal)
+    var panel = document.getElementById('scan-live-status-panel');
+    var neutralEl = document.getElementById('live-status-content-neutral');
+    var successEl = document.getElementById('live-status-content-success');
+    var rejectedEl = document.getElementById('live-status-content-rejected');
+
+    if (panel && neutralEl && successEl && rejectedEl) {
+        neutralEl.classList.add('hidden');
+        successEl.classList.add('hidden');
+        panel.style.backgroundColor = '#eff6ff';
+        panel.style.borderColor = '#3b82f6';
+
+        rejectedEl.innerHTML = 
+            '<!-- Header Status -->' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #bfdbfe; padding-bottom: 5px; margin-bottom: 6px;">' +
+                '<div style="display: flex; align-items: center; gap: 6px;">' +
+                    '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: #2563eb; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(37,99,235,0.35);">ℹ</span>' +
+                    '<span style="font-size: 11.5px; font-weight: 900; color: #1d4ed8; text-transform: uppercase; letter-spacing: 0.03em;">LABEL SEDANG DIINSPEKSI DI SESI LAIN!</span>' +
+                '</div>' +
+                '<span style="background-color: #0f172a; color: #60a5fa; border: 1px solid #334155; font-size: 9px; font-weight: 900; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">⚡ IN PROGRESS</span>' +
+            '</div>' +
+            '<!-- Keterangan -->' +
+            '<div style="font-size: 11px; font-weight: 700; color: #1e40af; margin-bottom: 6px; line-height: 1.35;">' +
+                'Label box ini sedang <span style="text-decoration: underline;">aktif diinspeksi pada ' + escapeHtml(sessBadgeText) + '</span> (Line: ' + escapeHtml(lineName) + '). Tidak dapat discan ganda.' +
+            '</div>' +
+            '<!-- 3 Parameter Boxes: Lot No -> Ref No -> Qty Box -->' +
+            '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px;">' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #bfdbfe; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #1d4ed8; text-transform: uppercase; display: block;">LOT NUMBER</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">#' + escapeHtml(lNum) + '</span>' +
+                '</div>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #bfdbfe; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #1d4ed8; text-transform: uppercase; display: block;">REF NUMBER</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #1d4ed8; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(rNum) + '</span>' +
+                '</div>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid #bfdbfe; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: #1d4ed8; text-transform: uppercase; display: block;">PART CODE</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2;">' + escapeHtml(pCode) + '</span>' +
                 '</div>' +
             '</div>' +
+            '<!-- Audit Info -->' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: #1e3a8a; background-color: #dbeafe; padding: 3px 8px; border-radius: 5px;">' +
+                '<span>Part: <b>' + escapeHtml(pName) + '</b></span>' +
+                '<span>Inspector: <b>' + escapeHtml(inspector) + '</b></span>' +
+            '</div>';
 
-            '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">' +
-                '<div style="background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 10px 12px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 4px;">PART CODE</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #0f172a;">' + escapeHtml(pCode) + '</div>' +
-                '</div>' +
-                '<div style="background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 10px 12px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 4px;">PART NAME</div>' +
-                    '<div style="font-size: 12px; font-weight: 800; color: #1e293b;">' + escapeHtml(pName) + '</div>' +
-                '</div>' +
-                '<div style="background: #eef2ff; border: 1.5px solid #c7d2fe; border-radius: 12px; padding: 10px 12px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #4338ca; text-transform: uppercase; margin-bottom: 4px;">LOT NUMBER</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #312e81;">' + escapeHtml(lNum) + '</div>' +
-                '</div>' +
-                '<div style="background: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 12px; padding: 10px 12px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #1d4ed8; text-transform: uppercase; margin-bottom: 4px;">REF NUMBER (Z5)</div>' +
-                    '<div style="font-size: 14px; font-weight: 900; font-family: monospace; color: #1e40af;">' + escapeHtml(rNum) + '</div>' +
-                '</div>' +
-            '</div>' +
+        rejectedEl.classList.remove('hidden');
+    }
 
-            '<div style="background: #0f172a; border: 1.5px solid #1e293b; border-radius: 12px; padding: 11px 14px; color: #f8fafc; margin-bottom: 12px;">' +
-                '<div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; padding-bottom: 6px; margin-bottom: 8px;">' +
-                    '<div style="font-size: 10px; font-weight: 800; color: #94a3b8; text-transform: uppercase;">Lokasi Inspeksi Aktif</div>' +
-                    '<span style="font-size: 10px; font-weight: 900; background: rgba(59,130,246,0.2); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); padding: 1.5px 7px; border-radius: 9999px;">IN PROGRESS</span>' +
-                '</div>' +
-                '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 11px;">' +
-                    '<div><span style="color: #94a3b8; font-size: 9.5px; display: block;">Aktif di:</span><span style="font-weight: 800; color: #ffffff;">' + escapeHtml(sessBadgeText) + '</span></div>' +
-                    '<div><span style="color: #94a3b8; font-size: 9.5px; display: block;">Line:</span><span style="font-weight: 800; color: #38bdf8;">' + escapeHtml(lineName) + '</span></div>' +
-                    '<div><span style="color: #94a3b8; font-size: 9.5px; display: block;">Inspector:</span><span style="font-weight: 700; color: #e2e8f0;">' + escapeHtml(inspector) + '</span></div>' +
-                '</div>' +
-            '</div>' +
+    if (typeof onClosedCallback === 'function') {
+        onClosedCallback();
+    }
+}
 
-            '<div style="background: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 10px; padding: 9px 12px; font-size: 11px; color: #1e40af;">' +
-                'Label tidak dapat discan bersamaan pada dua sesi berbeda. Selesaikan atau batalkan sesi aktif terlebih dahulu.' +
-            '</div>' +
-        '</div>';
+function toggleManualFormVisibility() {
+    var c = document.getElementById('manual-scan-form-container');
+    var btn = document.getElementById('btn-toggle-manual-form');
+    if (!c) return;
+    if (c.classList.contains('hidden')) {
+        c.classList.remove('hidden');
+        if (btn) btn.innerHTML = '✕ Tutup Form Manual';
+        var pCodeInp = document.getElementById('scan-part-code');
+        if (pCodeInp) setTimeout(function() { pCodeInp.focus(); }, 100);
+    } else {
+        c.classList.add('hidden');
+        if (btn) btn.innerHTML = '⌨️ Input Manual';
+        var rawInp = document.getElementById('scan-qr-raw');
+        if (rawInp) setTimeout(function() { rawInp.focus(); }, 100);
+    }
+}
 
-    Swal.fire({
-        html: modalHtml,
-        showConfirmButton: true,
-        confirmButtonText: 'OK, Mengerti',
-        confirmButtonColor: '#2563eb',
-        width: '560px',
-        padding: '1.25rem',
-        allowOutsideClick: false
-    }).then(function() {
-        if (typeof onClosedCallback === 'function') {
-            onClosedCallback();
+/**
+ * Update Dedicated In-Place Live Scan Alert Panel (Zero-Popup, Persistent)
+ */
+function toggleScanHistoryDrawer() {
+    var panel = document.getElementById('scan-live-status-panel');
+    var successEl = document.getElementById('live-status-content-success');
+    var historyEl = document.getElementById('live-status-content-history');
+    var rejectedEl = document.getElementById('live-status-content-rejected');
+    var neutralEl = document.getElementById('live-status-content-neutral');
+
+    if (!panel || !historyEl) return;
+
+    if (historyEl.classList.contains('hidden')) {
+        // Buka drawer riwayat
+        if (successEl) successEl.classList.add('hidden');
+        if (rejectedEl) rejectedEl.classList.add('hidden');
+        if (neutralEl) neutralEl.classList.add('hidden');
+
+        panel.style.backgroundColor = '#ffffff';
+        panel.style.borderColor = '#3b82f6';
+        renderScanHistoryDrawer();
+        historyEl.classList.remove('hidden');
+    } else {
+        // Tutup drawer riwayat dan kembali ke tampilan normal
+        historyEl.classList.add('hidden');
+        if (scannedLabelsList && scannedLabelsList.length > 0) {
+            if (successEl) successEl.classList.remove('hidden');
+        } else {
+            if (neutralEl) neutralEl.classList.remove('hidden');
+            panel.style.backgroundColor = '#ffffff';
+            panel.style.borderColor = '#e2e8f0';
         }
+    }
+}
+
+function renderScanHistoryDrawer() {
+    var historyEl = document.getElementById('live-status-content-history');
+    if (!historyEl) return;
+
+    var count = (typeof scannedLabelsList !== 'undefined') ? scannedLabelsList.length : 0;
+    if (count === 0) {
+        historyEl.innerHTML = 
+            '<div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; margin-bottom: 6px;">' +
+                '<span style="font-size: 11px; font-weight: 800; color: #1e293b;">🕒 RIWAYAT SCAN BOX</span>' +
+                '<button type="button" onclick="toggleScanHistoryDrawer()" style="font-size: 10px; font-weight: 800; color: #64748b; background: none; border: none; cursor: pointer;">✕ Tutup</button>' +
+            '</div>' +
+            '<div style="text-align: center; padding: 12px 0; color: #94a3b8; font-size: 11px; font-weight: 600;">Belum ada label sukses discan</div>';
+        return;
+    }
+
+    var itemsHtml = '';
+    // Urutan terbaru di paling atas (slice & reverse)
+    scannedLabelsList.slice().reverse().forEach(function(lbl, revIdx) {
+        var origIdx = count - revIdx; // Nomor box asli (1-based)
+        var refDisp = escapeHtml(lbl.Z5 || '-');
+        var lotDisp = escapeHtml(lbl.Z2 || '-');
+        var qtyDisp = (parseInt(lbl.Z3) || 0).toLocaleString();
+
+        var isLabelReinspect = lbl.was_rejected_before ||
+                              (lbl.remarks && (lbl.remarks.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.remarks.toUpperCase().indexOf('REINSPEKSI') !== -1)) ||
+                              (lbl.reinspection_notes && (lbl.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
+
+        var tagHtml = '';
+        var defectInfoHtml = '';
+        if (lbl.is_safety_stock_alloc) {
+            tagHtml = '<span style="font-size: 8.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 1px 5px; border-radius: 4px;">📦 Safety Stock</span>';
+        } else if (isLabelReinspect) {
+            tagHtml = '<span style="font-size: 8.5px; font-weight: 800; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 1px 5px; border-radius: 4px;">⚠️ Eks-NG</span>';
+            if (lbl.rejected_info && Array.isArray(lbl.rejected_info.ng_defects) && lbl.rejected_info.ng_defects.length > 0) {
+                var dStr = lbl.rejected_info.ng_defects.map(function(d){ return (d.defect_code ? '[' + escapeHtml(d.defect_code) + '] ' : '') + escapeHtml(d.defect_name || ''); }).join(', ');
+                defectInfoHtml = '<div style="font-size: 9.5px; color: #be123c; font-weight: 700; margin-top: 1px;">Riwayat NG: ' + dStr + '</div>';
+            }
+        } else {
+            tagHtml = '<span style="font-size: 8.5px; font-weight: 800; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 1px 5px; border-radius: 4px;">✓ Fresh</span>';
+        }
+
+        itemsHtml += 
+            '<div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; margin-bottom: 4px; display: flex; flex-direction: column;">' +
+                '<div style="display: flex; align-items: center; justify-content: space-between;">' +
+                    '<div style="display: flex; align-items: center; gap: 5px;">' +
+                        '<span style="font-family: monospace; font-size: 11px; font-weight: 900; color: #2563eb;">#' + origIdx + '</span>' +
+                        '<span style="font-family: monospace; font-size: 11px; font-weight: 800; color: #0f172a;">Lot #' + lotDisp + '</span>' +
+                        '<span style="font-size: 10px; color: #64748b;">(Ref: ' + refDisp + ')</span>' +
+                    '</div>' +
+                    '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        tagHtml +
+                        '<span style="font-family: monospace; font-size: 11.5px; font-weight: 900; color: #0f172a;">+' + qtyDisp + ' pcs</span>' +
+                    '</div>' +
+                '</div>' +
+                defectInfoHtml +
+            '</div>';
     });
+
+    historyEl.innerHTML = 
+        '<div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1.5px solid #cbd5e1; padding-bottom: 5px; margin-bottom: 6px;">' +
+            '<div style="display: flex; align-items: center; gap: 5px;">' +
+                '<span style="font-size: 11px; font-weight: 900; color: #1e293b;">🕒 RIWAYAT LABEL TERVERIFIKASI</span>' +
+                '<span style="font-size: 9.5px; font-weight: 800; background-color: #dbeafe; color: #1e40af; padding: 1px 6px; border-radius: 9999px;">' + count + ' Box</span>' +
+            '</div>' +
+            '<button type="button" onclick="toggleScanHistoryDrawer()" style="font-size: 10px; font-weight: 800; color: #2563eb; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 2px 7px; border-radius: 4px; cursor: pointer;" onmouseover="this.style.backgroundColor=\'#dbeafe\';" onmouseout="this.style.backgroundColor=\'#eff6ff\';">✕ Tutup</button>' +
+        '</div>' +
+        '<div style="max-height: 115px; overflow-y: auto; padding-right: 2px;">' +
+            itemsHtml +
+        '</div>';
+}
+
+function showLiveScanAlert(type, title, message, extraData) {
+    var panel = document.getElementById('scan-live-status-panel');
+    var neutralEl = document.getElementById('live-status-content-neutral');
+    var successEl = document.getElementById('live-status-content-success');
+    var rejectedEl = document.getElementById('live-status-content-rejected');
+    var historyEl = document.getElementById('live-status-content-history');
+
+    if (!panel || !neutralEl || !successEl || !rejectedEl) return;
+
+    neutralEl.classList.add('hidden');
+    successEl.classList.add('hidden');
+    rejectedEl.classList.add('hidden');
+    if (historyEl) historyEl.classList.add('hidden');
+
+    var historyCount = (typeof scannedLabelsList !== 'undefined') ? scannedLabelsList.length : 0;
+    var historyBtnHtml = (historyCount > 0) 
+        ? '<button type="button" onclick="toggleScanHistoryDrawer()" style="font-size: 9.5px; font-weight: 800; color: #1e40af; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 1.5px 6px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;" onmouseover="this.style.backgroundColor=\'#dbeafe\';" onmouseout="this.style.backgroundColor=\'#eff6ff\';" title="Lihat riwayat box yang berhasil discan">' +
+            '🕒 Riwayat (' + historyCount + ') ▾' +
+          '</button>'
+        : '';
+
+    if (type === 'success') {
+        extraData = extraData || {};
+
+        if (extraData.is_reinspect) {
+            // Tampilan Khusus Eks-NG / Rework: Kartu Amber dengan riwayat defect lengkap (Otomatis Diterima, Tanpa Tombol)
+            panel.style.backgroundColor = '#fffbeb';
+            panel.style.borderColor = '#f59e0b';
+
+            var info = extraData.rejected_info || {};
+            var defectsHtml = '';
+            if (Array.isArray(info.ng_defects) && info.ng_defects.length > 0) {
+                defectsHtml = info.ng_defects.map(function(d) {
+                    var dName = escapeHtml(d.defect_name || 'Defect');
+                    var dCode = d.defect_code ? ('[' + escapeHtml(d.defect_code) + '] ') : '';
+                    var dQty = (parseInt(d.qty_ng, 10) || 1) + ' pcs';
+                    return '<div style="display: flex; align-items: center; justify-content: space-between; padding: 3px 8px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 5px; margin-top: 3px; font-size: 11px;">' +
+                           '  <span style="font-weight: 700; color: #9f1239;">• ' + dCode + dName + '</span>' +
+                           '  <span style="font-weight: 800; color: #be123c; font-family: monospace;">' + dQty + '</span>' +
+                           '</div>';
+                }).join('');
+            } else if (info.remarks && info.remarks !== '-') {
+                defectsHtml = '<div style="padding: 4px 8px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 5px; margin-top: 3px; font-size: 11px; color: #9f1239; font-weight: 600;">' +
+                              '  Catatan: ' + escapeHtml(info.remarks) +
+                              '</div>';
+            } else {
+                defectsHtml = '<div style="font-size: 10.5px; color: #92400e; font-style: italic; padding: 2px 4px;">• Defect Eks-NG / Perbaikan Tercatat</div>';
+            }
+
+            successEl.innerHTML = 
+                '<!-- Header Warning Eks-NG -->' +
+                '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #fde68a; padding-bottom: 5px; margin-bottom: 6px;">' +
+                    '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: #d97706; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(217,119,6,0.35);">⚠️</span>' +
+                        '<span style="font-size: 11.5px; font-weight: 900; color: #92400e; text-transform: uppercase; letter-spacing: 0.03em;">PERINGATAN: LABEL PERNAH REJECTED!</span>' +
+                    '</div>' +
+                    '<div style="display: flex; align-items: center; gap: 4px;">' +
+                        '<span style="background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 9px; font-weight: 900; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">EKS-NG / REWORK</span>' +
+                        historyBtnHtml +
+                    '</div>' +
+                '</div>' +
+                '<!-- 3 Prominent Parameter Boxes: Lot No -> Ref No -> Qty Box -->' +
+                '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px;">' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #fde68a; border-radius: 7px; padding: 4px 7px;">' +
+                        '<span style="font-size: 8px; font-weight: 800; color: #92400e; text-transform: uppercase; display: block;">LOT NUMBER</span>' +
+                        '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">#' + escapeHtml(extraData.lot || '-') + '</span>' +
+                    '</div>' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #fde68a; border-radius: 7px; padding: 4px 7px;">' +
+                        '<span style="font-size: 8px; font-weight: 800; color: #92400e; text-transform: uppercase; display: block;">REF NUMBER</span>' +
+                        '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #b45309; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(extraData.ref || '-') + '</span>' +
+                    '</div>' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #fde68a; border-radius: 7px; padding: 4px 7px;">' +
+                        '<span style="font-size: 8px; font-weight: 800; color: #92400e; text-transform: uppercase; display: block;">QTY BOX MASUK</span>' +
+                        '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2;">+' + (extraData.qty || 0).toLocaleString() + ' <span style="font-size: 10px; font-weight: 700; color: #92400e;">pcs</span></span>' +
+                    '</div>' +
+                '</div>' +
+                '<!-- Rincian Defect Temuan (Informatif, Tanpa Tombol) -->' +
+                '<div style="background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; padding: 4px 8px;">' +
+                    '<span style="font-size: 9px; font-weight: 800; color: #9f1239; text-transform: uppercase; display: block; margin-bottom: 2px;">RIWAYAT DEFECT / NG SEBELUMNYA:</span>' +
+                    defectsHtml +
+                '</div>';
+        } else {
+            // Tampilan Standar Normal / Safety Stock
+            panel.style.backgroundColor = '#f0fdf4';
+            panel.style.borderColor = '#22c55e';
+
+            var historyTagHtml = '';
+            if (extraData.is_safety_stock) {
+                historyTagHtml = '<span style="background-color: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">📦 Safety Stock</span>';
+            } else {
+                historyTagHtml = '<span style="background-color: #ecfdf5; color: #166534; border: 1px solid #bbf7d0; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">✓ Lot Baru Fresh</span>';
+            }
+
+            successEl.innerHTML = 
+                '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #bbf7d0; padding-bottom: 5px; margin-bottom: 6px;">' +
+                    '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: #16a34a; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(22,163,74,0.35);">✓</span>' +
+                        '<span style="font-size: 12px; font-weight: 900; color: #15803d; text-transform: uppercase; letter-spacing: 0.03em;">' + escapeHtml(title || 'SCAN BERHASIL DITERIMA') + '</span>' +
+                    '</div>' +
+                    '<div style="display: flex; align-items: center; gap: 4px;">' +
+                        historyTagHtml +
+                        historyBtnHtml +
+                    '</div>' +
+                '</div>' +
+                '<!-- 3 Prominent Parameter Boxes: Lot No -> Ref No -> Qty Box -->' +
+                '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #bbf7d0; border-radius: 7px; padding: 5px 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">' +
+                        '<span style="font-size: 8.5px; font-weight: 800; color: #166534; text-transform: uppercase; letter-spacing: 0.04em; display: block;">LOT NUMBER</span>' +
+                        '<span style="font-family: monospace; font-size: 15px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">#' + escapeHtml(extraData.lot || '-') + '</span>' +
+                    '</div>' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #bbf7d0; border-radius: 7px; padding: 5px 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">' +
+                        '<span style="font-size: 8.5px; font-weight: 800; color: #166534; text-transform: uppercase; letter-spacing: 0.04em; display: block;">REF NUMBER</span>' +
+                        '<span style="font-family: monospace; font-size: 15px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(extraData.ref || '-') + '</span>' +
+                    '</div>' +
+                    '<div style="background-color: #ffffff; border: 1.5px solid #86efac; border-radius: 7px; padding: 5px 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">' +
+                        '<span style="font-size: 8.5px; font-weight: 800; color: #15803d; text-transform: uppercase; letter-spacing: 0.04em; display: block;">QTY BOX MASUK</span>' +
+                        '<span style="font-family: monospace; font-size: 15px; font-weight: 900; color: #15803d; display: block; line-height: 1.2;">+' + (extraData.qty || 0).toLocaleString() + ' <span style="font-size: 10px; font-weight: 700; color: #16a34a;">pcs</span></span>' +
+                    '</div>' +
+                '</div>';
+        }
+        successEl.classList.remove('hidden');
+    } else {
+        // Rejected / Error
+        panel.style.backgroundColor = '#fff1f2';
+        panel.style.borderColor = '#f43f5e';
+
+        rejectedEl.innerHTML = 
+            '<div style="display: flex; align-items: center; gap: 6px; margin-bottom: 3px;">' +
+                '<span style="width: 18px; height: 18px; border-radius: 50%; background-color: #e11d48; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0;">✕</span>' +
+                '<span style="font-size: 11.5px; font-weight: 900; color: #be123c; text-transform: uppercase;">' + escapeHtml(title || 'SCAN DITOLAK') + '</span>' +
+            '</div>' +
+            '<div style="font-size: 11px; font-weight: 700; color: #881337; line-height: 1.35; padding-left: 24px;">' + (message || '') + '</div>';
+        rejectedEl.classList.remove('hidden');
+    }
 }
 
 function addScannedLabelFromObj(lbl) {
@@ -3078,13 +3940,7 @@ function addScannedLabelFromObj(lbl) {
         if (document.getElementById('selected-plan-part-code')) document.getElementById('selected-plan-part-code').textContent = lbl.Z1;
         if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = lbl.Z1;
     } else if (selectedPlanningPartCode && lbl.Z1.toUpperCase() !== selectedPlanningPartCode.toUpperCase()) {
-        Swal.fire({
-            icon: 'error',
-            title: '⚠️ PART CODE TIDAK COCOK!',
-            html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                  'Part Code pada label (<b style="color:#be123c;">"' + escapeHtml(lbl.Z1) + '"</b>) tidak cocok dengan Part Code yang sedang diinspeksi (<b style="color:#0284c7;">"' + escapeHtml(selectedPlanningPartCode) + '"</b>)!' +
-                  '</div>'
-        });
+        showLiveScanAlert('rejected', 'PART CODE TIDAK COCOK', 'Label part code <b>"' + escapeHtml(lbl.Z1) + '"</b> tidak sesuai dengan part planning aktif <b>"' + escapeHtml(selectedPlanningPartCode) + '"</b>.');
         // Rollback & bersihkan field form
         if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = selectedPlanningPartCode;
         if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '064';
@@ -3101,21 +3957,14 @@ function addScannedLabelFromObj(lbl) {
     });
 
     if (isDuplicateRef) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Label Sudah Discan!',
-            text: 'Label QR dengan Ref Number Z5 (' + lbl.Z5 + ') sudah discan sebelumnya!'
-        });
+        showLiveScanAlert('rejected', 'DUPLIKASI LABEL DALAM SESI', 'Label dengan Ref No <b>' + escapeHtml(lbl.Z5) + '</b> sudah pernah discan dalam daftar di samping.');
+        clearScanFormInputs();
         return;
     }
 
     // 3. Real-Time Validation: DID, Safety Stock, In-Progress Lock, Already Passed, and Rejected Warning
-    Swal.fire({
-        title: 'Memeriksa Status Label...',
-        text: 'Memverifikasi status label Ref #' + (lbl.Z5 || lbl.Z2) + '...',
-        allowOutsideClick: false,
-        didOpen: function() { Swal.showLoading(); }
-    });
+    var statusPanelMsg = document.getElementById('scan-status-msg');
+    if (statusPanelMsg) statusPanelMsg.textContent = 'Memverifikasi status label Ref #' + (lbl.Z5 || lbl.Z2) + '...';
 
     var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only&part_code=' + encodeURIComponent(lbl.Z1) + 
                    '&lot_number=' + encodeURIComponent(lbl.Z2) + 
@@ -3285,28 +4134,7 @@ function addScannedLabelFromObj(lbl) {
                 }
 
                 // Error DID NG atau error validasi lainnya
-                Swal.fire({
-                    icon: 'error',
-                    title: 'VALIDASI LABEL GAGAL!',
-                    html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                          '<b style="color: #be123c;">' + escapeHtml(data.message || 'Lot Number tidak dapat digunakan.') + '</b>' +
-                          '<div style="margin-top: 10px; margin-bottom: 12px; background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">' +
-                          '  <div style="background-color: #f0f9ff; border: 1px solid #bae6fd; padding: 8px 10px; border-radius: 8px;">' +
-                          '    <span style="display: block; font-size: 9px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.05em;">PART CODE</span>' +
-                          '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #0c4a6e; margin-top: 2px;">' + escapeHtml(lbl.Z1) + '</span>' +
-                          '  </div>' +
-                          '  <div style="background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 8px 10px; border-radius: 8px;">' +
-                          '    <span style="display: block; font-size: 9px; font-weight: 800; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.05em;">LOT NUMBER</span>' +
-                          '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #4c1d95; margin-top: 2px;">' + escapeHtml(lbl.Z2) + '</span>' +
-                          '  </div>' +
-                          '</div>',
-                    confirmButtonColor: '#ef4444',
-                    timer: 3000,
-                    timerProgressBar: true,
-                    willClose: function() {
-                        clearScanFormInputs();
-                    }
-                });
+                showLiveScanAlert('rejected', 'VALIDASI LABEL GAGAL', escapeHtml(data.message || 'Lot Number tidak dapat digunakan.') + '<br><span style="font-family:monospace; font-size:11px;">Part: ' + escapeHtml(lbl.Z1) + ' | Lot: ' + escapeHtml(lbl.Z2) + '</span>');
                 clearScanFormInputs();
                 return;
             }
@@ -3334,89 +4162,13 @@ function addScannedLabelFromObj(lbl) {
                 }
             }
 
-            // Skenario 3: Label Sebelumnya Pernah REJECTED di Safety Stock atau Kanban Lain
+            // Skenario 3: Label Sebelumnya Pernah REJECTED (Eks-NG / Rework) -> Langsung diterima tanpa perlu klik konfirmasi
             if (data.was_rejected_before && data.rejected_info) {
                 lbl.was_rejected_before = true;
                 lbl.rejected_info = data.rejected_info;
-                var info = data.rejected_info;
-                var originText = (info.inspection_type === 'safety_stock') ? 'Safety Stock Gudang' : ('Sesi Kanban #' + info.session_id + (info.kanban_no && info.kanban_no !== '-' ? ' (' + info.kanban_no + ')' : ''));
-                var refNoDisplay = escapeHtml(lbl.Z5 || info.ref_number || '-');
-                var lotNoDisplay = escapeHtml(lbl.Z2 || info.lot_number || '-');
-                var qtyDisplay = (parseInt(lbl.Z3 || info.qty || 0, 10) || 0) + ' pcs';
-
-                var defectsHtml = '';
-                if (Array.isArray(info.ng_defects) && info.ng_defects.length > 0) {
-                    defectsHtml = info.ng_defects.map(function(d) {
-                        var dName = escapeHtml(d.defect_name || 'Defect');
-                        var dCode = d.defect_code ? ('[' + escapeHtml(d.defect_code) + '] ') : '';
-                        var dQty = (parseInt(d.qty_ng, 10) || 1) + ' pcs';
-                        return '<div style="display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; margin-top: 4px; font-size: 11px;">' +
-                               '  <span style="font-weight: 700; color: #9f1239;">• ' + dCode + dName + '</span>' +
-                               '  <span style="font-weight: 800; color: #be123c; font-family: monospace;">' + dQty + '</span>' +
-                               '</div>';
-                    }).join('');
-                } else if (info.remarks && info.remarks !== '-') {
-                    defectsHtml = '<div style="padding: 6px 8px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px; margin-top: 4px; font-size: 11px; color: #9f1239; font-weight: 600;">' +
-                                  '  Catatan: ' + escapeHtml(info.remarks) +
-                                  '</div>';
-                } else {
-                    defectsHtml = '<div style="font-size: 11px; color: #64748b; font-style: italic;">Rincian defect spesifik tidak tercatat</div>';
-                }
-
-                var modalHtml = 
-                '<div style="font-size: 12px; text-align: left; line-height: 1.5; color: #334155;">' +
-                '  <p style="margin-bottom: 10px; color: #64748b;">Label box yang Anda scan sebelumnya tercatat ber-status <b style="color: #be123c;">REJECTED (NG)</b>.</p>' +
-                '  <div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 12px; padding: 10px; margin-bottom: 10px;">' +
-                '    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px;">' +
-                '      <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 5px 8px; border-radius: 6px;">' +
-                '        <span style="display: block; font-size: 8.5px; font-weight: 800; color: #1e40af; text-transform: uppercase;">REF NO</span>' +
-                '        <span style="display: block; font-family: monospace; font-size: 12px; font-weight: 900; color: #1e3a8a;">' + refNoDisplay + '</span>' +
-                '      </div>' +
-                '      <div style="background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 5px 8px; border-radius: 6px;">' +
-                '        <span style="display: block; font-size: 8.5px; font-weight: 800; color: #6d28d9; text-transform: uppercase;">LOT NO</span>' +
-                '        <span style="display: block; font-family: monospace; font-size: 12px; font-weight: 900; color: #4c1d95;">' + lotNoDisplay + '</span>' +
-                '      </div>' +
-                '      <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; padding: 5px 8px; border-radius: 6px;">' +
-                '        <span style="display: block; font-size: 8.5px; font-weight: 800; color: #15803d; text-transform: uppercase;">QTY BOX</span>' +
-                '        <span style="display: block; font-family: monospace; font-size: 12px; font-weight: 900; color: #14532d;">' + qtyDisplay + '</span>' +
-                '      </div>' +
-                '    </div>' +
-                '    <div style="margin-bottom: 8px;">' +
-                '      <span style="display: block; font-size: 10px; font-weight: 800; color: #9f1239; text-transform: uppercase; margin-bottom: 2px;">RINCIAN TEMUAN DEFECT / NG:</span>' +
-                       defectsHtml +
-                '    </div>' +
-                '    <div style="border-top: 1px solid #e2e8f0; margin-top: 8px; padding-top: 6px; font-size: 10.5px; color: #475569; display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px;">' +
-                '      <div><b>Inspector:</b> ' + escapeHtml(info.inspector_name) + '</div>' +
-                '      <div><b>Waktu:</b> ' + escapeHtml(info.closed_at) + '</div>' +
-                '      <div style="grid-column: span 2;"><b>Asal Sesi:</b> ' + escapeHtml(originText) + '</div>' +
-                '    </div>' +
-                '  </div>' +
-                '  <div style="background-color: #fffbeb; border: 1.5px solid #fde68a; padding: 9px 12px; border-radius: 8px; color: #92400e; font-weight: 700; font-size: 11.5px; text-align: center;">' +
-                '    Apakah barang ini sudah diperbaiki dan dipastikan benar untuk diinspeksi kembali?' +
-                '  </div>' +
-                '</div>';
-
-                Swal.fire({
-                    icon: 'warning',
-                    title: 'PERINGATAN: LABEL PERNAH REJECTED!',
-                    html: modalHtml,
-                    showCancelButton: true,
-                    confirmButtonColor: '#10b981',
-                    cancelButtonColor: '#ef4444',
-                    confirmButtonText: 'Ya, Sudah Benar (Terima)',
-                    cancelButtonText: 'Belum / Batalkan (Tolak)',
-                    allowOutsideClick: false
-                }).then(function(result) {
-                    if (result.isConfirmed) {
-                        proceedAddLabelToList(lbl);
-                    } else {
-                        clearScanFormInputs();
-                    }
-                });
-                return;
             }
 
-            // Normal Box: Langsung tambahkan ke list
+            // Langsung tambahkan box ke list (baik Fresh maupun Eks-NG)
             proceedAddLabelToList(lbl);
         })
         .catch(function(err) {
@@ -3429,6 +4181,7 @@ function addScannedLabelFromObj(lbl) {
             });
         });
 }
+
 
 function proceedAddLabelToList(lbl) {
     var isSafetyStock = (typeof selectedPlanningType !== 'undefined' && selectedPlanningType === 'safety_stock') || (typeof currentPlanTypeTab !== 'undefined' && currentPlanTypeTab === 'safety_stock');
@@ -3533,8 +4286,17 @@ function proceedAddLabelToList(lbl) {
             progressHtml +
         '</div>';
 
-    // Auto-Start: Safety Stock selalu 1 Lot otomatis langsung mulai inspeksi workbench!
     var isAutoStartActive = isSafetyStock || (autoStartSingleLabel && selectedPlanningType !== 'kanban');
+
+    // Update in-place persistent live scan status panel (Zero-popup)
+    showLiveScanAlert('success', 'BOX #' + boxIndex + ' BERHASIL DISCAN', 'Box fisik berhasil diverifikasi dan ditambahkan ke daftar kuota.', {
+        ref: refDisp,
+        lot: lotDisp,
+        qty: parseInt(lbl.Z3) || 0,
+        is_safety_stock: lbl.is_safety_stock_alloc,
+        is_reinspect: lbl.was_rejected_before,
+        rejected_info: lbl.rejected_info
+    });
 
     if (isAutoStartActive) {
         if (typeof Toast !== 'undefined' && typeof Toast.fire === 'function') {
@@ -3543,23 +4305,6 @@ function proceedAddLabelToList(lbl) {
                 title: isSafetyStock ? 'Label Discan (1 Lot Safety Stock) - Memuat Inspeksi...' : 'Label Discan (1 Box) - Memuat Inspeksi...'
             });
         }
-    } else if (typeof Swal !== 'undefined' && typeof Swal.fire === 'function') {
-        Swal.fire({
-            icon: 'success',
-            html: modalHtml,
-            width: '600px',
-            padding: '24px 28px',
-            timer: 1800,
-            showConfirmButton: false,
-            allowOutsideClick: true,
-            customClass: {
-                popup: 'rounded-3xl shadow-2xl border border-slate-200'
-            },
-            willClose: function() {
-                var rawInp = document.getElementById('scan-qr-raw');
-                if (rawInp) rawInp.focus();
-            }
-        });
     }
 
     if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = lbl.Z1;
@@ -3567,6 +4312,14 @@ function proceedAddLabelToList(lbl) {
 
     clearScanFormInputs();
     renderScannedLabelsTable();
+
+    // Auto-scroll table container to the newly added row
+    setTimeout(function() {
+        var tableContainer = document.getElementById('scanned-table-scroll-container');
+        if (tableContainer) {
+            tableContainer.scrollTop = tableContainer.scrollHeight;
+        }
+    }, 60);
 
     if (isAutoStartActive) {
         setTimeout(function() {
@@ -3673,8 +4426,30 @@ function removeScannedLabel(index) {
 }
 
 function clearAllScannedLabels() {
-    scannedLabelsList = [];
-    renderScannedLabelsTable();
+    if (scannedLabelsList.length === 0) return;
+    if (typeof Swal !== 'undefined') {
+        Swal.fire({
+            title: 'Hapus Semua Label?',
+            text: 'Seluruh ' + scannedLabelsList.length + ' box terverifikasi pada sesi ini akan di-reset.',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#dc2626',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Ya, Reset Semua',
+            cancelButtonText: 'Batal',
+            reverseButtons: true
+        }).then(function(res) {
+            if (res.isConfirmed) {
+                scannedLabelsList = [];
+                renderScannedLabelsTable();
+            }
+        });
+    } else {
+        if (confirm('Yakin ingin mereset semua label terverifikasi?')) {
+            scannedLabelsList = [];
+            renderScannedLabelsTable();
+        }
+    }
 }
 
 function renderScannedLabelsTable() {
@@ -3710,38 +4485,47 @@ function renderScannedLabelsTable() {
     if (!tbody) return;
 
     if (scannedLabelsList.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-3 py-5 text-center text-slate-400 font-medium text-xs">Belum ada label QR fisik yang discan.' + (usedSsQty > 0 ? ' (Menggunakan ' + usedSsQty.toLocaleString() + ' pcs Safety Stock)' : '') + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="px-3 py-8 text-center text-slate-400 font-medium text-xs">Belum ada label QR fisik yang discan. Silakan scan barcode box di sebelah kiri.' + (usedSsQty > 0 ? ' (Menggunakan ' + usedSsQty.toLocaleString() + ' pcs Safety Stock)' : '') + '</td></tr>';
     } else {
         var html = '';
         scannedLabelsList.forEach(function(lbl, idx) {
             var refDisp = lbl.Z5 ? escapeHtml(lbl.Z5) : '-';
-            var lotDisp = escapeHtml(lbl.Z2);
+            var lotDisp = escapeHtml(lbl.Z2 || '-');
             var qtyDisp = (parseInt(lbl.Z3) || 0).toLocaleString();
 
             var isLabelReinspect = lbl.was_rejected_before ||
                                   (lbl.remarks && (lbl.remarks.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.remarks.toUpperCase().indexOf('REINSPEKSI') !== -1)) ||
                                   (lbl.reinspection_notes && (lbl.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
-            var badgesHtml = '';
-            if (isLabelReinspect) {
-                // Tampilkan badge netral — item pernah re-inspeksi tapi TIDAK berarti masih NG
-                badgesHtml += '<div style="margin-top:2px;"><span style="font-size: 9px; font-weight: 700; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 1px 5px; border-radius: 4px; display: inline-block;">Pernah Re-Inspeksi</span></div>';
-            }
+            
+            var historyBadgeHtml = '';
             if (lbl.is_safety_stock_alloc) {
-                badgesHtml += '<div style="margin-top:2px;"><span style="font-size: 9px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 1px 5px; border-radius: 4px; display: inline-block;">SAFETY STOCK</span></div>';
+                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">📦 Asal: Safety Stock</span>';
+            } else if (isLabelReinspect) {
+                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">⚠️ Riwayat: Eks-NG</span>';
+            } else {
+                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 700; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">✓ Lot Baru (Fresh)</span>';
             }
 
-            html += '<tr class="hover:bg-blue-50/50 transition-colors border-b border-slate-100">' +
-                        '<td class="px-3 py-2.5 font-extrabold text-slate-400 text-xs text-center">' + (idx + 1) + '</td>' +
-                        '<td class="px-3 py-2.5 font-mono font-black text-blue-700 text-xs tracking-wide">' + refDisp + badgesHtml + '</td>' +
-                        '<td class="px-3 py-2.5 font-mono font-bold text-slate-800 text-xs">' + lotDisp + '</td>' +
-                        '<td class="px-3 py-2.5 font-mono font-black text-slate-900 text-right text-xs">' + qtyDisp + ' <span class="text-[10px] font-bold text-slate-500">pcs</span></td>' +
-                        '<td class="px-3 py-2.5 text-center">' +
-                            '<div class="flex items-center justify-center space-x-2">' +
-                                '<button type="button" onclick="editScannedLabelQty(' + idx + ')" style="background-color: #2563eb; border: 1.5px solid #1d4ed8; color: #ffffff; width: 32px; height: 32px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 1px 3px rgba(37,99,235,0.35); transition: all 0.15s ease;" onmouseover="this.style.backgroundColor=\'#1d4ed8\'; this.style.borderColor=\'#1e40af\';" onmouseout="this.style.backgroundColor=\'#2563eb\'; this.style.borderColor=\'#1d4ed8\';" title="Edit Qty Box">' +
-                                    '<svg style="width: 15px; height: 15px;" fill="none" stroke="#ffffff" stroke-width="2.3" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>' +
+            var originVal = 'fresh';
+            if (lbl.is_safety_stock_alloc) {
+                originVal = 'safety_stock';
+            } else if (isLabelReinspect) {
+                originVal = 'reinspect';
+            }
+
+            html += '<tr class="scanned-box-row hover:bg-blue-50/50 transition-colors border-b border-slate-100" data-box-lot="' + escapeHtml(lbl.Z2 || '-') + '" data-box-ref="' + escapeHtml(lbl.Z5 || '-') + '" data-box-origin="' + originVal + '">' +
+                        '<td class="px-2.5 py-2 font-mono font-bold text-slate-400 text-xs text-center">' + (idx + 1) + '</td>' +
+                        '<td class="px-3 py-2 font-mono font-bold text-slate-800 text-xs">#' + lotDisp + '</td>' +
+                        '<td class="px-3 py-2 font-mono font-black text-blue-700 text-xs tracking-wide">' + refDisp + '</td>' +
+                        '<td class="px-3 py-2 whitespace-nowrap">' + historyBadgeHtml + '</td>' +
+                        '<td class="px-3 py-2 font-mono font-black text-slate-900 text-right text-xs">' + qtyDisp + ' <span class="text-[10px] font-bold text-slate-400">pcs</span></td>' +
+                        '<td class="px-2.5 py-2 text-center whitespace-nowrap">' +
+                            '<div class="flex items-center justify-center space-x-1.5">' +
+                                '<button type="button" onclick="editScannedLabelQty(' + idx + ')" style="background-color: #f1f5f9; border: 1px solid #cbd5e1; color: #2563eb; width: 26px; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor=\'#eff6ff\'; this.style.borderColor=\'#3b82f6\';" onmouseout="this.style.backgroundColor=\'#f1f5f9\'; this.style.borderColor=\'#cbd5e1\';" title="Edit Qty Box">' +
+                                    '<svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>' +
                                 '</button>' +
-                                '<button type="button" onclick="removeScannedLabel(' + idx + ')" style="background-color: #dc2626; border: 1.5px solid #b91c1c; color: #ffffff; width: 32px; height: 32px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 1px 3px rgba(220,38,38,0.35); transition: all 0.15s ease;" onmouseover="this.style.backgroundColor=\'#b91c1c\'; this.style.borderColor=\'#991b1b\';" onmouseout="this.style.backgroundColor=\'#dc2626\'; this.style.borderColor=\'#b91c1c\';" title="Hapus Label Ini">' +
-                                    '<svg style="width: 15px; height: 15px;" fill="none" stroke="#ffffff" stroke-width="2.6" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>' +
+                                '<button type="button" onclick="removeScannedLabel(' + idx + ')" style="background-color: #fef2f2; border: 1px solid #fecaca; color: #dc2626; width: 26px; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease;" onmouseover="this.style.backgroundColor=\'#fee2e2\'; this.style.borderColor=\'#f87171\';" onmouseout="this.style.backgroundColor=\'#fef2f2\'; this.style.borderColor=\'#fecaca\';" title="Hapus Label Ini">' +
+                                    '<svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>' +
                                 '</button>' +
                             '</div>' +
                         '</td>' +
@@ -3752,24 +4536,52 @@ function renderScannedLabelsTable() {
 
     if (countSpan) countSpan.textContent = scannedLabelsList.length;
 
-    // Update 3 KPI Dashboard Cards
+    // Update 3 Mini KPI Dashboard Cards
     var kpiLabelCount = document.getElementById('kpi-label-count');
     var kpiUniqueLots = document.getElementById('kpi-unique-lots');
+    var kpiLotBadgesContainer = document.getElementById('kpi-lot-composition-badges');
+    var kpiCard1Subtext = document.getElementById('kpi-card1-subtext');
     var kpiSsBadgeContainer = document.getElementById('kpi-ss-badge-container');
     var kpiSsUsedQty = document.getElementById('kpi-ss-used-qty');
 
     if (kpiLabelCount) {
-        kpiLabelCount.textContent = scannedLabelsList.length + ' Label';
+        kpiLabelCount.innerHTML = scannedLabelsList.length + ' <span style="font-size: 10px; font-weight: 700; color: #64748b;">Box</span>';
     }
-    if (kpiUniqueLots) {
-        var uniqueLotMap = {};
-        scannedLabelsList.forEach(function(l) {
-            var lotStr = (l.Z2 || '').trim();
-            if (lotStr) uniqueLotMap[lotStr] = true;
-        });
-        var uCount = Object.keys(uniqueLotMap).length;
-        kpiUniqueLots.textContent = uCount + ' Lot Unik';
+
+    // Hitung rincian komposisi BOX fisik (bukan lot unik) agar 100% klop dengan total box
+    var freshBoxCount = 0;
+    var ssBoxCount = 0;
+    var reinspectBoxCount = 0;
+
+    scannedLabelsList.forEach(function(l) {
+        var isReinspect = l.was_rejected_before ||
+                          (l.remarks && (l.remarks.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || l.remarks.toUpperCase().indexOf('REINSPEKSI') !== -1)) ||
+                          (l.reinspection_notes && (l.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || l.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
+        
+        if (l.is_safety_stock_alloc) {
+            ssBoxCount++;
+        } else if (isReinspect) {
+            reinspectBoxCount++;
+        } else {
+            freshBoxCount++;
+        }
+    });
+
+    if (kpiLotBadgesContainer) {
+        var badgesHtml = '';
+        if (freshBoxCount > 0 || (ssBoxCount === 0 && reinspectBoxCount === 0)) {
+            badgesHtml += '<span style="font-size: 9px; font-weight: 800; color: #047857; background-color: #ecfdf5; border: 1px solid #a7f3d0; padding: 1.5px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">' + freshBoxCount + ' Box Baru</span>';
+        }
+        if (ssBoxCount > 0 || usedSsQty > 0) {
+            var ssDisplayCount = ssBoxCount > 0 ? ssBoxCount : 1;
+            badgesHtml += '<span style="font-size: 9px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 1.5px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">📦 ' + ssDisplayCount + ' Box SS</span>';
+        }
+        if (reinspectBoxCount > 0) {
+            badgesHtml += '<span style="font-size: 9px; font-weight: 800; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 1.5px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">⚠️ ' + reinspectBoxCount + ' Box Eks-NG</span>';
+        }
+        kpiLotBadgesContainer.innerHTML = badgesHtml;
     }
+
     if (kpiSsBadgeContainer && kpiSsUsedQty) {
         if (usedSsQty > 0) {
             kpiSsUsedQty.textContent = usedSsQty.toLocaleString();
@@ -3784,7 +4596,7 @@ function renderScannedLabelsTable() {
     var kpiSourceBreakdown = document.getElementById('kpi-source-breakdown');
     if (kpiSourceBreakdown) {
         if (isPartialKanban) {
-            kpiSourceBreakdown.textContent = '⚡ Cicilan Sesi Ini: ' + effectiveTotalScanned.toLocaleString() + ' / ' + selectedPlanningQty.toLocaleString() + ' pcs (Passed: ' + selectedPlanningTotalPassedQty.toLocaleString() + ' pcs)';
+            kpiSourceBreakdown.textContent = '⚡ Cicilan: ' + effectiveTotalScanned.toLocaleString() + ' / ' + selectedPlanningQty.toLocaleString() + ' pcs (Passed: ' + selectedPlanningTotalPassedQty.toLocaleString() + ' pcs)';
         } else if (usedSsQty > 0 && physicalScanned > 0) {
             kpiSourceBreakdown.textContent = usedSsQty.toLocaleString() + ' SS + ' + physicalScanned.toLocaleString() + ' Fisik';
         } else if (usedSsQty > 0) {
@@ -3794,26 +4606,25 @@ function renderScannedLabelsTable() {
         }
     }
 
-    var kpi3TitleLabel = document.getElementById('kpi-3-title-label');
     var kpiProgressPercent = document.getElementById('kpi-progress-percent');
     var kpiStatusTag = document.getElementById('kpi-status-tag');
     var kpiRemainDetail = document.getElementById('kpi-remain-detail');
     var progressContainer = document.getElementById('scan-progress-bar-container');
 
-    // KPI 2: Total Qty Display (Gudang: Total Single Qty; Kanban: Rasio Scanned / Target)
+    // KPI 1: Total Qty Display & Subtext
     var counterEl = document.getElementById('scan-progress-counter');
     if (counterEl) {
         if (isSafetyStock) {
-            counterEl.innerHTML = '<span id="scanned-total-qty">' + physicalScanned.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #047857;">pcs</span>';
+            counterEl.innerHTML = '<span id="scanned-total-qty">' + physicalScanned.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #64748b;">pcs (Lot Bebas)</span>';
         } else if (isPartialKanban) {
             var accumKanban = selectedPlanningTotalPassedQty + effectiveTotalScanned;
-            counterEl.innerHTML = '<span id="scanned-total-qty">' + accumKanban.toLocaleString() + '</span> / <span id="target-kanban-qty-display">' + selectedPlanningTargetTotalQty.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #047857;">pcs</span>';
+            counterEl.innerHTML = '<span id="scanned-total-qty">' + accumKanban.toLocaleString() + '</span> / <span id="target-kanban-qty-display">' + selectedPlanningTargetTotalQty.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #64748b;">pcs</span>';
         } else {
-            counterEl.innerHTML = '<span id="scanned-total-qty">' + effectiveTotalScanned.toLocaleString() + '</span> / <span id="target-kanban-qty-display">' + targetQty.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #047857;">pcs</span>';
+            counterEl.innerHTML = '<span id="scanned-total-qty">' + effectiveTotalScanned.toLocaleString() + '</span> / <span id="target-kanban-qty-display">' + targetQty.toLocaleString() + '</span> <span style="font-size: 10px; font-weight: 700; color: #64748b;">pcs</span>';
         }
     }
 
-    // KPI 3: Mode Gudang vs Mode Kanban
+    // Persentase Progres
     var pct;
     if (isSafetyStock) {
         pct = 100;
@@ -3823,58 +4634,113 @@ function renderScannedLabelsTable() {
         pct = Math.min(100, Math.round((effectiveTotalScanned / Math.max(1, targetQty)) * 100));
     }
 
+    var excessQty = isSafetyStock ? 0 : Math.max(0, effectiveTotalScanned - targetQty);
+
     if (isSafetyStock) {
-        if (kpi3TitleLabel) kpi3TitleLabel.textContent = 'STATUS STOK GUDANG';
         if (kpiProgressPercent) {
-            kpiProgressPercent.textContent = 'Stok Gudang';
-            kpiProgressPercent.style.fontSize = '13px';
+            kpiProgressPercent.textContent = 'Mode Bebas';
+            kpiProgressPercent.style.color = '#7c3aed';
+        }
+        if (kpiCard1Subtext) {
+            kpiCard1Subtext.textContent = '📦 Akumulasi Stok Bebas';
+            kpiCard1Subtext.style.color = '#7c3aed';
         }
         if (kpiStatusTag) {
             kpiStatusTag.textContent = 'Safety Stock';
-            kpiStatusTag.className = 'text-[9.5px] font-extrabold text-purple-800 bg-purple-100 px-1.5 py-0.5 rounded border border-purple-200';
+            kpiStatusTag.style.backgroundColor = '#f5f3ff';
+            kpiStatusTag.style.color = '#6d28d9';
+            kpiStatusTag.style.border = '1px solid #ddd6fe';
         }
         if (kpiRemainDetail) {
-            kpiRemainDetail.textContent = physicalScanned.toLocaleString() + ' pcs siap dialokasikan';
+            kpiRemainDetail.textContent = physicalScanned.toLocaleString() + ' pcs';
+            kpiRemainDetail.style.color = '#6d28d9';
+        }
+        if (excessMsg) {
+            excessMsg.textContent = 'Siap dialokasikan';
+            excessMsg.style.color = '#64748b';
+            excessMsg.classList.remove('hidden');
         }
         if (progressContainer) {
             progressContainer.style.display = 'none';
         }
     } else {
-        if (kpi3TitleLabel) kpi3TitleLabel.textContent = 'PERSENTASE TERPENUHI';
         if (kpiProgressPercent) {
             kpiProgressPercent.textContent = pct + '%';
-            kpiProgressPercent.style.fontSize = '14px';
+            kpiProgressPercent.style.color = (pct >= 100 ? '#16a34a' : '#2563eb');
         }
         if (progressContainer) {
             progressContainer.style.display = 'flex';
+        }
+
+        if (kpiCard1Subtext) {
+            if (effectiveTotalScanned >= targetQty && targetQty > 0) {
+                kpiCard1Subtext.textContent = '🎯 Target Kanban Terpenuhi';
+                kpiCard1Subtext.style.color = '#16a34a';
+            } else if (effectiveTotalScanned > 0) {
+                var remaining = Math.max(0, targetQty - effectiveTotalScanned);
+                kpiCard1Subtext.textContent = 'Kurang ' + remaining.toLocaleString() + ' pcs lagi';
+                kpiCard1Subtext.style.color = '#d97706';
+            } else {
+                kpiCard1Subtext.textContent = 'Menunggu scan box...';
+                kpiCard1Subtext.style.color = '#64748b';
+            }
         }
 
         if (kpiStatusTag && kpiRemainDetail) {
             if (isPartialKanban) {
                 if (effectiveTotalScanned >= selectedPlanningQty) {
                     kpiStatusTag.textContent = 'Cicilan Terpenuhi';
-                    kpiStatusTag.className = 'text-[10px] font-extrabold text-emerald-600';
-                    kpiRemainDetail.textContent = 'Target cicilan sesi ini terpenuhi 100%';
+                    kpiStatusTag.style.backgroundColor = '#ecfdf5';
+                    kpiStatusTag.style.color = '#047857';
+                    kpiStatusTag.style.border = '1px solid #a7f3d0';
+                    kpiRemainDetail.textContent = 'Selesai 100%';
+                    kpiRemainDetail.style.color = '#047857';
                 } else {
                     kpiStatusTag.textContent = 'Inspeksi Parsial';
-                    kpiStatusTag.className = 'text-[10px] font-extrabold text-indigo-600';
+                    kpiStatusTag.style.backgroundColor = '#eff6ff';
+                    kpiStatusTag.style.color = '#2563eb';
+                    kpiStatusTag.style.border = '1px solid #bfdbfe';
                     var remP = Math.max(0, selectedPlanningQty - effectiveTotalScanned);
-                    kpiRemainDetail.textContent = 'Cicilan Sesi Ini: Sisa ' + remP.toLocaleString() + ' pcs lagi';
+                    kpiRemainDetail.textContent = 'Sisa ' + remP.toLocaleString() + ' pcs';
+                    kpiRemainDetail.style.color = '#2563eb';
                 }
             } else if (effectiveTotalScanned >= targetQty && targetQty > 0) {
-                kpiStatusTag.textContent = 'Terpenuhi';
-                kpiStatusTag.className = 'text-[10px] font-extrabold text-emerald-600';
-                var exc = effectiveTotalScanned - targetQty;
-                if (exc > 0) {
-                    kpiRemainDetail.textContent = 'Surplus +' + exc.toLocaleString() + ' pcs (SS)';
+                kpiStatusTag.textContent = (excessQty > 0 ? 'Surplus Terpenuhi' : 'Cicilan Terpenuhi');
+                kpiStatusTag.style.backgroundColor = '#ecfdf5';
+                kpiStatusTag.style.color = '#047857';
+                kpiStatusTag.style.border = '1px solid #a7f3d0';
+                
+                if (excessQty > 0) {
+                    kpiRemainDetail.textContent = '+' + excessQty.toLocaleString() + ' pcs SS';
+                    kpiRemainDetail.style.color = '#7c3aed';
                 } else {
                     kpiRemainDetail.textContent = 'Pas 100% Target';
+                    kpiRemainDetail.style.color = '#047857';
                 }
             } else {
                 kpiStatusTag.textContent = 'Belum Lengkap';
-                kpiStatusTag.className = 'text-[10px] font-extrabold text-amber-700';
+                kpiStatusTag.style.backgroundColor = '#fffbeb';
+                kpiStatusTag.style.color = '#b45309';
+                kpiStatusTag.style.border = '1px solid #fde68a';
                 var rem = Math.max(0, targetQty - effectiveTotalScanned);
-                kpiRemainDetail.textContent = 'Kurang ' + rem.toLocaleString() + ' pcs lagi';
+                kpiRemainDetail.textContent = 'Sisa ' + rem.toLocaleString() + ' pcs';
+                kpiRemainDetail.style.color = '#0f172a';
+            }
+        }
+
+        if (excessMsg) {
+            if (excessQty > 0) {
+                excessMsg.textContent = '✨ Sisa ' + excessQty.toLocaleString() + ' pcs jadi Safety Stock';
+                excessMsg.style.color = '#7c3aed';
+                excessMsg.classList.remove('hidden');
+            } else if (effectiveTotalScanned >= targetQty && targetQty > 0) {
+                excessMsg.textContent = '✓ Pas sesuai target planning';
+                excessMsg.style.color = '#047857';
+                excessMsg.classList.remove('hidden');
+            } else {
+                excessMsg.textContent = 'Sesuai kuota kanban';
+                excessMsg.style.color = '#64748b';
+                excessMsg.classList.remove('hidden');
             }
         }
     }
@@ -3895,16 +4761,6 @@ function renderScannedLabelsTable() {
             progressBar.style.backgroundColor = isSafetyStock ? '#7c3aed' : '#10b981';
         } else {
             progressBar.style.backgroundColor = '#2563eb';
-        }
-    }
-
-    var excessQty = isSafetyStock ? 0 : Math.max(0, effectiveTotalScanned - targetQty);
-    if (excessMsg) {
-        if (excessQty > 0 && !isSafetyStock) {
-            excessMsg.textContent = '✨ Sisa ' + excessQty.toLocaleString() + ' pcs akan otomatis menjadi Safety Stock';
-            excessMsg.classList.remove('hidden');
-        } else {
-            excessMsg.classList.add('hidden');
         }
     }
 
@@ -3959,7 +4815,255 @@ function renderScannedLabelsTable() {
     }
 
     if (btnClear) btnClear.style.display = (scannedLabelsList.length > 0) ? 'inline' : 'none';
+
+    // ── Update options & apply Excel Filter pada tabel box ──
+    populateAndApplyModalBoxExcelFilters();
 }
+
+/**
+ * ── EXCEL-STYLE COLUMN FILTERS FOR SCANNED BOXES TABLE (MODAL STEP 2) ──
+ * Persis seperti di modules/inspection/index.php
+ */
+var ModalBoxFilterState = {
+    filters: {
+        lot: new Set(),
+        ref: new Set(),
+        origin: new Set()
+    },
+    activeCol: null
+};
+
+function toggleModalBoxExcelFilter(event, col) {
+    if (event) event.stopPropagation();
+    var dropdown = document.getElementById('filter-dropdown-box-' + col);
+    if (!dropdown) return;
+
+    var isVisible = (dropdown.style.display === 'block');
+    closeAllModalBoxExcelFilters();
+
+    if (!isVisible) {
+        dropdown.style.display = 'block';
+        ModalBoxFilterState.activeCol = col;
+        var searchInput = dropdown.querySelector('.excel-filter-search');
+        if (searchInput) {
+            searchInput.value = '';
+            onSearchModalBoxFilterOptions(col, '');
+            setTimeout(function() { searchInput.focus(); }, 40);
+        }
+    }
+}
+
+function closeAllModalBoxExcelFilters() {
+    document.querySelectorAll('.excel-filter-dropdown[id^="filter-dropdown-box-"]').forEach(function(dd) {
+        dd.style.display = 'none';
+    });
+    ModalBoxFilterState.activeCol = null;
+}
+
+function onSearchModalBoxFilterOptions(col, keyword) {
+    var container = document.getElementById('filter-list-box-' + col);
+    if (!container) return;
+    var kw = (keyword || '').toLowerCase().trim();
+    var items = container.querySelectorAll('.excel-filter-item');
+    items.forEach(function(item) {
+        var val = (item.getAttribute('data-val') || '').toLowerCase();
+        if (!kw || val.indexOf(kw) !== -1) {
+            item.style.display = 'flex';
+        } else {
+            item.style.display = 'none';
+        }
+    });
+}
+
+function toggleSelectAllModalBoxFilter(col, selectAll) {
+    var container = document.getElementById('filter-list-box-' + col);
+    if (!container) return;
+    var checkboxes = container.querySelectorAll('input[type="checkbox"]');
+    checkboxes.forEach(function(cb) {
+        if (cb.closest('.excel-filter-item').style.display !== 'none') {
+            cb.checked = selectAll;
+        }
+    });
+}
+
+function populateAndApplyModalBoxExcelFilters() {
+    if (typeof scannedLabelsList === 'undefined') return;
+
+    var uniqueLots = new Set();
+    var uniqueRefs = new Set();
+    var uniqueOrigins = new Set();
+
+    scannedLabelsList.forEach(function(lbl) {
+        var lotVal = (lbl.Z2 || '-').trim();
+        var refVal = (lbl.Z5 || '-').trim();
+        uniqueLots.add(lotVal);
+        uniqueRefs.add(refVal);
+
+        var isLabelReinspect = lbl.was_rejected_before ||
+                              (lbl.remarks && (lbl.remarks.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.remarks.toUpperCase().indexOf('REINSPEKSI') !== -1)) ||
+                              (lbl.reinspection_notes && (lbl.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
+        if (lbl.is_safety_stock_alloc) {
+            uniqueOrigins.add('safety_stock');
+        } else if (isLabelReinspect) {
+            uniqueOrigins.add('reinspect');
+        } else {
+            uniqueOrigins.add('fresh');
+        }
+    });
+
+    renderModalBoxFilterCheckboxes('lot', Array.from(uniqueLots).sort(), function(val) { return '#' + val; });
+    renderModalBoxFilterCheckboxes('ref', Array.from(uniqueRefs).sort(), function(val) { return val; });
+    
+    var originDisplayMap = {
+        'fresh': '✓ Lot Baru (Fresh)',
+        'safety_stock': '📦 Asal: Safety Stock',
+        'reinspect': '⚠️ Riwayat: Eks-NG'
+    };
+    renderModalBoxFilterCheckboxes('origin', Array.from(uniqueOrigins), function(val) { return originDisplayMap[val] || val; });
+
+    executeModalBoxFiltering();
+}
+
+function renderModalBoxFilterCheckboxes(col, values, labelFormatter) {
+    var container = document.getElementById('filter-list-box-' + col);
+    if (!container) return;
+
+    if (values.length === 0) {
+        container.innerHTML = '<div style="color: #94a3b8; font-size: 10px; font-style: italic; padding: 4px;">Tidak ada data box</div>';
+        return;
+    }
+
+    var selectedSet = ModalBoxFilterState.filters[col];
+    var html = '';
+
+    values.forEach(function(val) {
+        var isChecked = (selectedSet.size === 0 || selectedSet.has(val));
+        var labelText = labelFormatter ? labelFormatter(val) : val;
+
+        html += 
+            '<label class="excel-filter-item" data-val="' + escapeHtml(val) + '">' +
+                '<input type="checkbox" value="' + escapeHtml(val) + '" ' + (isChecked ? 'checked' : '') + '>' +
+                '<span style="font-size: 10.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + escapeHtml(labelText) + '</span>' +
+            '</label>';
+    });
+
+    container.innerHTML = html;
+}
+
+function applyModalBoxExcelFilters() {
+    ['lot', 'ref', 'origin'].forEach(function(col) {
+        var container = document.getElementById('filter-list-box-' + col);
+        if (!container) return;
+
+        var checkboxes = container.querySelectorAll('input[type="checkbox"]');
+        var allCount = checkboxes.length;
+        var checkedValues = [];
+
+        checkboxes.forEach(function(cb) {
+            if (cb.checked) {
+                checkedValues.push(cb.value);
+            }
+        });
+
+        var btn = document.querySelector('.th-filter-btn[data-box-col="' + col + '"]');
+
+        if (checkedValues.length === 0 || checkedValues.length === allCount) {
+            ModalBoxFilterState.filters[col].clear();
+            if (btn) btn.classList.remove('active');
+        } else {
+            ModalBoxFilterState.filters[col] = new Set(checkedValues);
+            if (btn) btn.classList.add('active');
+        }
+    });
+
+    closeAllModalBoxExcelFilters();
+    executeModalBoxFiltering();
+}
+
+function resetSingleModalBoxFilter(col) {
+    ModalBoxFilterState.filters[col].clear();
+    var btn = document.querySelector('.th-filter-btn[data-box-col="' + col + '"]');
+    if (btn) btn.classList.remove('active');
+
+    var container = document.getElementById('filter-list-box-' + col);
+    if (container) {
+        container.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+    }
+
+    closeAllModalBoxExcelFilters();
+    executeModalBoxFiltering();
+}
+
+function resetAllModalBoxExcelFilters() {
+    ['lot', 'ref', 'origin'].forEach(function(col) {
+        ModalBoxFilterState.filters[col].clear();
+        var btn = document.querySelector('.th-filter-btn[data-box-col="' + col + '"]');
+        if (btn) btn.classList.remove('active');
+
+        var container = document.getElementById('filter-list-box-' + col);
+        if (container) {
+            container.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+        }
+    });
+
+    closeAllModalBoxExcelFilters();
+    executeModalBoxFiltering();
+}
+
+function executeModalBoxFiltering() {
+    var rows = document.querySelectorAll('#scanned-labels-table-body tr.scanned-box-row');
+    var resetAllBtn = document.getElementById('btn-reset-box-filters');
+    
+    var hasActiveFilter = (ModalBoxFilterState.filters.lot.size > 0 ||
+                           ModalBoxFilterState.filters.ref.size > 0 ||
+                           ModalBoxFilterState.filters.origin.size > 0);
+
+    if (resetAllBtn) {
+        resetAllBtn.style.display = hasActiveFilter ? 'inline-flex' : 'none';
+    }
+
+    if (!rows || rows.length === 0) return;
+
+    var visibleCount = 0;
+
+    rows.forEach(function(row) {
+        var rowLot = row.getAttribute('data-box-lot');
+        var rowRef = row.getAttribute('data-box-ref');
+        var rowOrigin = row.getAttribute('data-box-origin');
+
+        var matchLot = (ModalBoxFilterState.filters.lot.size === 0 || ModalBoxFilterState.filters.lot.has(rowLot));
+        var matchRef = (ModalBoxFilterState.filters.ref.size === 0 || ModalBoxFilterState.filters.ref.has(rowRef));
+        var matchOrigin = (ModalBoxFilterState.filters.origin.size === 0 || ModalBoxFilterState.filters.origin.has(rowOrigin));
+
+        if (matchLot && matchRef && matchOrigin) {
+            row.style.display = '';
+            visibleCount++;
+        } else {
+            row.style.display = 'none';
+        }
+    });
+
+    // Handle state jika semua baris tersembunyi karena filter
+    var noMatchRow = document.getElementById('scanned-box-filter-no-match');
+    var tbody = document.getElementById('scanned-labels-table-body');
+    if (visibleCount === 0 && rows.length > 0) {
+        if (!noMatchRow && tbody) {
+            var tr = document.createElement('tr');
+            tr.id = 'scanned-box-filter-no-match';
+            tr.innerHTML = '<td colspan="6" class="px-3 py-6 text-center text-amber-700 font-bold text-xs bg-amber-50/70 border-b border-amber-200">🔍 Tidak ada box yang cocok dengan kriteria filter yang Anda pilih. <button type="button" onclick="resetAllModalBoxExcelFilters()" style="color:#2563eb; text-decoration:underline; font-weight:800; cursor:pointer; background:none; border:none;">Reset Filter</button></td>';
+            tbody.appendChild(tr);
+        }
+    } else if (noMatchRow) {
+        noMatchRow.remove();
+    }
+}
+
+// Global click listener to close Excel filter dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.excel-filter-dropdown') && !e.target.closest('.th-filter-btn')) {
+        closeAllModalBoxExcelFilters();
+    }
+});
 
 function toggleNativeFullscreen() {
     if (!document.fullscreenElement && !document.webkitFullscreenElement && !document.msFullscreenElement) {
@@ -4023,19 +5127,38 @@ function resetScanModalState() {
     if (typeof updateSafetyStockDeductionUI === 'function') updateSafetyStockDeductionUI();
 }
 
+var currentModalScope = 'today'; // 'today' | 'pending_yesterday'
+var currentModalBatchId = 'all';
+var cachedPlanningItems = [];
+
 function refreshPlanningItemsAjax(autoSelectId) {
     var url = '<?= base_url("modules/inspection/session.php?action=get_planning_items") ?>';
+    url += '&scope=' + encodeURIComponent(currentModalScope);
+    url += '&batch_id=' + encodeURIComponent(currentModalBatchId);
     if (autoSelectId) {
         url += '&selected_id=' + encodeURIComponent(autoSelectId);
     }
+    
+    var tbody = document.getElementById('planning-table-body');
+    if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-12 text-center text-slate-400">' +
+            '<div class="inline-block animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2"></div>' +
+            '<p class="font-bold text-slate-600 text-xs">Memuat data jadwal Kanban...</p>' +
+            '</td></tr>';
+    }
+
     fetch(url)
         .then(function(r) { return r.json(); })
         .then(function(res) {
-            if (res && res.success && Array.isArray(res.items)) {
-                renderPlanningCardsList(res.items);
+            if (res && res.success) {
+                cachedPlanningItems = Array.isArray(res.items) ? res.items : [];
+                renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 0);
+                renderModalKpiSummary(res.kpi_stats || {}, res.user_daily_stats || {});
+                renderPlanningTableRows(cachedPlanningItems);
+
                 if (autoSelectId) {
-                    var targetPlan = res.items.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); });
-                    if (targetPlan) {
+                    var targetPlan = cachedPlanningItems.find(function(p) { return parseInt(p.id) === parseInt(autoSelectId); });
+                    if (targetPlan && (!selectedPlanningId || selectedPlanningId !== parseInt(targetPlan.id))) {
                         var targetTotalQty = parseInt(targetPlan.qty) || 0;
                         var totalPassedQty = parseInt(targetPlan.total_passed_qty) || 0;
                         var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);
@@ -4044,7 +5167,7 @@ function refreshPlanningItemsAjax(autoSelectId) {
                         selectPlanningItem(
                             parseInt(targetPlan.id),
                             targetPlan.item_code,
-                            targetPlan.item_description,
+                            targetPlan.display_part_name || targetPlan.item_description,
                             targetPlan.customer || 'PT. Indonesia Epson Industry',
                             remainingQty,
                             targetPlan.check_type || '',
@@ -4061,84 +5184,352 @@ function refreshPlanningItemsAjax(autoSelectId) {
         })
         .catch(function(err) {
             console.error('Gagal memperbarui list planning items:', err);
+            if (tbody) {
+                tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-rose-500 font-bold text-xs">Gagal memuat data dari server. Silakan coba lagi.</td></tr>';
+            }
         });
 }
 
-function renderPlanningCardsList(items) {
-    var container = document.getElementById('planning-cards-container');
-    if (!container) return;
+var currentModalStatusFilter = 'all';
+
+function renderModalKpiSummary(kpi, userStats) {
+    // 1. Update 5 Kartu KPI
+    var valTotal = document.getElementById('kpi-val-total');
+    var valUninsp = document.getElementById('kpi-val-uninspected');
+    var valInProg = document.getElementById('kpi-val-in_progress');
+    var valDone = document.getElementById('kpi-val-completed');
+    var valRej = document.getElementById('kpi-val-rejected');
+
+    if (valTotal) valTotal.textContent = (parseInt(kpi.total) || 0).toLocaleString();
+    if (valUninsp) valUninsp.textContent = (parseInt(kpi.uninspected) || 0).toLocaleString();
+    if (valInProg) valInProg.textContent = (parseInt(kpi.in_progress) || 0).toLocaleString();
+    if (valDone) valDone.textContent = (parseInt(kpi.completed) || 0).toLocaleString();
+    if (valRej) valRej.textContent = (parseInt(kpi.rejected) || 0).toLocaleString();
+
+    // 2. Update Personal Work Tracker (Pencapaian Saya Hari Ini)
+    var uKb = document.getElementById('user-stat-completed-kb');
+    var uLots = document.getElementById('user-stat-total-lots');
+    var uPass = document.getElementById('user-stat-passed-lots');
+    var uNg = document.getElementById('user-stat-ng-lots');
+
+    if (uKb) uKb.textContent = (parseInt(userStats.completed_kanban) || 0).toLocaleString();
+    if (uLots) uLots.textContent = (parseInt(userStats.total_lots) || 0).toLocaleString();
+    if (uPass) uPass.textContent = (parseInt(userStats.passed_lots) || 0).toLocaleString();
+    if (uNg) uNg.textContent = (parseInt(userStats.ng_lots) || 0).toLocaleString();
+
+    updateKpiActiveCardStyles();
+}
+
+function filterModalByStatus(status) {
+    // Jika status yang sama diklik lagi, toggle kembali ke 'all'
+    if (currentModalStatusFilter === status && status !== 'all') {
+        currentModalStatusFilter = 'all';
+    } else {
+        currentModalStatusFilter = status || 'all';
+    }
+    updateKpiActiveCardStyles();
+    filterPlanningItems();
+}
+
+function updateKpiActiveCardStyles() {
+    var kpiTypes = ['all', 'uninspected', 'in_progress', 'completed', 'rejected', 'my_kanban'];
+    kpiTypes.forEach(function(t) {
+        var card = document.getElementById('kpi-btn-' + t);
+        if (!card) return;
+        if (t === currentModalStatusFilter) {
+            card.classList.add('kpi-active-selected');
+            card.style.outline = (t === 'my_kanban') ? '2.5px solid #6366f1' : '2.5px solid #2563eb';
+            card.style.outlineOffset = '2px';
+        } else {
+            card.classList.remove('kpi-active-selected');
+            card.style.outline = 'none';
+            card.style.outlineOffset = '0px';
+        }
+    });
+}
+
+function renderModalBatchPills(todayBatches, pendingYesterdayCount) {
+    var bar = document.getElementById('modal-batch-pills-bar');
+    if (!bar) return;
+
+    var html = '';
+
+    // 1. Batch Hari Ini Pills
+    if (todayBatches && todayBatches.length > 0) {
+        for (var i = 0; i < todayBatches.length; i++) {
+            var b = todayBatches[i];
+            var bId = String(b.id);
+            var bNum = i + 1;
+            var bTime = b.imported_at ? b.imported_at.substring(11, 16) : '-';
+            var bTotal = parseInt(b.item_count) || 0;
+            var bDone = parseInt(b.completed_count) || 0;
+            var isCurrentActive = (currentModalScope === 'today' && currentModalBatchId === bId);
+
+            var activeClass = isCurrentActive 
+                ? 'background:#0f172a; color:#ffffff; border-color:#0f172a; box-shadow:0 1px 3px rgba(15,23,42,0.3);' 
+                : 'background:#f8fafc; color:#334155; border-color:#cbd5e1;';
+
+            html += '<button type="button" onclick="setModalBatchScope(\'today\', \'' + bId + '\')" style="' + activeClass + ' padding:5px 11px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;">' +
+                        '<span>Batch ' + bNum + ' (' + bTime + ')</span>' +
+                        '<span style="' + (isCurrentActive ? 'background:rgba(255,255,255,0.2); color:#ffffff;' : 'background:#e2e8f0; color:#475569;') + ' padding:1px 6px; border-radius:4px; font-size:10px;">' + bDone + '/' + bTotal + ' Selesai</span>' +
+                    '</button>';
+        }
+
+        // Tombol: Semua Batch Hari Ini
+        var isAllActive = (currentModalScope === 'today' && currentModalBatchId === 'all');
+        var allClass = isAllActive 
+            ? 'background:#1d4ed8; color:#ffffff; border-color:#1e40af; box-shadow:0 1px 3px rgba(37,99,235,0.3);' 
+            : 'background:#eff6ff; color:#1e40af; border-color:#bfdbfe;';
+
+        var totalAllToday = todayBatches.reduce(function(acc, item) { return acc + (parseInt(item.item_count) || 0); }, 0);
+        html += '<button type="button" onclick="setModalBatchScope(\'today\', \'all\')" style="' + allClass + ' padding:5px 12px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:5px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;">' +
+                    '<span>Semua Batch Hari Ini</span>' +
+                    '<span style="' + (isAllActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#dbeafe; color:#1e40af;') + ' padding:1px 6px; border-radius:4px; font-size:10px;">' + totalAllToday + ' Part</span>' +
+                '</button>';
+    }
+
+    // 2. Tombol Spesial: Tunggakan Kemarin (Highlight Kuning/Amber)
+    if (pendingYesterdayCount > 0) {
+        var isPyActive = (currentModalScope === 'pending_yesterday');
+        var pyClass = isPyActive
+            ? 'background:#d97706; color:#ffffff; border-color:#b45309; box-shadow:0 1px 4px rgba(217,119,6,0.35);'
+            : 'background:#fffbeb; color:#92400e; border-color:#fcd34d;';
+
+        html += '<button type="button" onclick="setModalBatchScope(\'pending_yesterday\', \'all\')" style="' + pyClass + ' padding:5px 12px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;" title="Kanban dari hari-hari sebelumnya yang belum selesai diinspeksi atau rejected">' +
+                    '<span style="width:7px; height:7px; border-radius:50%; background:' + (isPyActive ? '#ffffff' : '#f59e0b') + ';" class="animate-pulse"></span>' +
+                    '<span>Tunggakan Kemarin</span>' +
+                    '<span style="' + (isPyActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#fef3c7; color:#b45309; border:1px solid #fde68a;') + ' padding:1px 7px; border-radius:4px; font-size:10px; font-weight:900;">' + pendingYesterdayCount + ' Belum Selesai</span>' +
+                '</button>';
+    }
+
+    bar.innerHTML = html;
+}
+
+function setModalBatchScope(scope, batchId) {
+    currentModalScope = scope;
+    currentModalBatchId = batchId;
+    currentPlanTypeTab = 'kanban';
+    currentModalStatusFilter = 'all'; // Reset filter status ketika ganti batch
+    updateKpiActiveCardStyles();
+    var ssBanner = document.getElementById('safety-stock-direct-card');
+    if (ssBanner) ssBanner.classList.add('hidden');
+    refreshPlanningItemsAjax();
+}
+
+function toggleSafetyStockTab() {
+    currentPlanTypeTab = 'safety_stock';
+    var ssBanner = document.getElementById('safety-stock-direct-card');
+    if (ssBanner) ssBanner.classList.remove('hidden');
+    startDirectSafetyStockScan();
+}
+
+function renderPlanningTableRows(items) {
+    var tbody = document.getElementById('planning-table-body');
+    if (!tbody) return;
 
     if (!items || items.length === 0) {
-        container.innerHTML = '<div class="text-center py-6 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">Belum ada data Planning (Kanban / Safety Stock) tersimpan di sistem.</div>';
+        var emptyMsg = (currentModalScope === 'pending_yesterday') 
+            ? 'Tidak ada tunggakan Kanban dari hari kemarin. Semua Kanban kemarin telah selesai diinspeksi.' 
+            : 'Belum ada data Kanban yang sesuai untuk batch ini.';
+        tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-12 text-center text-slate-400 font-bold text-xs">' + emptyMsg + '</td></tr>';
+        updatePlanningTableCount(0);
         return;
     }
 
     var html = '';
+    var todayStr = new Date().toISOString().substring(0, 10);
+
     for (var i = 0; i < items.length; i++) {
-        var plan = items[i];
-        var pCode = escapeHtml(plan.item_code || '');
-        var pDesc = escapeHtml(plan.item_description || '');
-        var pCust = escapeHtml(plan.customer || 'PT. Indonesia Epson Industry');
-        var targetTotalQty = parseInt(plan.qty) || 0;
-        var totalPassedQty = parseInt(plan.total_passed_qty) || 0;
-        var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);
-        var rawQty = remainingQty;
-        var pQty = rawQty.toLocaleString();
+        var k = items[i];
+        var kid = parseInt(k.id) || 0;
+        var pCode = escapeHtml(k.item_code || '');
+        var pDesc = escapeHtml(k.display_part_name || k.item_description || '');
+        var pCust = escapeHtml(k.customer || 'PT. Indonesia Epson Industry');
+        var targetQty = parseInt(k.qty) || 0;
+        var passedQty = parseInt(k.total_passed_qty) || 0;
+        var remainingQty = Math.max(0, targetQty - passedQty);
+        var progressPct = (targetQty > 0) ? Math.min(100, Math.round((passedQty / targetQty) * 100)) : 0;
         
-        var isSafetyStock = (plan.plan_type === 'safety_stock' || (plan.batch_plan_type || '') === 'safety_stock' || (plan.kanban_no || '').toUpperCase().indexOf('SS') === 0);
-        var pType = isSafetyStock ? 'Safety Stock' : 'Kanban';
-        var isPartial = (!isSafetyStock && totalPassedQty > 0);
-        var pCek = plan.check_type ? escapeHtml(plan.check_type) : '';
+        var is100Check = (k.check_type && (k.check_type.toLowerCase().indexOf('100') !== -1));
+        var checkTypeBadge = is100Check ? '<span class="inline-block px-1.5 py-0.2 rounded text-[8.5px] font-bold bg-amber-50 text-amber-800 border border-amber-200 ml-1">100% Cek</span>' : '';
         
-        var etaRaw = plan.eta || plan.req_date || '';
-        var etaFormatted = formatEtaDate(etaRaw);
-        var isEarliest = (i === 0);
-        var availSsQty = parseInt(plan.avail_ss_qty) || 0;
+        // Cek Overdue
+        var schedDate = k.eta || k.req_date || k.created_at || '';
+        var schedDateOnly = schedDate ? schedDate.substring(0, 10) : '';
+        var isOverdue = (schedDateOnly !== '' && schedDateOnly < todayStr && progressPct < 100);
 
-        var planTypeAttr = isSafetyStock ? 'safety_stock' : 'kanban';
-        var pCekBadge = pCek ? ('<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">' + pCek + ' Cek</span>') : '';
-        var partialBadge = (totalPassedQty > 0 && !isSafetyStock) ? ('<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-800 border border-indigo-300" title="Kanban ini diinspeksi secara bertahap / parsial">⚡ Inspeksi Parsial: ' + totalPassedQty.toLocaleString() + ' / ' + targetTotalQty.toLocaleString() + ' pcs (Sisa ' + remainingQty.toLocaleString() + ' pcs)</span>') : '';
-        var rejectedBadge = (plan.status === 'rejected') ? ('<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-rose-100 text-rose-800 border border-rose-300" title="Sesi sebelumnya tercatat Rejected / Butuh Pemeriksaan">⚠️ Sesi Terakhir Rejected</span>') : '';
-        var etaBadge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ' + (isEarliest ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-600 border border-slate-200') + '">🚚 ETA: ' + etaFormatted + (isEarliest ? ' ⚡ (P1)' : '') + '</span>';
-        var kanbanNoBadge = (plan.kanban_no && plan.kanban_no !== '-') ? ('<span>&middot;</span><span class="font-mono">No. Kanban: <b>#' + escapeHtml(plan.kanban_no) + '</b></span>') : '';
+        // Schedule formatting
+        var reqDateStr = k.req_date ? formatEtaDate(k.req_date) : '-';
+        var etaBadgeHtml = '';
+        if (isOverdue) {
+            etaBadgeHtml = '<div class="mt-1 flex items-center gap-1 flex-wrap">' +
+                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 inline-flex items-center gap-1 leading-tight"><span class="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span> OVERDUE</span>' +
+                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-bold bg-rose-50 text-rose-700 border border-rose-200 leading-tight">Lewat Jadwal</span>' +
+            '</div>';
+        } else if (k.eta) {
+            etaBadgeHtml = '<div class="text-[9.5px] font-semibold text-amber-700 mt-0.5">ETA: ' + formatEtaDate(k.eta) + '</div>';
+        }
 
-        var codeEsc = (plan.item_code || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var descEsc = (plan.item_description || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var custEsc = (plan.customer || 'PT. Indonesia Epson Industry').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var cekEsc = (plan.check_type || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var kbNoEsc = (plan.kanban_no || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        var etaEsc = (plan.eta || plan.req_date || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-        html += '<div class="planning-card p-4 bg-white hover:bg-blue-50/80 border border-slate-200 hover:border-blue-400 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-4 shadow-2xs" ' +
-                'data-plan-type="' + planTypeAttr + '" ' +
-                'data-partial="' + (isPartial ? 'true' : 'false') + '" ' +
-                'data-plan-id="' + parseInt(plan.id) + '" ' +
-                'data-plan-code="' + escapeHtml(plan.item_code || '') + '" ' +
-                'data-plan-kanban-no="' + escapeHtml(plan.kanban_no || '') + '" ' +
-                'data-plan-eta="' + escapeHtml(plan.eta || plan.req_date || '') + '" ' +
-                'onclick="selectPlanningItem(' + parseInt(plan.id) + ', \'' + codeEsc + '\', \'' + descEsc + '\', \'' + custEsc + '\', ' + rawQty + ', \'' + cekEsc + '\', \'' + planTypeAttr + '\', ' + availSsQty + ', ' + totalPassedQty + ', ' + targetTotalQty + ', \'' + kbNoEsc + '\', \'' + etaEsc + '\')">' +
-                '<div class="min-w-0 flex-1 space-y-1.5">' +
-                    '<div class="flex items-center space-x-2 flex-wrap gap-y-1">' +
-                        '<span class="font-mono font-black text-blue-700 text-sm">' + pCode + '</span>' +
-                        '<span class="badge text-xs ' + (isSafetyStock ? 'bg-purple-100 text-purple-800 border border-purple-200 font-bold' : 'bg-blue-100 text-blue-800 border border-blue-200 font-bold') + '">' + pType + '</span>' +
-                        pCekBadge +
-                        partialBadge +
-                        rejectedBadge +
-                        etaBadge +
-                    '</div>' +
-                    '<div class="font-bold text-slate-800 text-sm truncate">' + pDesc + '</div>' +
-                    '<div class="text-xs text-slate-500 flex items-center space-x-2 flex-wrap">' +
-                        '<span>Cust: <b>' + pCust + '</b></span>' +
-                        '<span>&middot;</span>' +
-                        '<span>Target Sisa Qty: <b class="text-blue-700 font-extrabold">' + pQty + ' pcs</b>' + (totalPassedQty > 0 ? (' (dari total ' + targetTotalQty.toLocaleString() + ' pcs)') : '') + '</span>' +
-                        kanbanNoBadge +
-                    '</div>' +
-                '</div>' +
-                '<button type="button" class="btn-primary py-2 px-4 text-sm font-bold flex-shrink-0 shadow-2xs">Pilih &rarr;</button>' +
-                '</div>';
+        // Progress bar formatting
+        var barColor = (progressPct >= 100) ? 'background: linear-gradient(90deg, #10b981 0%, #059669 100%);' :
+                       (k.active_session_id || progressPct > 0) ? 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);' :
+                       'background-color: #cbd5e1;';
+        var barLabel = (progressPct >= 100) ? '100% selesai' :
+                       (k.active_session_id) ? (progressPct + '% dikerjakan') :
+                       (progressPct > 0) ? (progressPct + '% parsial') : 'Belum mulai';
+        var barFillWidth = (progressPct >= 100) ? 100 : Math.max(progressPct > 0 ? progressPct : 0, k.active_session_id ? 15 : 0);
+
+        // Status category group for KPI filtering & row color matching
+        var isCompleted = (progressPct >= 100 || k.status === 'completed');
+        var isRejected = (k.status === 'rejected');
+        var isInProgress = (!isCompleted && !isRejected && (k.active_session_id || progressPct > 0 || k.status === 'in_progress' || k.status === 'partial'));
+        
+        var statusGroup = isInProgress ? 'in_progress' :
+                          isCompleted ? 'completed' :
+                          isRejected ? 'rejected' : 'uninspected';
+
+        // Status badge & Row colors aligned with the 4 KPI card colors (using solid inline styles for 100% offline reliability)
+        var statusBadge = '';
+        var rowStyle = '';
+        var btnBgStyle = '';
+        var btnHoverClass = '';
+        var btnIconSvg = '';
+        var btnLabel = 'Inspeksi';
+
+        if (isCompleted) {
+            // Hijau - Selesai
+            rowStyle = 'background-color: #ecfdf5; border-left: 4.5px solid #10b981;';
+            statusBadge = '<span style="background-color: #059669; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8.5px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px;">' +
+                          '<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>' +
+                          'Selesai' +
+                          '</span>';
+            btnBgStyle = 'background-color: #059669; color: #ffffff;';
+            btnHoverClass = 'hover:bg-emerald-700 active:bg-emerald-800';
+            btnIconSvg = '<svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>';
+            btnLabel = 'Selesai';
+        } else if (isRejected) {
+            // Merah - Reject / Lot NG
+            rowStyle = 'background-color: #fff1f2; border-left: 4.5px solid #e11d48;';
+            statusBadge = '<span style="background-color: #e11d48; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8.5px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px;">' +
+                          '<svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>' +
+                          'Reject' +
+                          '</span>';
+            btnBgStyle = 'background-color: #e11d48; color: #ffffff;';
+            btnHoverClass = 'hover:bg-rose-700 active:bg-rose-800';
+            btnIconSvg = '<svg class="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>';
+            btnLabel = 'Periksa NG';
+        } else if (isInProgress) {
+            // Kuning / Amber - Sedang Berjalan / Parsial
+            rowStyle = 'background-color: #fef3c7; border-left: 4.5px solid #d97706;';
+            var progressText = k.active_session_id ? 'Sedang Dikerjakan' : 'Parsial (' + progressPct + '%)';
+            statusBadge = '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px;">' +
+                          '<span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #ffffff;" class="animate-pulse"></span>' +
+                          progressText +
+                          '</span>';
+            if (k.active_inspector_name) {
+                statusBadge += '<span class="block text-[8.5px] text-amber-800 font-bold mt-0.5 truncate max-w-[120px] mx-auto">Oleh: ' + escapeHtml(k.active_inspector_name) + '</span>';
+            }
+            btnBgStyle = 'background-color: #d97706; color: #ffffff;';
+            btnHoverClass = 'hover:bg-amber-700 active:bg-amber-800';
+            btnIconSvg = '<svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" style="fill: #ffffff;"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>';
+            btnLabel = 'Lanjutkan';
+        } else {
+            // Abu-abu Slate - Belum Mulai
+            rowStyle = 'background-color: #ffffff; border-left: 4.5px solid #94a3b8;';
+            statusBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300 inline-flex items-center gap-1.5">' +
+                          '<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>' +
+                          'Belum Mulai' +
+                          '</span>';
+            btnBgStyle = 'background-color: #2563eb; color: #ffffff;';
+            btnHoverClass = 'hover:bg-blue-700 active:bg-blue-800';
+            btnIconSvg = '<svg class="w-3 h-3 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor" style="fill: #ffffff;"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>';
+            btnLabel = 'Inspeksi';
+        }
+
+        var importMethod = String(k.import_method || 'manual').toLowerCase();
+        var isImport = (importMethod.indexOf('excel') !== -1 || importMethod.indexOf('csv') !== -1);
+        var sourceBadge = isImport ? '<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-teal-50 text-teal-700 border border-teal-200 uppercase">Import</span>' : '<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 uppercase">Manual</span>';
+
+        var codeEsc = (k.item_code || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var descEsc = (k.display_part_name || k.item_description || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var custEsc = (k.customer || 'PT. Indonesia Epson Industry').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var cekEsc = (k.check_type || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var kbNoEsc = (k.kanban_no || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var etaEsc = (k.eta || k.req_date || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+        var availSsQty = parseInt(k.avail_ss_qty) || 0;
+
+        var isMyKb = (parseInt(k.is_my_kanban) === 1 || (k.active_inspector_name && k.active_inspector_name.toLowerCase() === '<?= strtolower(addslashes($currentUser['name'] ?? '')) ?>')) ? '1' : '0';
+
+        html += '<tr class="kanban-table-row transition-colors" ' +
+                    'style="' + rowStyle + '" ' +
+                    'data-kanban-id="' + kid + '" ' +
+                    'data-status-group="' + statusGroup + '" ' +
+                    'data-is-my-kanban="' + isMyKb + '" ' +
+                    'data-part-code="' + pCode.toLowerCase() + '" ' +
+                    'data-part-name="' + pDesc.toLowerCase() + '" ' +
+                    'data-kanban-no="' + (k.kanban_no ? String(k.kanban_no).toLowerCase() : '') + '" ' +
+                    'data-customer="' + pCust.toLowerCase() + '">' +
+                    
+                    // Col 1: #
+                    '<td class="text-center px-1.5 py-2.5 font-bold text-slate-500 font-mono text-[11px]">' + (i + 1) + '</td>' +
+                    
+                    // Col 2: Kanban No & Cust
+                    '<td class="px-3 py-2.5">' +
+                        '<div class="flex items-center space-x-1.5">' +
+                            '<span class="font-mono font-black text-slate-900 text-xs">#' + escapeHtml(k.kanban_no || '-') + '</span>' +
+                            sourceBadge +
+                        '</div>' +
+                        '<div class="text-[11px] text-slate-500 font-medium truncate max-w-[190px]" title="' + pCust + '">' + pCust + '</div>' +
+                    '</td>' +
+                    
+                    // Col 3: Part Code & Name
+                    '<td class="px-3 py-2.5">' +
+                        '<span class="font-mono font-extrabold text-blue-700 text-xs block">' + pCode + '</span>' +
+                        '<span class="text-[11px] text-slate-600 font-medium block truncate max-w-[220px]" title="' + pDesc + '">' + pDesc + '</span>' +
+                        checkTypeBadge +
+                    '</td>' +
+                    
+                    // Col 4: Jadwal & ETA
+                    '<td class="px-2.5 py-2.5 whitespace-nowrap">' +
+                        '<div class="font-medium text-slate-700 text-[10px]">' + reqDateStr + '</div>' +
+                        etaBadgeHtml +
+                    '</td>' +
+                    
+                    // Col 5: Target & Progres
+                    '<td class="px-2.5 py-2.5 text-center whitespace-nowrap">' +
+                        '<div class="font-mono font-black text-xs text-slate-800">' +
+                            '<span>' + passedQty.toLocaleString() + '</span> <span class="text-slate-400 font-normal">/</span> ' + targetQty.toLocaleString() + ' <span class="text-[10px] text-slate-500 font-medium">pcs</span>' +
+                        '</div>' +
+                        '<div class="w-16 rounded-full overflow-hidden mx-auto my-1 bg-slate-200" style="height: 6px; border: 1px solid #cbd5e1;">' +
+                            '<div style="height: 100%; width: ' + barFillWidth + '%; ' + barColor + ' border-radius: 9999px;"></div>' +
+                        '</div>' +
+                        '<span class="text-[9.5px] font-bold text-slate-500 block leading-none">' + barLabel + '</span>' +
+                    '</td>' +
+                    
+                    // Col 6: Status
+                    '<td class="px-2.5 py-2.5 text-center whitespace-nowrap">' +
+                        statusBadge +
+                    '</td>' +
+                    
+                    // Col 7: Aksi Button
+                    '<td class="px-3 py-2.5 text-center whitespace-nowrap">' +
+                        '<button type="button" onclick="selectPlanningItem(' + kid + ', \'' + codeEsc + '\', \'' + descEsc + '\', \'' + custEsc + '\', ' + remainingQty + ', \'' + cekEsc + '\', \'kanban\', ' + availSsQty + ', ' + passedQty + ', ' + targetQty + ', \'' + kbNoEsc + '\', \'' + etaEsc + '\')" ' +
+                                'style="' + btnBgStyle + '" ' +
+                                'class="w-full py-1.5 px-2.5 ' + btnHoverClass + ' font-extrabold text-xs rounded-md shadow-xs hover:shadow transition-all inline-flex items-center justify-center gap-1 cursor-pointer">' +
+                            btnIconSvg +
+                            '<span>' + btnLabel + '</span>' +
+                        '</button>' +
+                    '</td>' +
+                '</tr>';
     }
 
-    container.innerHTML = html;
+    tbody.innerHTML = html;
     filterPlanningItems();
+}
+
+function updatePlanningTableCount(count) {
+    var cntEl = document.getElementById('planning-visible-count');
+    if (cntEl) cntEl.textContent = count;
 }
 
 function openScanModal(autoSelectId, targetPlanType) {
@@ -4233,11 +5624,60 @@ function doCloseScanModal() {
     }
 }
 
-// Proteksi browser agar tidak sengaja reload atau navigasi saat sudah ada label yang discan
+// Flag untuk membedakan navigasi yang disengaja/disetujui oleh user vs tutup tab paksa
+window.isWorkbenchIntentionallyExiting = false;
+
+// Helper: Cek apakah sesi aktif masih memiliki box yang belum selesai diinspeksi (in_progress)
+function hasUninspectedLotsInWorkbench() {
+    if (window.isWorkbenchIntentionallyExiting) return false;
+    if (!currentSessionId || !window.lastWorkbenchSessionData || !window.lastWorkbenchSessionData.session) {
+        // Fallback saat scan modal awal belum submit sesi
+        return (typeof scannedLabelsList !== 'undefined' && Array.isArray(scannedLabelsList) && scannedLabelsList.length > 0);
+    }
+
+    var sess = window.lastWorkbenchSessionData.session;
+    var sessStatus = String(sess.status || '').toLowerCase();
+    if (sessStatus === 'passed' || sessStatus === 'rejected') {
+        return false;
+    }
+
+    var sessLots = window.lastWorkbenchSessionData.session_lots || [];
+    for (var i = 0; i < sessLots.length; i++) {
+        var lr = String(sessLots[i].lot_result || 'in_progress').toLowerCase();
+        var ls = String(sessLots[i].lot_status || 'ok').toLowerCase();
+        var ngCnt = parseInt(sessLots[i].ng_count || 0, 10);
+        // Jika masih ada box in_progress biasa
+        if (lr !== 'passed' && lr !== 'rejected' && lr !== 'skipped' && ls !== 'ng_found' && ls !== 'ng_quarantine' && ls !== 'replaced' && ls !== 'reinspected' && ngCnt === 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 1. Proteksi konfirmasi browser saat tab hendak ditutup / direload
 window.addEventListener('beforeunload', function(e) {
-    if (typeof scannedLabelsList !== 'undefined' && scannedLabelsList.length > 0) {
+    if (hasUninspectedLotsInWorkbench()) {
         e.preventDefault();
-        e.returnValue = '';
+        e.returnValue = 'Anda masih memiliki box yang belum selesai diinspeksi. Keluar sekarang akan membatalkan box yang belum selesai.';
+        return e.returnValue;
+    }
+});
+
+// 2. Jika user tetap memilih menutup browser (pagehide / unload):
+// Kirim sinyal sendBeacon ke background server untuk membersihkan box yang belum selesai
+window.addEventListener('pagehide', function(e) {
+    if (window.isWorkbenchIntentionallyExiting) return;
+    if (hasUninspectedLotsInWorkbench() && currentSessionId) {
+        try {
+            var cleanupUrl = '<?= base_url("modules/inspection/api/cleanup_uninspected_lots.php") ?>';
+            var fd = new FormData();
+            fd.append('session_id', currentSessionId);
+            if (navigator.sendBeacon) {
+                navigator.sendBeacon(cleanupUrl, fd);
+            } else {
+                fetch(cleanupUrl, { method: 'POST', body: fd, keepalive: true });
+            }
+        } catch(err) {}
     }
 });
 
@@ -4603,19 +6043,40 @@ function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, pl
     // Switch step UI
     var p1 = document.getElementById('step-pill-1');
     if (p1) {
-        p1.style.cssText = 'background-color: #dcfce7 !important; color: #166534 !important; border: 1px solid #bbf7d0 !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
-        p1.textContent = '✓ Step 1 Complete';
+        p1.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #dcfce7; color: #166534;';
+        p1.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: #bbf7d0; display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900; color: #15803d;">✓</span><span>Planning Terpilih</span>';
     }
     var p2 = document.getElementById('step-pill-2');
     if (p2) {
-        p2.style.cssText = 'background-color: #2563eb !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; box-shadow: 0 2px 4px rgba(37,99,235,0.3);';
+        p2.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #2563eb; color: #ffffff; box-shadow: 0 1px 3px rgba(37,99,235,0.3);';
+        p2.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: rgba(255,255,255,0.25); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900;">2</span><span>Scan Barcode</span>';
     }
     
-    document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan QR Code Label Barcode';
-    document.getElementById('wizard-modal-subtitle').textContent = 'Scan barcode label barang yang mau diuji';
+    var stepTag = document.getElementById('wizard-step-tag');
+    if (stepTag) {
+        stepTag.textContent = 'Langkah 2 dari 2';
+        stepTag.style.backgroundColor = '#f0fdf4';
+        stepTag.style.color = '#15803d';
+        stepTag.style.borderColor = '#bbf7d0';
+    }
+    var titleEl = document.getElementById('wizard-modal-title');
+    if (titleEl) titleEl.textContent = 'OQC Inspection Workbench';
+    var subEl = document.getElementById('wizard-modal-subtitle');
+    if (subEl) subEl.textContent = 'Scan QR barcode atau label box part ' + (itemCode || '') + ' untuk validasi';
 
-    document.getElementById('wizard-step-1-content').classList.add('hidden');
-    document.getElementById('wizard-step-2-content').classList.remove('hidden');
+    var step1El = document.getElementById('wizard-step-1-content');
+    var step2El = document.getElementById('wizard-step-2-content');
+    if (step1El) {
+        step1El.classList.add('hidden');
+        step1El.style.display = 'none';
+    }
+    if (step2El) {
+        step2El.classList.remove('hidden');
+        step2El.style.display = 'flex';
+    }
+
+    var btnChangeItem = document.getElementById('btn-change-item-header');
+    if (btnChangeItem) btnChangeItem.style.display = 'inline-flex';
 
     renderScannedLabelsTable();
 
@@ -4680,24 +6141,64 @@ function backToStep1(forceConfirm) {
 function doBackToStep1() {
     clearAllScannedLabels();
     selectedSsLotIds = [];
+    selectedPlanningId = 0;
+    selectedPlanningPartCode = '';
+    currentModalStatusFilter = 'all';
+    updateKpiActiveCardStyles();
+
+    // Reset kolom pencarian agar semua item muncul
+    var pInput = document.getElementById('planning-search-input');
+    if (pInput) {
+        pInput.value = '';
+    }
 
     setPlanningTypeTab('kanban');
 
     var p1 = document.getElementById('step-pill-1');
     if (p1) {
-        p1.style.cssText = 'background-color: #2563eb !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
-        p1.textContent = '1. Pilih Planning';
+        p1.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #2563eb; color: #ffffff;';
+        p1.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: rgba(255,255,255,0.25); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900;">1</span><span>Pilih Planning</span>';
     }
     var p2 = document.getElementById('step-pill-2');
     if (p2) {
-        p2.style.cssText = 'background-color: #f1f5f9 !important; color: #64748b !important; border: 1px solid #cbd5e1 !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 700; display: inline-block;';
+        p2.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: transparent; color: #64748b;';
+        p2.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: #e2e8f0; display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 800; color: #475569;">2</span><span>Scan Barcode</span>';
     }
 
-    document.getElementById('wizard-modal-title').textContent = 'Step 1: Pilih Item Planning Aktif';
-    document.getElementById('wizard-modal-subtitle').textContent = 'Pilih Kanban / Safety Stock yang akan diinspeksi sebelum melakukan scan label ';
+    var stepTag = document.getElementById('wizard-step-tag');
+    if (stepTag) {
+        stepTag.textContent = 'Langkah 1 dari 2';
+        stepTag.style.backgroundColor = '#eff6ff';
+        stepTag.style.color = '#1d4ed8';
+        stepTag.style.borderColor = '#bfdbfe';
+    }
+    var titleEl = document.getElementById('wizard-modal-title');
+    if (titleEl) titleEl.textContent = 'OQC Inspection Workbench';
+    var subEl = document.getElementById('wizard-modal-subtitle');
+    if (subEl) subEl.textContent = 'Pilih Kanban atau Safety Stock yang akan diinspeksi';
 
-    document.getElementById('wizard-step-1-content').classList.remove('hidden');
-    document.getElementById('wizard-step-2-content').classList.add('hidden');
+    var step1El = document.getElementById('wizard-step-1-content');
+    var step2El = document.getElementById('wizard-step-2-content');
+    if (step1El) {
+        step1El.classList.remove('hidden');
+        step1El.style.display = 'flex';
+    }
+    if (step2El) {
+        step2El.classList.add('hidden');
+        step2El.style.display = 'none';
+    }
+
+    var btnChangeItem = document.getElementById('btn-change-item-header');
+    if (btnChangeItem) btnChangeItem.style.display = 'none';
+
+    // Render data tabel planning (gunakan cache yang ada jika sudah dimuat, atau refresh via AJAX)
+    if (cachedPlanningItems && cachedPlanningItems.length > 0) {
+        renderPlanningTableRows(cachedPlanningItems);
+        filterPlanningItems();
+    } else {
+        refreshPlanningItemsAjax();
+    }
+
     setTimeout(function() {
         var pInput = document.getElementById('planning-search-input');
         if (pInput) {
@@ -4711,16 +6212,31 @@ function goToStep2IfSelected() {
     if (selectedPlanningId || selectedPlanningPartCode) {
         document.getElementById('wizard-step-1-content').classList.add('hidden');
         document.getElementById('wizard-step-2-content').classList.remove('hidden');
-        document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan QR Code Label Barcode';
-        document.getElementById('wizard-modal-subtitle').textContent = 'Scan barcode label barang yang mau diuji';
+
+        var btnChangeItem = document.getElementById('btn-change-item-header');
+        if (btnChangeItem) btnChangeItem.style.display = 'inline-flex';
+        
+        var stepTag = document.getElementById('wizard-step-tag');
+        if (stepTag) {
+            stepTag.textContent = 'Langkah 2 dari 2';
+            stepTag.style.backgroundColor = '#f0fdf4';
+            stepTag.style.color = '#15803d';
+            stepTag.style.borderColor = '#bbf7d0';
+        }
+        var titleEl = document.getElementById('wizard-modal-title');
+        if (titleEl) titleEl.textContent = 'OQC Inspection Workbench';
+        var subEl = document.getElementById('wizard-modal-subtitle');
+        if (subEl) subEl.textContent = 'Scan QR barcode atau label box part untuk validasi';
+
         var p1 = document.getElementById('step-pill-1');
         if (p1) {
-            p1.style.cssText = 'background-color: #dcfce7 !important; color: #166534 !important; border: 1px solid #bbf7d0 !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; cursor: pointer;';
-            p1.textContent = '✓ Step 1 Complete';
+            p1.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #dcfce7; color: #166534;';
+            p1.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: #bbf7d0; display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900; color: #15803d;">✓</span><span>Planning Terpilih</span>';
         }
         var p2 = document.getElementById('step-pill-2');
         if (p2) {
-            p2.style.cssText = 'background-color: #2563eb !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; box-shadow: 0 2px 4px rgba(37,99,235,0.3); cursor: pointer; border: none;';
+            p2.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #2563eb; color: #ffffff; box-shadow: 0 1px 3px rgba(37,99,235,0.3);';
+            p2.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: rgba(255,255,255,0.25); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900;">2</span><span>Scan Barcode</span>';
         }
         var rawInput = document.getElementById('scan-qr-raw');
         if (rawInput) {
@@ -4803,16 +6319,26 @@ function startDirectSafetyStockScan(presetPartCode, presetLotNum, presetRefNum) 
     // Switch step UI
     var p1 = document.getElementById('step-pill-1');
     if (p1) {
-        p1.style.cssText = 'background-color: #f3e8ff !important; color: #6b21a8 !important; border: 1px solid #d8b4fe !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block;';
-        p1.textContent = '✓ Step 1: Safety Stock Gudang';
+        p1.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #f3e8ff; color: #6b21a8;';
+        p1.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: #e9d5ff; display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900; color: #7e22ce;">✓</span><span>Safety Stock</span>';
     }
     var p2 = document.getElementById('step-pill-2');
     if (p2) {
-        p2.style.cssText = 'background-color: #7c3aed !important; color: #ffffff !important; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 800; display: inline-block; box-shadow: 0 2px 4px rgba(124,58,237,0.3);';
+        p2.style.cssText = 'padding: 4px 11px; border-radius: 6px; font-size: 11px; font-weight: 800; cursor: pointer; transition: all 0.15s ease; border: none; outline: none; background-color: #7c3aed; color: #ffffff; box-shadow: 0 1px 3px rgba(124,58,237,0.3);';
+        p2.innerHTML = '<span style="width: 15px; height: 15px; border-radius: 9999px; background-color: rgba(255,255,255,0.25); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 900;">2</span><span>Scan Barcode</span>';
     }
     
-    document.getElementById('wizard-modal-title').textContent = 'Step 2: Scan / Input Barcode Label';
-    document.getElementById('wizard-modal-subtitle').textContent = 'Scan QR Barcode atau ketik manual field label barang di bawah';
+    var stepTag = document.getElementById('wizard-step-tag');
+    if (stepTag) {
+        stepTag.textContent = 'Langkah 2 dari 2';
+        stepTag.style.backgroundColor = '#faf5ff';
+        stepTag.style.color = '#7e22ce';
+        stepTag.style.borderColor = '#e9d5ff';
+    }
+    var titleEl = document.getElementById('wizard-modal-title');
+    if (titleEl) titleEl.textContent = 'OQC Inspection Workbench';
+    var subEl = document.getElementById('wizard-modal-subtitle');
+    if (subEl) subEl.textContent = 'Scan QR Barcode atau input data label box Safety Stock Gudang';
 
     document.getElementById('wizard-step-1-content').classList.add('hidden');
     document.getElementById('wizard-step-2-content').classList.remove('hidden');
@@ -4864,18 +6390,20 @@ function handlePlanningSearchInput() {
     if (!inputEl) return;
     var rawVal = inputEl.value;
 
-    // Detect full QR string scan (contains | or Z1 and Z2)
+    // Jika scanner memasukkan data sangat cepat tanpa mengirim Enter, beri jeda wajar (min 350ms)
+    // agar seluruh potongan barcode QR (Z1..Z5) selesai diketik penuh
     if (rawVal.indexOf('|') !== -1 || (rawVal.indexOf('Z1') === 0 && rawVal.indexOf('Z2') !== -1)) {
         clearTimeout(planningSearchScanTimer);
         planningSearchScanTimer = setTimeout(function() {
             processPlanningSearchSubmit();
-        }, 120);
+        }, 400);
     }
 }
 
 function handlePlanningSearchKeydown(e) {
     if (e.key === 'Enter') {
         e.preventDefault();
+        clearTimeout(planningSearchScanTimer);
         processPlanningSearchSubmit();
     }
 }
@@ -4888,32 +6416,118 @@ function processPlanningSearchSubmit() {
 
     var res = filterPlanningItems();
     var qrParsed = res.qrParsed || parseBarcodeQR(rawVal);
+    var isQr = !!(qrParsed && qrParsed.Z1);
+    var targetCode = isQr ? qrParsed.Z1.trim() : rawVal.replace(/^#/, '').trim();
 
-    // Prioritize exact match card (exact Part Code or exact Kanban No) across all tabs
-    var targetCard = res.exactMatchCard;
-
-    if (targetCard) {
-        // Switch tab if card belongs to another tab (e.g. partial cicilan)
-        var cardType = targetCard.getAttribute('data-plan-type') || 'kanban';
-        var isPartial = targetCard.getAttribute('data-partial') === 'true';
-        if (isPartial && currentPlanTypeTab !== 'partial') {
-            setPlanningTypeTab('partial');
-        } else if (!isPartial && cardType !== currentPlanTypeTab) {
-            setPlanningTypeTab(cardType);
+    // 1. Cek apakah ada exact match di tabel yang sedang tampil
+    var targetRow = res.exactMatchRow;
+    if (targetRow) {
+        var actionBtn = targetRow.querySelector('button');
+        if (actionBtn) {
+            inputEl.value = '';
+            filterPlanningItems();
+            actionBtn.click();
+            return;
         }
-        // Auto-select exact matching Kanban planning card
-        targetCard.click();
-    } else if (res.visibleCount > 0 && !qrParsed.is_qr && res.visibleCount === 1 && res.lastVisibleCard) {
-        // Single visible card for plain text search -> Auto-select
-        res.lastVisibleCard.click();
-    } else {
-        // NOT found in active Kanban planning -> Fallback directly to Safety Stock Direct Scan!
-        var pCode = (qrParsed && qrParsed.Z1) ? qrParsed.Z1.trim() : rawVal;
-        var lNum  = (qrParsed && qrParsed.Z2) ? qrParsed.Z2.trim() : '';
-        var rNum  = (qrParsed && qrParsed.Z5) ? qrParsed.Z5.trim() : '';
+    }
 
-        inputEl.value = '';
-        startDirectSafetyStockScan(pCode, lNum, rNum);
+    // 2. Jika hanya ada 1 baris yang cocok terlihat di tabel
+    if (res.visibleCount === 1 && res.lastVisibleRow) {
+        var actionBtn = res.lastVisibleRow.querySelector('button');
+        if (actionBtn) {
+            inputEl.value = '';
+            filterPlanningItems();
+            actionBtn.click();
+            return;
+        }
+    }
+
+    // 3. Jika tidak ada di batch yang sedang aktif di layar, cari lintas batch (server search)
+    // Jangan asal pilih baris pertama/overdue!
+    inputEl.setAttribute('disabled', 'disabled');
+    var searchUrl = '<?= base_url("modules/inspection/session.php?action=get_planning_items") ?>&search_query=' + encodeURIComponent(targetCode);
+
+    fetch(searchUrl)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            inputEl.removeAttribute('disabled');
+            if (data && data.success && Array.isArray(data.items) && data.items.length > 0) {
+                // Temukan item yang exact match
+                var matchedPlan = data.items.find(function(item) {
+                    var c = (item.item_code || '').trim().toLowerCase();
+                    var kb = (item.kanban_no || '').trim().toLowerCase();
+                    var targetLower = targetCode.toLowerCase();
+                    return (c === targetLower || kb === targetLower || ('#' + kb) === targetLower);
+                }) || data.items[0];
+
+                if (matchedPlan) {
+                    inputEl.value = '';
+                    var targetTotalQty = parseInt(matchedPlan.qty) || 0;
+                    var totalPassedQty = parseInt(matchedPlan.total_passed_qty) || 0;
+                    var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);
+                    var isSafetyStock = (matchedPlan.plan_type === 'safety_stock' || (matchedPlan.batch_plan_type || '') === 'safety_stock' || (matchedPlan.kanban_no || '').toUpperCase().indexOf('SS') === 0);
+                    var planTypeAttr = isSafetyStock ? 'safety_stock' : 'kanban';
+
+                    selectPlanningItem(
+                        parseInt(matchedPlan.id),
+                        matchedPlan.item_code,
+                        matchedPlan.display_part_name || matchedPlan.item_description,
+                        matchedPlan.customer || 'PT. Indonesia Epson Industry',
+                        remainingQty,
+                        matchedPlan.check_type || '',
+                        planTypeAttr,
+                        parseInt(matchedPlan.avail_ss_qty) || 0,
+                        totalPassedQty,
+                        targetTotalQty,
+                        matchedPlan.kanban_no || '',
+                        matchedPlan.eta || matchedPlan.req_date || ''
+                    );
+                    return;
+                }
+            }
+
+            // 4. Jika benar-benar tidak ditemukan di database Kanban (baik hari ini maupun tunggakan)
+            handlePartNotFoundInKanban(targetCode, rawVal, qrParsed);
+        })
+        .catch(function(err) {
+            inputEl.removeAttribute('disabled');
+            console.error('Pencarian Kanban error:', err);
+            handlePartNotFoundInKanban(targetCode, rawVal, qrParsed);
+        });
+}
+
+function handlePartNotFoundInKanban(targetCode, rawVal, qrParsed) {
+    var isQr = !!(qrParsed && qrParsed.Z1);
+    var pCode = isQr ? qrParsed.Z1.trim() : targetCode;
+    var lNum  = (qrParsed && qrParsed.Z2) ? qrParsed.Z2.trim() : '';
+    var rNum  = (qrParsed && qrParsed.Z5) ? qrParsed.Z5.trim() : '';
+
+    var inputEl = document.getElementById('planning-search-input');
+    if (inputEl) inputEl.value = '';
+
+    // Smart Auto-Route: Part tidak ada di jadwal Kanban delivery,
+    // langsung alihkan otomatis ke kamar Safety Stock Gudang!
+    startDirectSafetyStockScan(pCode, lNum, rNum);
+
+    // Tampilkan toast notifikasi pintar non-intrusif di pojok atas (tanpa menghalangi fokus scan)
+    if (typeof Swal !== 'undefined') {
+        const Toast = Swal.mixin({
+            toast: true,
+            position: 'top-end',
+            showConfirmButton: false,
+            timer: 3500,
+            timerProgressBar: true,
+            didOpen: (toast) => {
+                toast.addEventListener('mouseenter', Swal.stopTimer);
+                toast.addEventListener('mouseleave', Swal.resumeTimer);
+            }
+        });
+
+        Toast.fire({
+            icon: 'info',
+            title: 'Dialihkan ke Safety Stock Gudang',
+            html: 'Part <b class="font-mono">' + escapeHtml(pCode) + '</b> tidak ada di jadwal Kanban.'
+        });
     }
 }
 
@@ -4923,81 +6537,69 @@ function filterPlanningItems() {
 
     var qrParsed = parseBarcodeQR(rawVal);
     var isQr = !!(qrParsed && qrParsed.Z1);
-    var query = rawVal.toLowerCase();
+    var query = rawVal.toLowerCase().replace(/^#/, '');
 
     if (qrParsed && qrParsed.Z1) {
         query = qrParsed.Z1.trim().toLowerCase();
     }
 
-    var container = document.getElementById('planning-cards-container');
-    if (!container) return { visibleCount: 0, lastVisibleCard: null, exactMatchCard: null, qrParsed: qrParsed };
-    var cards = container.querySelectorAll('.planning-card');
+    var tbody = document.getElementById('planning-table-body');
+    if (!tbody) return { visibleCount: 0, lastVisibleRow: null, exactMatchRow: null, qrParsed: qrParsed };
+    var rows = tbody.querySelectorAll('.kanban-table-row');
     var visibleCount = 0;
-    var lastVisibleCard = null;
-    var exactMatchCard = null;
+    var lastVisibleRow = null;
+    var exactMatchRow = null;
 
-    for (var i = 0; i < cards.length; i++) {
-        var card = cards[i];
-        var text = card.textContent.toLowerCase();
-        var cardType = card.getAttribute('data-plan-type') || 'kanban';
-        var isPartial = card.getAttribute('data-partial') === 'true';
-        var cardCode = (card.getAttribute('data-plan-code') || card.getAttribute('data-part-code') || card.getAttribute('data-item-code') || '').trim().toLowerCase();
-        var cardKbNo = (card.getAttribute('data-plan-kanban-no') || card.getAttribute('data-kanban-no') || '').trim().toLowerCase();
+    for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var text = row.textContent.toLowerCase();
+        var rowCode = (row.getAttribute('data-part-code') || '').trim().toLowerCase();
+        var rowKbNo = (row.getAttribute('data-kanban-no') || '').trim().toLowerCase();
+        var rowCust = (row.getAttribute('data-customer') || '').trim().toLowerCase();
 
         var queryNum = parseInt(query, 10);
-        var cardCodeNum = parseInt(cardCode, 10);
-        var isNumericMatch = (!isNaN(queryNum) && !isNaN(cardCodeNum) && queryNum === cardCodeNum && query.length <= 10 && cardCode.length <= 10);
+        var rowCodeNum = parseInt(rowCode, 10);
+        var isNumericMatch = (!isNaN(queryNum) && !isNaN(rowCodeNum) && queryNum === rowCodeNum && query.length <= 10 && rowCode.length <= 10);
 
-        var isExact = (query !== '' && (cardCode === query || cardKbNo === query || ('#' + cardKbNo) === query || isNumericMatch));
+        var isExact = (query !== '' && (rowCode === query || rowKbNo === query || ('#' + rowKbNo) === query || isNumericMatch));
         
-        // Match exact card ANYWHERE across all tabs for scan auto-selection
-        if (isExact && !exactMatchCard) {
-            exactMatchCard = card;
+        if (isExact && !exactMatchRow) {
+            exactMatchRow = row;
         }
 
         var matchesSearch = false;
         if (isQr) {
-            // When a QR barcode is scanned, require EXACT Part Code or Kanban No match
             matchesSearch = isExact;
         } else {
-            // Plain text manual search: substring match
-            matchesSearch = (query === '' || text.indexOf(query) !== -1);
+            matchesSearch = (query === '' || text.indexOf(query) !== -1 || rowCode.indexOf(query) !== -1 || rowKbNo.indexOf(query) !== -1 || rowCust.indexOf(query) !== -1);
         }
 
-        var matchesTab;
-        if (currentPlanTypeTab === 'partial') {
-            matchesTab = (cardType === 'kanban' && isPartial);
+        // Filter status berdasarkan KPI card / Work Tracker yang aktif (all, uninspected, in_progress, completed, rejected, my_kanban)
+        var rowStatusGroup = row.getAttribute('data-status-group') || 'uninspected';
+        var isRowMyKanban = (row.getAttribute('data-is-my-kanban') === '1');
+        var matchesStatus = false;
+
+        if (currentModalStatusFilter === 'all') {
+            matchesStatus = true;
+        } else if (currentModalStatusFilter === 'my_kanban') {
+            matchesStatus = isRowMyKanban;
         } else {
-            matchesTab = (cardType === currentPlanTypeTab);
+            matchesStatus = (currentModalStatusFilter === rowStatusGroup);
         }
 
-        if (matchesSearch && matchesTab) {
-            card.style.display = 'flex';
+        if (matchesSearch && matchesStatus) {
+            row.style.display = '';
             visibleCount++;
-            lastVisibleCard = card;
+            lastVisibleRow = row;
         } else {
-            card.style.display = 'none';
+            row.style.display = 'none';
         }
     }
 
-    // Show empty state if no partial cards exist
-    var emptyEl = document.getElementById('planning-partial-empty');
-    if (currentPlanTypeTab === 'partial') {
-        if (!emptyEl && visibleCount === 0) {
-            var el = document.createElement('div');
-            el.id = 'planning-partial-empty';
-            el.className = 'text-center py-6 text-sm text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200';
-            el.textContent = 'Tidak ada Kanban yang sedang dicicil / inspeksi parsial.';
-            container.appendChild(el);
-        } else if (emptyEl) {
-            emptyEl.style.display = visibleCount === 0 ? 'block' : 'none';
-        }
-    } else if (emptyEl) {
-        emptyEl.style.display = 'none';
-    }
+    updatePlanningTableCount(visibleCount);
 
     qrParsed.is_qr = isQr;
-    return { visibleCount: visibleCount, lastVisibleCard: lastVisibleCard, exactMatchCard: exactMatchCard, qrParsed: qrParsed };
+    return { visibleCount: visibleCount, lastVisibleRow: lastVisibleRow, exactMatchRow: exactMatchRow, qrParsed: qrParsed };
 }
 
 // Initialize default tab on load & load active workbench session data
@@ -6375,16 +7977,34 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                 '</div>';
         } else {
             // Skenario: Belum pernah ada re-inspeksi yang passed (baru kali ini di-reinspeksi lagi)
-            reinspectionStatusCard = 
-                '<div style="margin-top: 6px; padding: 7px 10px; background-color: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; display: flex; align-items: flex-start; gap: 6px;">' +
-                    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #d97706; flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
-                    '<div>' +
-                        '<div style="font-size: 9.5px; font-weight: 800; color: #92400e; margin-bottom: 2px;">Belum Dinyatakan Lulus Re-Inspeksi</div>' +
-                        '<div style="font-size: 9px; color: #b45309; font-weight: 600; line-height: 1.3;">' +
-                            'Lot ini belum pernah melalui pemeriksaan ulang yang berstatus lulus. Pemeriksaan pada sesi ini merupakan pemeriksaan ulang pertama kali setelah tercatat riwayat penolakan.' +
+            var dispInfo = (lot.rejected_info && lot.rejected_info.is_disposed && lot.rejected_info.chief_notes) ? lot.rejected_info : null;
+            if (dispInfo) {
+                reinspectionStatusCard = 
+                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #f0f9ff; border: 1.5px solid #7dd3fc; border-radius: 8px; display: flex; flex-direction: column; gap: 3px;">' +
+                        '<div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">' +
+                            '<div style="display: flex; align-items: center; gap: 5px;">' +
+                                '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #0284c7; flex-shrink: 0;"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
+                                '<span style="font-size: 9.5px; font-weight: 900; color: #0369a1; text-transform: uppercase;">Disposisi Chief:</span>' +
+                                '<span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 8.5px; font-weight: 800;">' + escapeHtml(dispInfo.chief_name) + '</span>' +
+                            '</div>' +
+                            '<span style="font-family: monospace; font-size: 8.5px; font-weight: 700; color: #0284c7;">' + escapeHtml(dispInfo.chief_approved_at || '-') + '</span>' +
                         '</div>' +
-                    '</div>' +
-                '</div>';
+                        '<div style="font-size: 9px; color: #0c4a6e; font-weight: 600; line-height: 1.3; background: #ffffff; padding: 4px 7px; border-radius: 6px; border: 1px solid #e0f2fe;">' +
+                            '<b>Catatan:</b> ' + escapeHtml(dispInfo.chief_notes) +
+                        '</div>' +
+                    '</div>';
+            } else {
+                reinspectionStatusCard = 
+                    '<div style="margin-top: 6px; padding: 7px 10px; background-color: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; display: flex; align-items: flex-start; gap: 6px;">' +
+                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #d97706; flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+                        '<div>' +
+                            '<div style="font-size: 9.5px; font-weight: 800; color: #92400e; margin-bottom: 2px;">Belum Dinyatakan Lulus Re-Inspeksi</div>' +
+                            '<div style="font-size: 9px; color: #b45309; font-weight: 600; line-height: 1.3;">' +
+                                'Lot ini belum pernah melalui pemeriksaan ulang yang berstatus lulus. Pemeriksaan pada sesi ini merupakan pemeriksaan ulang pertama kali setelah tercatat riwayat penolakan.' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>';
+            }
         }
 
         prevNgHistoryHtml = 
@@ -7811,10 +9431,21 @@ function resetLotToInProgress(lotId, lotNumber) {
 function confirmRemoveLot(lotId, boxNum, lotNo, refNo, qty) {
     if (!lotId || !currentSessionId) return;
 
-    var refDisplay = refNo ? ' | Ref: ' + escapeHtml(refNo) : '';
+    var totalBoxesInWorkbench = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session_lots) ?
+        window.lastWorkbenchSessionData.session_lots.length : 1;
+    var isSingleBox = (totalBoxesInWorkbench <= 1);
+
+    var noteHtml = isSingleBox
+        ? '<div style="background-color: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 8px; padding: 8px 10px; color: #9f1239; font-size: 11px; margin-top: 8px;">' +
+          '<b>⚠️ PERHATIAN:</b> Box ini adalah satu-satunya box dalam sesi ini. Membatalkan box ini akan <b>otomatis membatalkan seluruh sesi pemeriksaan</b>, mengembalikan Safety Stock (jika ada), dan membebaskan label agar siap discan ulang.' +
+          '</div>'
+        : '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 7px 10px; color: #065f46; font-size: 11px; display: flex; align-items: flex-start; gap: 6px;">' +
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink: 0; margin-top: 1px;"><polyline points="20 6 9 17 4 12"/></svg>' +
+          '<span><b>Label Bebas:</b> Setelah box ini dihapus, barcode/label ini dapat discan kembali pada Kanban lain atau PC lain tanpa ditolak sistem.</span>' +
+          '</div>';
 
     Swal.fire({
-        title: 'Batal Pakai Box #' + boxNum + '?',
+        title: isSingleBox ? 'Batal Pakai & Batalkan Sesi?' : ('Batal Pakai Box #' + boxNum + '?'),
         html: '<div style="text-align: left; font-size: 12px; color: #334155; line-height: 1.5;">' +
             '<p style="margin-bottom: 8px;">Apakah Anda yakin ingin membatalkan penggunaan dan menghapus box ini dari sesi pemeriksaan?</p>' +
             '<div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 7px 10px; margin-bottom: 9px; font-size: 11.5px;">' +
@@ -7823,23 +9454,20 @@ function confirmRemoveLot(lotId, boxNum, lotNo, refNo, qty) {
                 (refNo ? '<div><b>Ref Number:</b> <span style="font-family: monospace; font-weight: 700; color: #1e40af;">' + escapeHtml(refNo) + '</span></div>' : '') +
                 '<div><b>Qty Lot:</b> ' + Number(qty).toLocaleString() + ' pcs</div>' +
             '</div>' +
-            '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 7px 10px; color: #065f46; font-size: 11px; display: flex; align-items: flex-start; gap: 6px;">' +
-                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink: 0; margin-top: 1px;"><polyline points="20 6 9 17 4 12"/></svg>' +
-                '<span><b>Label Bebas:</b> Setelah box ini dihapus, barcode/label ini dapat discan kembali pada Kanban lain atau PC lain tanpa ditolak sistem.</span>' +
-            '</div>' +
+            noteHtml +
         '</div>',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonColor: '#e11d48',
         cancelButtonColor: '#64748b',
-        confirmButtonText: 'Ya, Batal Pakai Box Ini',
+        confirmButtonText: isSingleBox ? 'Ya, Batalkan Box & Sesi' : 'Ya, Batal Pakai Box Ini',
         cancelButtonText: 'Batal',
         focusCancel: true
     }).then(function(result) {
         if (!result.isConfirmed) return;
 
         Swal.fire({
-            title: 'Menghapus Box dari Sesi...',
+            title: isSingleBox ? 'Membatalkan Sesi Pemeriksaan...' : 'Menghapus Box dari Sesi...',
             allowOutsideClick: false,
             didOpen: function() { Swal.showLoading(); }
         });
@@ -7856,6 +9484,21 @@ function confirmRemoveLot(lotId, boxNum, lotNo, refNo, qty) {
                     icon: 'error',
                     title: 'Gagal Membatalkan Box',
                     text: res.message || 'Terjadi kesalahan sistem'
+                });
+                return;
+            }
+
+            // Jika sesi ikut terhapus (karena box terakhir)
+            if (res.session_deleted) {
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Sesi Berhasil Dibatalkan',
+                    text: res.message || 'Box terakhir telah dibatalkan dan sesi telah dibersihkan.',
+                    confirmButtonColor: '#059669',
+                    timer: 2500,
+                    timerProgressBar: true
+                }).then(function() {
+                    window.location.href = res.redirect_url || '<?= base_url("modules/inspection/index.php") ?>';
                 });
                 return;
             }
@@ -7883,6 +9526,198 @@ function confirmRemoveLot(lotId, boxNum, lotNo, refNo, qty) {
                 text: 'Gagal menghubungi server saat menghapus box.'
             });
         });
+    });
+}
+
+function handleWorkbenchHeaderBack(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    var defaultIndexUrl = '<?= base_url("modules/inspection/index.php") ?>';
+
+    // Jika belum ada session aktif yang dimuat
+    if (!currentSessionId || !window.lastWorkbenchSessionData || !window.lastWorkbenchSessionData.session) {
+        window.location.href = defaultIndexUrl;
+        return;
+    }
+
+    var sess = window.lastWorkbenchSessionData.session;
+    var sessLots = window.lastWorkbenchSessionData.session_lots || [];
+    var sessType = String(sess.inspection_type || 'kanban').toLowerCase();
+    var sessStatus = String(sess.status || '').toLowerCase();
+
+    // Jika sesi sudah berstatus final (passed / rejected), langsung keluar tanpa alert
+    if (sessStatus === 'passed' || sessStatus === 'rejected') {
+        window.location.href = defaultIndexUrl;
+        return;
+    }
+
+    // Klasifikasikan box: yang sudah selesai diinspeksi vs yang masih menggantung (in_progress)
+    var completedLots = [];
+    var pendingLots = [];
+
+    for (var i = 0; i < sessLots.length; i++) {
+        var lot = sessLots[i];
+        var lr = String(lot.lot_result || 'in_progress').toLowerCase();
+        var ls = String(lot.lot_status || 'ok').toLowerCase();
+        var ngCnt = parseInt(lot.ng_count || 0, 10);
+
+        if (lr === 'passed' || lr === 'rejected' || lr === 'skipped' || ls === 'ng_found' || ls === 'ng_quarantine' || ls === 'replaced' || ls === 'reinspected' || ngCnt > 0) {
+            completedLots.push(lot);
+        } else {
+            pendingLots.push(lot);
+        }
+    }
+
+    // KONDISI 1: SEMUA BOX SUDAH SELESAI (Tidak ada yang menggantung)
+    // Langsung keluar tanpa memunculkan alert
+    if (pendingLots.length === 0) {
+        window.location.href = defaultIndexUrl;
+        return;
+    }
+
+    // Disable navigasi unload guard agar tidak muncul alert ganda dari browser
+    window.isWorkbenchIntentionallyExiting = true;
+
+    // KONDISI 2: BELUM ADA BOX YANG DIINSPEKSI SAMA SEKALI (0 Selesai)
+    if (completedLots.length === 0) {
+        var typeLabel = sessType === 'safety_stock' ? 'Safety Stock' : 'Kanban';
+        Swal.fire({
+            title: 'Batalkan Sesi Inspeksi?',
+            html: '<div style="text-align: left; font-size: 12.5px; color: #334155; line-height: 1.6;">' +
+                '<p style="margin-bottom: 10px;">Sesi <b>' + typeLabel + '</b> ini belum mulai diinspeksi sama sekali. Apakah Anda yakin ingin keluar dan membatalkan sesi ini?</p>' +
+                '<div style="background-color: #fff1f2; border: 1.5px solid #fecdd3; border-radius: 8px; padding: 10px 12px; color: #9f1239; font-size: 11.5px;">' +
+                    '<b>Informasi:</b> Sesi ini akan dihapus dari sistem, dan seluruh label QR/box yang discan akan <b>dibebaskan kembali</b> sehingga dapat di-scan ulang tanpa status ganda.' +
+                '</div>' +
+            '</div>',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonColor: '#e11d48',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Ya, Batalkan & Keluar',
+            cancelButtonText: 'Tetap di Sini',
+            focusCancel: true,
+            allowOutsideClick: false
+        }).then(function(result) {
+            if (result.isConfirmed) {
+                Swal.fire({
+                    title: 'Membatalkan Sesi...',
+                    text: 'Menghapus sesi & membebaskan label...',
+                    allowOutsideClick: false,
+                    didOpen: function() { Swal.showLoading(); }
+                });
+
+                var fd = new FormData();
+                fd.append('session_id', currentSessionId);
+
+                fetch('<?= base_url("modules/inspection/api/cleanup_uninspected_lots.php") ?>', {
+                    method: 'POST',
+                    body: fd
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(res) {
+                    if (res.success) {
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'Sesi Dibatalkan',
+                            text: res.message || 'Sesi telah dibatalkan dan seluruh label dibebaskan.',
+                            confirmButtonColor: '#059669',
+                            timer: 1600,
+                            timerProgressBar: true
+                        }).then(function() {
+                            window.location.href = defaultIndexUrl;
+                        });
+                    } else {
+                        window.isWorkbenchIntentionallyExiting = false;
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Gagal Membatalkan Sesi',
+                            text: res.message || 'Terjadi kesalahan sistem'
+                        });
+                    }
+                })
+                .catch(function() {
+                    window.isWorkbenchIntentionallyExiting = false;
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Koneksi Error',
+                        text: 'Gagal menghubungi server saat membatalkan sesi.'
+                    });
+                });
+            } else {
+                window.isWorkbenchIntentionallyExiting = false;
+            }
+        });
+        return;
+    }
+
+    // KONDISI 3: SEBAGIAN BOX SUDAH DIINSPEKSI (Misal 2 Selesai, 1 Belum)
+    Swal.fire({
+        title: 'Keluar dari Sesi Inspeksi?',
+        html: '<div style="text-align: left; font-size: 12.5px; color: #334155; line-height: 1.6;">' +
+            '<p style="margin-bottom: 8px;">Anda telah menyelesaikan inspeksi <b style="color: #059669;">' + completedLots.length + ' box</b>, namun masih ada <b style="color: #d97706;">' + pendingLots.length + ' box</b> yang belum diinspeksi.</p>' +
+            '<div style="background-color: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px;">' +
+                '<ul style="margin: 0; padding-left: 18px; line-height: 1.7;">' +
+                    '<li><b style="color: #059669;">' + completedLots.length + ' Box selesai:</b> Tetap <b>tersimpan rapi</b> sebagai hasil inspeksi sah.</li>' +
+                    '<li><b style="color: #e11d48;">' + pendingLots.length + ' Box belum selesai:</b> Dibatalkan & labelnya <b>dibebaskan kembali</b> agar dapat diinspeksi nanti.</li>' +
+                '</ul>' +
+            '</div>' +
+            '<p style="font-size: 11.5px; color: #64748b; margin: 0;">Apakah Anda ingin menyimpan hasil yang ada dan keluar sekarang?</p>' +
+        '</div>',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#2563eb',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: 'Ya, Simpan Hasil & Keluar',
+        cancelButtonText: 'Lanjutkan Inspeksi',
+        focusCancel: false,
+        allowOutsideClick: false
+    }).then(function(result) {
+        if (result.isConfirmed) {
+            Swal.fire({
+                title: 'Menyimpan Hasil & Membebaskan Box Sisa...',
+                allowOutsideClick: false,
+                didOpen: function() { Swal.showLoading(); }
+            });
+
+            var fd = new FormData();
+            fd.append('session_id', currentSessionId);
+
+            fetch('<?= base_url("modules/inspection/api/cleanup_uninspected_lots.php") ?>', {
+                method: 'POST',
+                body: fd
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+                if (res.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Hasil Tersimpan',
+                        text: res.message || 'Hasil inspeksi berhasil disimpan.',
+                        confirmButtonColor: '#059669',
+                        timer: 1800,
+                        timerProgressBar: true
+                    }).then(function() {
+                        window.location.href = defaultIndexUrl;
+                    });
+                } else {
+                    window.isWorkbenchIntentionallyExiting = false;
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gagal Memproses',
+                        text: res.message || 'Terjadi kesalahan sistem'
+                    });
+                }
+            })
+            .catch(function() {
+                window.isWorkbenchIntentionallyExiting = false;
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Koneksi Error',
+                    text: 'Gagal menghubungi server.'
+                });
+            });
+        } else {
+            window.isWorkbenchIntentionallyExiting = false;
+        }
     });
 }
 
@@ -8608,10 +10443,10 @@ function addManualLotToPending() {
     var refInput = document.getElementById('add-lot-ref-number');
     var qrInput = document.getElementById('add-lot-qr-raw');
 
-    var partCode = (partInput ? partInput.value.trim() : '');
-    var lotNumber = (lotInput ? lotInput.value.trim() : '');
+    var partCode = (partInput ? partInput.value.trim().toUpperCase() : '');
+    var lotNumber = (lotInput ? lotInput.value.trim().toUpperCase() : '');
     var qty = parseInt(qtyInput ? qtyInput.value : 0, 10) || 0;
-    var refNumber = (refInput ? refInput.value.trim() : '');
+    var refNumber = (refInput ? refInput.value.trim().toUpperCase() : '');
 
     if (!lotNumber) {
         Swal.fire({
@@ -8693,6 +10528,10 @@ function addManualLotToPending() {
             return;
         }
     }
+
+    var activeInspectionType = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.inspection_type) 
+        ? window.lastWorkbenchSessionData.session.inspection_type 
+        : ((typeof currentSessionObj !== 'undefined' && currentSessionObj && currentSessionObj.inspection_type) ? currentSessionObj.inspection_type : (typeof currentSessionInspectionType !== 'undefined' ? currentSessionInspectionType : 'kanban'));
 
     Swal.fire({
         title: 'Memeriksa Box...',
@@ -10073,7 +11912,7 @@ function handleSingleBatchQrInput(inputEl, forceProcess) {
 }
 
 /**
- * Add Manual Label via + Tambah Label Manual button
+ * Add Manual Label via + Input Label Manual button
  */
 function addManualBatchLabel() {
     var z1 = document.getElementById('batch-input-z1').value.trim() || currentSessionPartCode || '';
