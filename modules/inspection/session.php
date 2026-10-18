@@ -2238,6 +2238,10 @@ require_once __DIR__ . '/../../layouts/header.php';
                         <p class="text-[11px] font-semibold text-slate-600">Memeriksa ketersediaan status DID & Matching Planning...</p>
                     </div>
 
+                    <div id="modal-error-box" class="hidden p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 font-medium space-y-1">
+                        <span id="modal-error-msg" class="whitespace-pre-line"></span>
+                    </div>
+
                 </div>
 
             </div>
@@ -7079,9 +7083,63 @@ function loadWorkbenchSessionData(sessionId, onLoadedCallback) {
         });
 }
 
+function setScanModalLoading(isLoading, customText) {
+    var loadingEl = document.getElementById('modal-loading');
+    if (loadingEl) {
+        if (isLoading) {
+            loadingEl.classList.remove('hidden');
+            loadingEl.style.display = 'block';
+            if (customText) {
+                var p = loadingEl.querySelector('p');
+                if (p) p.textContent = customText;
+            }
+        } else {
+            loadingEl.classList.add('hidden');
+            loadingEl.style.display = 'none';
+        }
+    }
+    var submitBtn = document.getElementById('btn-submit-scan-modal');
+    if (submitBtn) {
+        submitBtn.disabled = isLoading;
+        if (isLoading) {
+            submitBtn.style.opacity = '0.75';
+            submitBtn.style.cursor = 'wait';
+        } else {
+            submitBtn.style.opacity = '1';
+            submitBtn.style.cursor = 'pointer';
+        }
+    }
+}
+
+function showScanModalError(msg) {
+    setScanModalLoading(false);
+    var errBox = document.getElementById('modal-error-box');
+    var errMsg = document.getElementById('modal-error-msg');
+    if (errBox && errMsg) {
+        errBox.classList.remove('hidden');
+        errBox.style.display = 'block';
+        errMsg.textContent = msg;
+    }
+    if (typeof Swal !== 'undefined') {
+        Swal.fire({
+            icon: 'error',
+            title: 'Validasi / Pembuatan Sesi Gagal',
+            text: msg
+        });
+    }
+}
+
+function hideScanModalError() {
+    var errBox = document.getElementById('modal-error-box');
+    if (errBox) {
+        errBox.classList.add('hidden');
+        errBox.style.display = 'none';
+    }
+}
+
 function triggerModalValidation() {
     // 1. Selalu gunakan Part Code resmi Kanban yang dipilih (atau dari daftar label yang sudah tervalidasi)
-    var pCode = selectedPlanningPartCode || (scannedLabelsList.length > 0 ? scannedLabelsList[0].Z1 : document.getElementById('scan-part-code').value.trim());
+    var pCode = selectedPlanningPartCode || (scannedLabelsList.length > 0 ? scannedLabelsList[0].Z1 : (document.getElementById('scan-part-code') ? document.getElementById('scan-part-code').value.trim() : ''));
     var lNum = '';
 
     if (scannedLabelsList.length > 0) {
@@ -7090,7 +7148,7 @@ function triggerModalValidation() {
         else if (lastLbl.Z1) pCode = lastLbl.Z1;
         lNum = lastLbl.Z2;
     } else {
-        lNum = document.getElementById('scan-lot-number').value.trim();
+        lNum = document.getElementById('scan-lot-number') ? document.getElementById('scan-lot-number').value.trim() : '';
     }
 
     if (!pCode || !lNum) {
@@ -7129,8 +7187,8 @@ function triggerModalValidation() {
         }
     }
 
-    document.getElementById('modal-loading').classList.remove('hidden');
-    document.getElementById('modal-error-box').classList.add('hidden');
+    setScanModalLoading(true, 'Memeriksa ketersediaan status DID & Matching Planning...');
+    hideScanModalError();
 
     var scannedRefList = [];
     var refVal = '';
@@ -7158,15 +7216,13 @@ function triggerModalValidation() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (!data.success) {
-                document.getElementById('modal-loading').classList.add('hidden');
-                document.getElementById('modal-error-box').classList.remove('hidden');
-                document.getElementById('modal-error-msg').textContent = data.message;
+                showScanModalError(data.message || 'Validasi label gagal!');
                 return;
             }
 
             // 1. Kasus PASSED: Auto-Bypass & Cegah Data Ganda
             if (data.already_safety_stock_passed) {
-                document.getElementById('modal-loading').classList.add('hidden');
+                setScanModalLoading(false);
 
                 if (selectedPlanningType === 'safety_stock') {
                     // Alert khusus scan Safety Stock Gudang
@@ -7224,7 +7280,7 @@ function triggerModalValidation() {
 
             // 2. Kasus REJECTED: Peringatan NG & Opsi Cek Ulang
             if (data.already_safety_stock_rejected) {
-                document.getElementById('modal-loading').classList.add('hidden');
+                setScanModalLoading(false);
                 Swal.fire({
                     title: '⚠️ Perhatian: Lot Pernah REJECTED',
                     html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
@@ -7251,9 +7307,7 @@ function triggerModalValidation() {
             executeCreateSession(data, pCode, lNum);
         })
         .catch(function(err) {
-            document.getElementById('modal-loading').classList.add('hidden');
-            document.getElementById('modal-error-box').classList.remove('hidden');
-            document.getElementById('modal-error-msg').textContent = 'Gagal memproses validasi label QR!';
+            showScanModalError('Gagal memproses validasi label QR: ' + (err.message || err));
         });
 }
 
@@ -7261,12 +7315,13 @@ function executeCreateSession(data, pCode, lNum) {
     var deviceLine = localStorage.getItem('oqc_device_line_name') || localStorage.getItem('oqc_device_line');
     var deviceLineId = localStorage.getItem('oqc_device_line_id') || 0;
     if (!deviceLine || deviceLine.trim() === '') {
-        document.getElementById('modal-loading').classList.add('hidden');
+        setScanModalLoading(false);
         promptDeviceLine(false);
         return;
     }
 
-    document.getElementById('modal-loading').classList.remove('hidden');
+    setScanModalLoading(true, 'Membuat sesi inspeksi workbench...');
+    hideScanModalError();
 
     var totalScanned = 0;
     scannedLabelsList.forEach(function(l) { totalScanned += parseInt(l.Z3) || 0; });
@@ -7327,19 +7382,16 @@ function executeCreateSession(data, pCode, lNum) {
     })
     .then(function(res) { return res.json(); })
     .then(function(resData) {
-        document.getElementById('modal-loading').classList.add('hidden');
+        setScanModalLoading(false);
         if (resData.success && (resData.url || resData.session_id)) {
             var newId = resData.session_id || parseInt((resData.url || '').split('id=')[1]);
             loadWorkbenchSessionData(newId);
         } else {
-            document.getElementById('modal-error-box').classList.remove('hidden');
-            document.getElementById('modal-error-msg').textContent = resData.message || 'Gagal membuat sesi inspeksi!';
+            showScanModalError(resData.message || 'Gagal membuat sesi inspeksi!');
         }
     })
     .catch(function(err) {
-        document.getElementById('modal-loading').classList.add('hidden');
-        document.getElementById('modal-error-box').classList.remove('hidden');
-        document.getElementById('modal-error-msg').textContent = 'Gagal memproses pembuatan sesi inspeksi!';
+        showScanModalError('Gagal memproses pembuatan sesi inspeksi: ' + (err.message || err));
     });
 }
 
