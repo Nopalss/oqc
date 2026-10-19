@@ -222,7 +222,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
 
         $selCondWhere = "";
         $selCondHaving = "";
-        $orderSel = "COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id DESC";
+
+        // Urutan default: jika scope 'today' dan batch 'all', tampilkan Batch 1 terlebih dahulu, baru Batch 2, dst.
+        if ($scopeFilter === 'today' && $batchFilter === 'all') {
+            $orderSel = "b.imported_at ASC, b.id ASC, COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id ASC";
+        } else {
+            $orderSel = "COALESCE(k.eta, k.req_date, '9999-12-31') ASC, k.id DESC";
+        }
 
         if ($selectedId > 0) {
             $params[':sel_id_1'] = $selectedId;
@@ -302,9 +308,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
             JOIN kanban_batches b ON b.id = k.batch_id
             LEFT JOIN master_parts mp ON mp.part_code = k.item_code
             WHERE ({$whereSql}{$selCondWhere})
-              AND (k.status != 'completed'{$selCondWhere})
-            HAVING total_passed_qty < qty{$selCondHaving}
-            ORDER BY {$orderSel}
+            ORDER BY CASE WHEN k.status = 'completed' OR total_passed_qty >= k.qty THEN 1 ELSE 0 END ASC, {$orderSel}
             LIMIT 250
         ";
 
@@ -312,6 +316,19 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
         $stmtPlan = $pdo->prepare($sql);
         $stmtPlan->execute($params);
         $items = $stmtPlan->fetchAll(PDO::FETCH_ASSOC);
+
+        // Buat mapping batch_id => batch_number (1, 2, 3...)
+        $batchNumMap = [];
+        if (!empty($todayBatches)) {
+            foreach ($todayBatches as $idx => $tb) {
+                $batchNumMap[$tb['id']] = $idx + 1;
+            }
+        }
+        foreach ($items as &$itm) {
+            $bId = $itm['batch_id'] ?? null;
+            $itm['batch_number'] = ($bId && isset($batchNumMap[$bId])) ? $batchNumMap[$bId] : null;
+        }
+        unset($itm);
     } catch (PDOException $ePlan) {
         $items = [];
     }
@@ -1648,7 +1665,19 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <span>Ganti Item</span>
                 </button>
 
-                <!-- Tombol Ungu Eye-Catching: Safety Stock Gudang -->
+                <!-- Tombol Hard Refresh Modal (Bypass Cache & Tarik Data Terbaru DB) -->
+                <button type="button" id="btn-modal-force-refresh" onclick="forceRefreshModalPlanning()" 
+                        style="background-color: #f1f5f9; border: 1.5px solid #cbd5e1; color: #334155; font-size: 11.5px; font-weight: 800; padding: 6px 12px; border-radius: 8px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); transition: all 0.15s ease;"
+                        onmouseover="this.style.backgroundColor='#e2e8f0'; this.style.borderColor='#94a3b8';"
+                        onmouseout="this.style.backgroundColor='#f1f5f9'; this.style.borderColor='#cbd5e1';"
+                        title="Tarik ulang data terbaru langsung dari database (bersihkan cache)">
+                    <svg id="modal-refresh-spinner-icon" style="width: 14px; height: 14px; color: #475569; transition: transform 0.2s;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                    </svg>
+                    <span id="modal-refresh-btn-text">Refresh</span>
+                </button>
+
+                <!-- Tombol Ungu Eye-Catching: Safety Stock -->
                 <button type="button" onclick="toggleSafetyStockTab()" 
                         style="background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); color: #ffffff; border: 1.5px solid #5b21b6; padding: 6px 14px; border-radius: 8px; font-size: 11.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(109, 40, 217, 0.35); transition: all 0.15s ease;"
                         onmouseover="this.style.filter='brightness(1.1)'; this.style.transform='translateY(-1px)';"
@@ -1657,7 +1686,7 @@ require_once __DIR__ . '/../../layouts/header.php';
                     <svg style="width: 14px; height: 14px; color: #ede9fe; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
                     </svg>
-                    <span>+ Cek Safety Stock Gudang</span>
+                    <span>+ Safety Stock</span>
                 </button>
 
                 <!-- Tombol Tutup / Kembali -->
@@ -2886,209 +2915,10 @@ require_once __DIR__ . '/../../layouts/header.php';
     </div>
 </div>
 
-<!-- Modal Tambah Box Baru ke Sesi Aktif (Multi-Scan & Auto-Focus) -->
-<div id="modal-add-lot-to-session" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 999999; display: none; align-items: center; justify-content: center; padding: 10px; overflow-y: auto;">
-    <div style="background-color: #ffffff; border-radius: 16px; max-width: 820px; width: 100%; max-height: calc(100vh - 20px); display: flex; flex-direction: column; border: 1.5px solid #cbd5e1; box-shadow: 0 25px 60px -12px rgba(0, 0, 0, 0.35); overflow: hidden; position: relative;" class="animate-fadeIn">
-        
-        <!-- Modal Header -->
-        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #ffffff; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; border-bottom: 1px solid #334155;">
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <div style="width: 30px; height: 30px; border-radius: 8px; background-color: rgba(37, 99, 235, 0.25); border: 1.5px solid rgba(59, 130, 246, 0.4); display: flex; align-items: center; justify-content: center; color: #60a5fa; flex-shrink: 0;">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                </div>
-                <div>
-                    <h3 style="font-size: 13px; font-weight: 800; letter-spacing: 0.02em; color: #ffffff; margin: 0; line-height: 1.2;">
-                        Tambah Box Baru ke Sesi
-                    </h3>
-                    <p style="font-size: 10px; color: #94a3b8; margin: 1px 0 0 0; font-weight: 500;">Scan QR barcode secara berurutan untuk mendaftarkan banyak box sekaligus</p>
-                </div>
-            </div>
-            <button type="button" onclick="closeAddLotModal()" style="background: none; border: none; color: #94a3b8; font-size: 22px; font-weight: 700; cursor: pointer; padding: 0 4px; line-height: 1; transition: color 0.15s;" onmouseover="this.style.color='#ffffff'" onmouseout="this.style.color='#94a3b8'">
-                &times;
-            </button>
-        </div>
 
-        <!-- Modal Body (Scrollable Container) -->
-        <div style="padding: 10px 14px; overflow-y: auto; flex: 1 1 auto; min-height: 0; background-color: #f8fafc; display: flex; flex-direction: column; gap: 8px;" class="custom-scrollbar">
             
-            <!-- Header Summary 3 Card KPI -->
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; flex-shrink: 0;">
-                <!-- KPI 1: Total Lot / Label Scanned -->
-                <div style="background-color: #f0f9ff; border: 1.5px solid #bae6fd; border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.04em;">
-                        <span>TOTAL LOT / LABEL SCAN</span>
-                        <svg style="width: 14px; height: 14px; color: #0284c7;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
-                    </div>
-                    <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                        <span style="font-family: monospace; font-weight: 900; color: #0c4a6e; font-size: 16px;" id="add-lot-kpi-label-count">0 Label</span>
-                        <span style="font-size: 10px; font-weight: 800; color: #0284c7;" id="add-lot-kpi-unique-lots">0 Lot Unik</span>
-                    </div>
-                    <div id="add-lot-kpi-ss-badge-container" class="hidden" style="font-size: 9.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; padding: 1px 5px; border-radius: 4px; border: 1px solid #ddd6fe; display: inline-block;">
-                        + <span id="add-lot-kpi-ss-used-qty">0</span> pcs Safety Stock
-                    </div>
-                </div>
 
-                <!-- KPI 2: Total Qty Scanned vs Target -->
-                <div style="background-color: #ecfdf5; border: 1.5px solid #a7f3d0; border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; font-weight: 800; color: #047857; text-transform: uppercase; letter-spacing: 0.04em;">
-                        <span>TOTAL QTY AKUMULASI</span>
-                        <svg style="width: 14px; height: 14px; color: #059669;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-                    </div>
-                    <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                        <span style="font-family: monospace; font-weight: 900; color: #064e3b; font-size: 16px; white-space: nowrap;" id="add-lot-progress-counter">
-                            <span id="add-lot-scanned-total-qty">0</span> / <span id="add-lot-target-kanban-qty-display">0</span> <span style="font-size: 10px; font-weight: 800; color: #047857;">pcs</span>
-                        </span>
-                    </div>
-                    <div style="font-size: 10px; font-weight: 700; color: #059669; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="add-lot-kpi-source-breakdown">
-                        Sesi: 0 pcs + Ditambah: 0 pcs
-                    </div>
-                </div>
 
-                <!-- KPI 3: Progress Percentage & Status -->
-                <div style="background-color: #f5f3ff; border: 1.5px solid #ddd6fe; border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                    <div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; font-weight: 800; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.04em;">
-                        <span>PERSENTASE TERPENUHI</span>
-                        <svg style="width: 14px; height: 14px; color: #7c3aed;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    </div>
-                    <div style="display: flex; align-items: baseline; justify-content: space-between;">
-                        <span style="font-family: monospace; font-weight: 900; color: #4c1d95; font-size: 16px;" id="add-lot-kpi-progress-percent">0%</span>
-                        <span style="font-size: 10px; font-weight: 800; color: #b45309;" id="add-lot-kpi-status-tag">Belum Lengkap</span>
-                    </div>
-                    <div style="font-size: 10px; font-weight: 700; color: #6d28d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="add-lot-kpi-remain-detail">
-                        Sisa 0 pcs lagi
-                    </div>
-                </div>
-            </div>
-
-            <!-- Progress Bar Container -->
-            <div style="display: flex; flex-direction: column; gap: 2px; flex-shrink: 0;">
-                <div style="width: 100%; background-color: #cbd5e1; height: 6px; border-radius: 9999px; overflow: hidden;">
-                    <div id="add-lot-progress-bar" style="height: 100%; width: 0%; background-color: #2563eb; transition: all 0.3s ease;"></div>
-                </div>
-                <div style="display: flex; align-items: center; justify-content: space-between; font-size: 9px; color: #64748b; font-weight: 600;">
-                    <span id="add-lot-scan-status-msg">Scan label QR untuk menambah box ke sesi...</span>
-                    <span id="add-lot-scan-excess-msg" class="hidden" style="color: #4c1d95; font-weight: 800;">Sisa lebih akan menjadi Safety Stock</span>
-                </div>
-            </div>
-
-            <!-- Input Scan Barcode Utama -->
-            <div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 10px; padding: 8px 12px; flex-shrink: 0;">
-                <label style="display: flex; align-items: center; justify-content: space-between; font-size: 10.5px; font-weight: 800; color: #1e40af; margin-bottom: 4px;">
-                    <span style="display: inline-flex; align-items: center; gap: 5px;">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
-                        Scan Barcode / QR Code Label
-                    </span>
-                    <span style="font-size: 9px; color: #2563eb; background-color: #dbeafe; padding: 1px 5px; border-radius: 4px; font-weight: 700;">Auto-Parsing</span>
-                </label>
-                <input type="text" id="add-lot-qr-raw" autofocus placeholder="Tempel atau Scan Barcode / QR Code (Z1|Z2|Z3|Z4|Z5)..." 
-                       oninput="handleModalAddLotQrInput(this)" onkeydown="handleModalAddLotQrKeydown(event, this)"
-                       style="width: 100%; height: 34px; padding: 4px 10px; font-size: 11.5px; font-family: monospace; font-weight: 700; background-color: #ffffff; border: 2px solid #3b82f6; border-radius: 7px; outline: none; box-sizing: border-box; box-shadow: inset 0 1px 2px rgba(0,0,0,0.04); transition: all 0.15s;"
-                       autocomplete="off">
-                <p style="font-size: 9px; color: #64748b; margin: 3px 0 0 0;">Scanner langsung mengisi dan menambahkan box ke antrean. Anda dapat menembak scanner berulang kali.</p>
-            </div>
-
-            <!-- Manual Input Section -->
-            <div style="background-color: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; flex-shrink: 0;">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
-                    <span style="font-size: 10px; font-weight: 800; color: #334155; text-transform: uppercase; letter-spacing: 0.03em;">Input Manual Tambahan:</span>
-                    <button type="button" onclick="addManualLotToPending()" style="padding: 3px 8px; background-color: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 5px; font-size: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-                        + Masukkan ke Daftar Box
-                    </button>
-                </div>
-                
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px;">
-                    <div>
-                        <label style="display: block; font-size: 9px; font-weight: 800; color: #64748b; margin-bottom: 2px; text-transform: uppercase;">
-                            Part Code <span style="font-weight: 600;">(Terkunci)</span>
-                        </label>
-                        <input type="text" id="add-lot-part-code" readonly 
-                               style="width: 100%; height: 28px; padding: 2px 6px; font-size: 10.5px; font-family: monospace; font-weight: 800; background-color: #f1f5f9; color: #334155; border: 1px solid #cbd5e1; border-radius: 5px; outline: none; box-sizing: border-box;">
-                    </div>
-                    <div>
-                        <label style="display: block; font-size: 9px; font-weight: 800; color: #0f172a; margin-bottom: 2px; text-transform: uppercase;">
-                            Lot Number <span style="color: #e11d48;">*</span>
-                        </label>
-                        <input type="text" id="add-lot-number" value="064" placeholder="Contoh: 06426817" 
-                               style="width: 100%; height: 28px; padding: 2px 6px; font-size: 10.5px; font-family: monospace; font-weight: 800; text-transform: uppercase; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 5px; outline: none; box-sizing: border-box;"
-                               autocomplete="off">
-                    </div>
-                    <div>
-                        <label style="display: block; font-size: 9px; font-weight: 800; color: #0f172a; margin-bottom: 2px; text-transform: uppercase;">
-                            Qty Box (Pcs) <span style="color: #e11d48;">*</span>
-                        </label>
-                        <div style="display: flex; align-items: center; height: 28px; border: 1px solid #cbd5e1; border-radius: 5px; overflow: hidden; background: #ffffff; box-sizing: border-box;">
-                            <input type="number" id="add-lot-qty" min="1" placeholder="200" 
-                                   style="width: 100%; height: 100%; padding: 0 6px; border: none; font-size: 10.5px; font-family: monospace; font-weight: 800; color: #0f172a; outline: none; box-sizing: border-box;"
-                                   autocomplete="off">
-                            <span style="padding: 0 5px; font-size: 9px; font-weight: 700; color: #64748b; background-color: #f8fafc; border-left: 1px solid #e2e8f0; height: 100%; display: flex; align-items: center;">pcs</span>
-                        </div>
-                    </div>
-                    <div>
-                        <label style="display: block; font-size: 9px; font-weight: 800; color: #1e40af; margin-bottom: 2px; text-transform: uppercase;">
-                            Ref Number <span style="color: #64748b; font-weight: 600;">(Unik)</span>
-                        </label>
-                        <input type="text" id="add-lot-ref-number" placeholder="Contoh: KSKA" 
-                               style="width: 100%; height: 28px; padding: 2px 6px; font-size: 10.5px; font-family: monospace; font-weight: 800; text-transform: uppercase; background-color: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; border-radius: 5px; outline: none; box-sizing: border-box;"
-                               autocomplete="off">
-                    </div>
-                </div>
-            </div>
-
-            <!-- Tabel Daftar Box yang Akan Ditambahkan -->
-            <div style="background-color: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 10px; overflow: hidden; flex-shrink: 0;">
-                <div style="padding: 6px 10px; background-color: #f1f5f9; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 10.5px; font-weight: 800; color: #334155;">
-                        Daftar Box yang Akan Didaftarkan (<span id="add-lot-scanned-count">0</span> Box - Total <span id="add-lot-scanned-qty">0</span> pcs)
-                    </span>
-                    <button type="button" onclick="pendingAddLots=[]; renderPendingAddLotsTable();" style="background: none; border: none; font-size: 9.5px; font-weight: 700; color: #be123c; cursor: pointer; text-decoration: underline;">
-                        Reset Antrean
-                    </button>
-                </div>
-                <div style="max-height: 130px; overflow-y: auto;" class="custom-scrollbar">
-                    <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                        <thead style="background-color: #f8fafc; border-bottom: 1px solid #e2e8f0; font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase;">
-                            <tr>
-                                <th style="padding: 5px 8px; width: 35px;">No</th>
-                                <th style="padding: 5px 8px;">Ref Number</th>
-                                <th style="padding: 5px 8px;">Lot Number</th>
-                                <th style="padding: 5px 8px; text-align: right;">Qty Box</th>
-                                <th style="padding: 5px 8px; text-align: center; width: 55px;">Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody id="add-lot-table-body">
-                            <tr>
-                                <td colspan="5" style="padding: 16px; text-align: center; color: #94a3b8; font-size: 10.5px;">
-                                    Belum ada box yang ditambahkan. Silakan scan barcode QR atau masukkan manual di atas.
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- Informational Banner -->
-            <div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 6px 10px; display: flex; align-items: flex-start; gap: 6px; flex-shrink: 0;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #059669; flex-shrink: 0; margin-top: 1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                <span style="font-size: 9.5px; color: #065f46; font-weight: 600; line-height: 1.35;">
-                    Standar sampling AQL dan batas penolakan (Reject Number) untuk tiap box akan dihitung otomatis sesuai dengan Qty yang didaftarkan.
-                </span>
-            </div>
-
-        </div>
-
-        <!-- Modal Footer -->
-        <div style="padding: 8px 14px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;">
-            <button type="button" onclick="closeAddLotModal()" style="padding: 7px 16px; background-color: #ffffff; border: 1.5px solid #cbd5e1; color: #475569; border-radius: 7px; font-size: 10.5px; font-weight: 700; cursor: pointer; transition: all 0.15s;" onmouseover="this.style.backgroundColor='#f1f5f9'" onmouseout="this.style.backgroundColor='#ffffff'">
-                Batal
-            </button>
-            <button type="button" id="btn-submit-add-lot" onclick="executeAddLotSubmit()" style="padding: 7px 18px; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: #ffffff; border: none; border-radius: 7px; font-size: 10.5px; font-weight: 800; cursor: pointer; box-shadow: 0 2px 6px rgba(37,99,235,0.3); display: flex; align-items: center; gap: 5px; transition: all 0.15s;" onmouseover="this.style.opacity='0.95'" onmouseout="this.style.opacity='1'">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                <span>Simpan &amp; Daftarkan (<span id="add-lot-btn-count">0</span>) Box</span>
-            </button>
-        </div>
-
-    </div>
-</div>
 
 <script>
 var currentSessionId = <?= $sessionId ?: 0 ?>;
@@ -4862,7 +4692,17 @@ function renderScannedLabelsTable() {
     }
 
     if (btnSubmit) {
-        if (isSafetyStock) {
+        if (window.isAddingBoxToActiveSession) {
+            if (physicalScanned > 0) {
+                btnSubmit.disabled = false;
+                btnSubmit.style.opacity = '1';
+                btnSubmit.innerHTML = 'SIMPAN & DAFTARKAN (' + scannedLabelsList.length + ' Box / ' + physicalScanned.toLocaleString() + ' pcs) KE SESI &rarr;';
+            } else {
+                btnSubmit.disabled = true;
+                btnSubmit.style.opacity = '0.6';
+                btnSubmit.innerHTML = 'Scan Box untuk Ditambahkan ke Sesi';
+            }
+        } else if (isSafetyStock) {
             if (physicalScanned > 0) {
                 btnSubmit.disabled = false;
                 btnSubmit.style.opacity = '1';
@@ -5211,25 +5051,63 @@ var currentModalScope = 'today'; // 'today' | 'pending_yesterday'
 var currentModalBatchId = 'all';
 var cachedPlanningItems = [];
 
-function refreshPlanningItemsAjax(autoSelectId) {
+function forceRefreshModalPlanning() {
+    var btn = document.getElementById('btn-modal-force-refresh');
+    var icon = document.getElementById('modal-refresh-spinner-icon');
+    var txt = document.getElementById('modal-refresh-btn-text');
+
+    if (btn) {
+        btn.disabled = true;
+        btn.classList.add('opacity-75');
+    }
+    if (icon) {
+        icon.classList.add('animate-spin');
+    }
+    if (txt) {
+        txt.textContent = 'Memperbarui...';
+    }
+
+    // Kosongkan cache client-side
+    cachedPlanningItems = [];
+
+    // Panggil refresh dengan parameter force
+    refreshPlanningItemsAjax(null, true, function() {
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.remove('opacity-75');
+        }
+        if (icon) {
+            icon.classList.remove('animate-spin');
+        }
+        if (txt) {
+            txt.textContent = 'Refresh';
+        }
+    });
+}
+
+function refreshPlanningItemsAjax(autoSelectId, isForce, onComplete) {
     var url = '<?= base_url("modules/inspection/session.php?action=get_planning_items") ?>';
     url += '&scope=' + encodeURIComponent(currentModalScope);
     url += '&batch_id=' + encodeURIComponent(currentModalBatchId);
     if (autoSelectId) {
         url += '&selected_id=' + encodeURIComponent(autoSelectId);
     }
+    if (isForce) {
+        url += '&_nocache=' + Date.now() + '&force_refresh=1';
+    }
     
     var tbody = document.getElementById('planning-table-body');
     if (tbody) {
         tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-12 text-center text-slate-400">' +
             '<div class="inline-block animate-spin rounded-full h-7 w-7 border-b-2 border-blue-600 mb-2"></div>' +
-            '<p class="font-bold text-slate-600 text-xs">Memuat data jadwal Kanban...</p>' +
+            '<p class="font-bold text-slate-600 text-xs">Memuat data jadwal Kanban langsung dari database...</p>' +
             '</td></tr>';
     }
 
     fetch(url)
         .then(function(r) { return r.json(); })
         .then(function(res) {
+            if (typeof onComplete === 'function') onComplete();
             if (res && res.success) {
                 cachedPlanningItems = Array.isArray(res.items) ? res.items : [];
                 renderModalBatchPills(res.today_batches || [], res.pending_yesterday_count || 0);
@@ -5346,39 +5224,45 @@ function renderModalBatchPills(todayBatches, pendingYesterdayCount) {
             var isCurrentActive = (currentModalScope === 'today' && currentModalBatchId === bId);
 
             var activeClass = isCurrentActive 
-                ? 'background:#0f172a; color:#ffffff; border-color:#0f172a; box-shadow:0 1px 3px rgba(15,23,42,0.3);' 
-                : 'background:#f8fafc; color:#334155; border-color:#cbd5e1;';
+                ? 'background:#0f172a; color:#ffffff; border:1.5px solid #0f172a; box-shadow:0 2px 4px rgba(15,23,42,0.3);' 
+                : 'background:#f1f5f9; color:#1e293b; border:1.5px solid #94a3b8; box-shadow:0 1px 2px rgba(0,0,0,0.06);';
 
-            html += '<button type="button" onclick="setModalBatchScope(\'today\', \'' + bId + '\')" style="' + activeClass + ' padding:5px 11px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;">' +
+            var hoverClasses = isCurrentActive ? '' : 'hover:bg-slate-200 hover:border-blue-500 hover:text-blue-900 active:scale-95';
+
+            html += '<button type="button" onclick="setModalBatchScope(\'today\', \'' + bId + '\')" class="' + hoverClasses + '" style="' + activeClass + ' padding:5px 12px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; transition:all 0.15s ease;">' +
                         '<span>Batch ' + bNum + ' (' + bTime + ')</span>' +
-                        '<span style="' + (isCurrentActive ? 'background:rgba(255,255,255,0.2); color:#ffffff;' : 'background:#e2e8f0; color:#475569;') + ' padding:1px 6px; border-radius:4px; font-size:10px;">' + bDone + '/' + bTotal + ' Selesai</span>' +
+                        '<span style="' + (isCurrentActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#cbd5e1; color:#0f172a;') + ' padding:1.5px 7px; border-radius:5px; font-size:10px; font-weight:800;">' + bDone + '/' + bTotal + ' Selesai</span>' +
                     '</button>';
         }
 
         // Tombol: Semua Batch Hari Ini
         var isAllActive = (currentModalScope === 'today' && currentModalBatchId === 'all');
         var allClass = isAllActive 
-            ? 'background:#1d4ed8; color:#ffffff; border-color:#1e40af; box-shadow:0 1px 3px rgba(37,99,235,0.3);' 
-            : 'background:#eff6ff; color:#1e40af; border-color:#bfdbfe;';
+            ? 'background:#1d4ed8; color:#ffffff; border:1.5px solid #1e40af; box-shadow:0 2px 5px rgba(29,78,216,0.35);' 
+            : 'background:#eff6ff; color:#1d4ed8; border:1.5px solid #60a5fa; box-shadow:0 1px 2px rgba(37,99,235,0.08);';
+
+        var allHover = isAllActive ? '' : 'hover:bg-blue-100 hover:border-blue-600 active:scale-95';
 
         var totalAllToday = todayBatches.reduce(function(acc, item) { return acc + (parseInt(item.item_count) || 0); }, 0);
-        html += '<button type="button" onclick="setModalBatchScope(\'today\', \'all\')" style="' + allClass + ' padding:5px 12px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:5px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;">' +
+        html += '<button type="button" onclick="setModalBatchScope(\'today\', \'all\')" class="' + allHover + '" style="' + allClass + ' padding:5px 13px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; transition:all 0.15s ease;">' +
                     '<span>Semua Batch Hari Ini</span>' +
-                    '<span style="' + (isAllActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#dbeafe; color:#1e40af;') + ' padding:1px 6px; border-radius:4px; font-size:10px;">' + totalAllToday + ' Part</span>' +
+                    '<span style="' + (isAllActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#bfdbfe; color:#1e40af;') + ' padding:1.5px 7px; border-radius:5px; font-size:10px; font-weight:900;">' + totalAllToday + ' Part</span>' +
                 '</button>';
     }
 
-    // 2. Tombol Spesial: Tunggakan Kemarin (Highlight Kuning/Amber)
+    // 2. Tombol Spesial: Tunggakan Kemarin (Highlight Kuning/Amber Solid)
     if (pendingYesterdayCount > 0) {
         var isPyActive = (currentModalScope === 'pending_yesterday');
         var pyClass = isPyActive
-            ? 'background:#d97706; color:#ffffff; border-color:#b45309; box-shadow:0 1px 4px rgba(217,119,6,0.35);'
-            : 'background:#fffbeb; color:#92400e; border-color:#fcd34d;';
+            ? 'background:#d97706; color:#ffffff; border:1.5px solid #b45309; box-shadow:0 2px 5px rgba(217,119,6,0.35);'
+            : 'background:#fef3c7; color:#92400e; border:1.5px solid #f59e0b; box-shadow:0 1px 2px rgba(245,158,11,0.15);';
 
-        html += '<button type="button" onclick="setModalBatchScope(\'pending_yesterday\', \'all\')" style="' + pyClass + ' padding:5px 12px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; border-width:1.5px; border-style:solid; transition:all 0.15s ease;" title="Kanban dari hari-hari sebelumnya yang belum selesai diinspeksi atau rejected">' +
+        var pyHover = isPyActive ? '' : 'hover:bg-amber-200 hover:border-amber-600 active:scale-95';
+
+        html += '<button type="button" onclick="setModalBatchScope(\'pending_yesterday\', \'all\')" class="' + pyHover + '" style="' + pyClass + ' padding:5px 13px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; transition:all 0.15s ease;" title="Kanban dari hari-hari sebelumnya yang belum selesai diinspeksi atau rejected">' +
                     '<span style="width:7px; height:7px; border-radius:50%; background:' + (isPyActive ? '#ffffff' : '#f59e0b') + ';" class="animate-pulse"></span>' +
                     '<span>Tunggakan Kemarin</span>' +
-                    '<span style="' + (isPyActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#fef3c7; color:#b45309; border:1px solid #fde68a;') + ' padding:1px 7px; border-radius:4px; font-size:10px; font-weight:900;">' + pendingYesterdayCount + ' Belum Selesai</span>' +
+                    '<span style="' + (isPyActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#fde68a; color:#78350f;') + ' padding:1.5px 7px; border-radius:5px; font-size:10px; font-weight:900;">' + pendingYesterdayCount + ' Belum Selesai</span>' +
                 '</button>';
     }
 
@@ -5530,6 +5414,12 @@ function renderPlanningTableRows(items) {
         var isImport = (importMethod.indexOf('excel') !== -1 || importMethod.indexOf('csv') !== -1);
         var sourceBadge = isImport ? '<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-teal-50 text-teal-700 border border-teal-200 uppercase">Import</span>' : '<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 uppercase">Manual</span>';
 
+        // Badge Batch (Batch 1, Batch 2...) saat melihat Semua Batch Hari Ini
+        var batchBadge = '';
+        if (currentModalScope === 'today' && currentModalBatchId === 'all' && k.batch_number) {
+            batchBadge = '<span class="inline-flex items-center px-1.5 py-0.2 rounded text-[8.5px] font-black bg-blue-50 text-blue-700 border border-blue-200 uppercase">Batch ' + k.batch_number + '</span>';
+        }
+
         var codeEsc = (k.item_code || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         var descEsc = (k.display_part_name || k.item_description || '').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
         var custEsc = (k.customer || 'PT. Indonesia Epson Industry').replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -5555,8 +5445,9 @@ function renderPlanningTableRows(items) {
                     
                     // Col 2: Kanban No & Cust
                     '<td class="px-3 py-2.5">' +
-                        '<div class="flex items-center space-x-1.5">' +
+                        '<div class="flex items-center space-x-1.5 flex-wrap gap-y-1">' +
                             '<span class="font-mono font-black text-slate-900 text-xs">#' + escapeHtml(k.kanban_no || '-') + '</span>' +
+                            batchBadge +
                             sourceBadge +
                         '</div>' +
                         '<div class="text-[11px] text-slate-500 font-medium truncate max-w-[190px]" title="' + pCust + '">' + pCust + '</div>' +
@@ -5683,6 +5574,7 @@ function closeScanModal(forceClose) {
 }
 
 function doCloseScanModal() {
+    window.isAddingBoxToActiveSession = false;
     clearAllScannedLabels();
     selectedSsLotIds = [];
     selectedPlanningId = 0;
@@ -6192,6 +6084,10 @@ function closeKanbanDetailModal() {
 }
 
 function backToStep1(forceConfirm) {
+    if (window.isAddingBoxToActiveSession) {
+        closeScanModal(forceConfirm);
+        return;
+    }
     if (!forceConfirm && typeof scannedLabelsList !== 'undefined' && scannedLabelsList.length > 0) {
         if (typeof Swal !== 'undefined') {
             Swal.fire({
@@ -7260,6 +7156,11 @@ function hideScanModalError() {
 }
 
 function triggerModalValidation() {
+    if (window.isAddingBoxToActiveSession) {
+        submitAddBoxesToActiveSession();
+        return;
+    }
+
     // 1. Selalu gunakan Part Code resmi Kanban yang dipilih (atau dari daftar label yang sudah tervalidasi)
     var pCode = selectedPlanningPartCode || (scannedLabelsList.length > 0 ? scannedLabelsList[0].Z1 : (document.getElementById('scan-part-code') ? document.getElementById('scan-part-code').value.trim() : ''));
     var lNum = '';
@@ -9923,1155 +9824,177 @@ function handleWorkbenchHeaderBack(e) {
 }
 
 // =========================================================================
-// ADD SESSION LOT HANDLERS (Tambah Box / Lot Baru ke Sesi Aktif)
-// Multi-Scan & Batch Registration
+// ADD SESSION LOT HANDLERS (Unified with Wizard Step 2)
 // =========================================================================
 
-var pendingAddLots = [];
-var isProcessingAddLotScan = false;
-
 function openAddLotModal() {
-    var modal = document.getElementById('modal-add-lot-to-session');
-    if (!modal) return;
-
-    pendingAddLots = [];
-    isProcessingAddLotScan = false;
-
-    // Ambil Part Code aktif dari sesi
-    var effectivePartCode = '';
-    if (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session) {
-        effectivePartCode = window.lastWorkbenchSessionData.session.session_part_code || 
-                            window.lastWorkbenchSessionData.session.part_code || '';
-    } else if (typeof currentSessionPartCode !== 'undefined' && currentSessionPartCode) {
-        effectivePartCode = currentSessionPartCode;
-    }
-
-    var partInput = document.getElementById('add-lot-part-code');
-    if (partInput) partInput.value = effectivePartCode;
-
-    var qrInput = document.getElementById('add-lot-qr-raw');
-    if (qrInput) qrInput.value = '';
-
-    var lotNumInput = document.getElementById('add-lot-number');
-    if (lotNumInput) lotNumInput.value = '064';
-
-    var qtyInput = document.getElementById('add-lot-qty');
-    if (qtyInput) qtyInput.value = '';
-
-    var refInput = document.getElementById('add-lot-ref-number');
-    if (refInput) refInput.value = '';
-
-    renderPendingAddLotsTable();
-
-    modal.classList.remove('hidden');
-    modal.style.display = 'flex';
-
-    if (qrInput) {
-        try { qrInput.focus(); } catch(e) {}
-    }
-
-    setTimeout(function() {
-        if (qrInput) {
-            try { qrInput.focus(); qrInput.select(); } catch(e) {}
-        }
-        if (typeof window.refocusActiveScanner === 'function') {
-            window.refocusActiveScanner(true);
-        }
-    }, 50);
-
-    setTimeout(function() {
-        if (typeof window.refocusActiveScanner === 'function') {
-            window.refocusActiveScanner(true);
-        }
-    }, 250);
+    openScanModalForAddBox();
 }
 
 function closeAddLotModal() {
-    var modal = document.getElementById('modal-add-lot-to-session');
-    if (modal) modal.style.display = 'none';
-    pendingAddLots = [];
-    isProcessingAddLotScan = false;
+    closeScanModal(true);
 }
 
-function updateAddLotKpiCards() {
-    var sessionLotCount = 0;
-    var sessionTotalQty = 0;
-    var targetKanbanQty = 0;
 
-    var sData = window.lastWorkbenchSessionData || {};
-    var s = sData.session || (typeof currentSessionObj !== 'undefined' ? currentSessionObj : null);
-    var existingLots = sData.session_lots || sData.lots || (typeof currentSessionLots !== 'undefined' ? currentSessionLots : []);
 
-    if (s) {
-        targetKanbanQty = parseInt(s.kanban_qty || 0, 10);
-        var prevKbQty = parseInt(sData.prev_kanban_qty || s.prev_kanban_qty || 0, 10);
-        sessionTotalQty += prevKbQty;
+function openScanModalForAddBox() {
+    window.isAddingBoxToActiveSession = true;
+
+    // Reset list scan sementara
+    clearAllScannedLabels();
+    if (typeof resetLiveScanAlertPanel === 'function') resetLiveScanAlertPanel();
+    selectedSsLotIds = [];
+    selectedSsSessionIds = [];
+
+    // Ambil context dari sesi yang sedang aktif
+    var s = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session) ? window.lastWorkbenchSessionData.session : null;
+    var partCode = s ? (s.session_part_code || s.part_code || '') : '';
+    var partName = s ? (s.session_part_name || s.part_name || '') : '';
+    var customer = s ? (s.customer || 'PT Epson') : 'PT Epson';
+    var kanbanNo = s ? (s.kanban_no || '-') : '-';
+    var docNo = s ? (s.doc_no || '-') : '-';
+    var inspType = s ? (s.inspection_type || 'kanban') : 'kanban';
+    var planQty = s ? (parseInt(s.plan_qty || s.kanban_qty || s.total_lot_qty || 0, 10)) : 0;
+    var planId = s ? (parseInt(s.kanban_item_id || 0, 10)) : 0;
+
+    selectedPlanningId = planId;
+    selectedPlanningType = inspType;
+    selectedPlanningPartCode = partCode;
+    selectedPlanningQty = planQty;
+    selectedPlanningTotalPassedQty = 0;
+    selectedPlanningTargetTotalQty = planQty;
+    selectedAvailableSsQty = 0;
+
+    // Isi ringkasan planning di header Step 2
+    var partCodeEl = document.getElementById('selected-plan-part-code');
+    if (partCodeEl) partCodeEl.textContent = partCode;
+    var descEl = document.getElementById('selected-plan-desc');
+    if (descEl) descEl.textContent = partName;
+    var custEl = document.getElementById('selected-plan-cust');
+    if (custEl) custEl.textContent = customer;
+    var kbNoEl = document.getElementById('selected-plan-kanban-no');
+    if (kbNoEl) kbNoEl.textContent = kanbanNo;
+    var scanPartInput = document.getElementById('scan-part-code');
+    if (scanPartInput) scanPartInput.value = partCode;
+
+    // Sembunyikan Step 1 dan tampilkan Step 2 langsung
+    var step1El = document.getElementById('wizard-step-1-content');
+    var step2El = document.getElementById('wizard-step-2-content');
+    if (step1El) {
+        step1El.classList.add('hidden');
+        step1El.style.display = 'none';
+    }
+    if (step2El) {
+        step2El.classList.remove('hidden');
+        step2El.style.display = 'flex';
     }
 
-    if (Array.isArray(existingLots)) {
-        existingLots.forEach(function(l) {
-            if (l.lot_status !== 'replaced' && l.lot_status !== 'rejected') {
-                sessionLotCount++;
-                sessionTotalQty += (parseInt(l.qty_box || l.qty_pcs || l.qty || 0, 10));
-            }
-        });
+    // Ubah header modal
+    var titleEl = document.getElementById('wizard-modal-title');
+    if (titleEl) titleEl.textContent = 'Tambah Box ke Sesi Aktif';
+    var subEl = document.getElementById('wizard-modal-subtitle');
+    if (subEl) subEl.textContent = 'Scan barcode QR label box baru untuk ditambahkan ke Sesi #' + currentSessionId + ' (' + partCode + ')';
+
+    var stepTag = document.getElementById('wizard-step-tag');
+    if (stepTag) {
+        stepTag.textContent = 'Tambah Box Sesi #' + currentSessionId;
+        stepTag.style.backgroundColor = '#eff6ff';
+        stepTag.style.color = '#1d4ed8';
+        stepTag.style.borderColor = '#bfdbfe';
     }
 
-    if (sessionTotalQty === 0 && s && s.total_scanned_qty) {
-        sessionTotalQty = parseInt(s.total_scanned_qty, 10) || 0;
+    // Sembunyikan tombol 'Ganti Item' agar inspector fokus pada box part sesi ini
+    var btnChangeItem = document.getElementById('btn-change-item-header');
+    if (btnChangeItem) btnChangeItem.style.display = 'none';
+
+    // Render ulang tabel scan kosong
+    renderScannedLabelsTable();
+
+    // Buka modal overlay
+    var overlay = document.getElementById('scan-modal-overlay');
+    if (overlay) {
+        overlay.classList.remove('hidden');
+        overlay.style.display = 'flex';
     }
 
-    var pendingCount = pendingAddLots.length;
-    var pendingQty = 0;
-    var uniqueLotNumbers = new Set();
-    
-    if (Array.isArray(existingLots)) {
-        existingLots.forEach(function(l) {
-            if (l.lot_number) uniqueLotNumbers.add(l.lot_number.trim().toUpperCase());
-        });
-    }
-
-    pendingAddLots.forEach(function(item) {
-        pendingQty += (parseInt(item.qty, 10) || 0);
-        if (item.lot_number) uniqueLotNumbers.add(item.lot_number.trim().toUpperCase());
-    });
-
-    var totalLabelsScanned = sessionLotCount + pendingCount;
-    var totalUniqueLots = uniqueLotNumbers.size;
-    var accumulatedTotalQty = sessionTotalQty + pendingQty;
-
-    var lblCountEl = document.getElementById('add-lot-kpi-label-count');
-    if (lblCountEl) lblCountEl.textContent = totalLabelsScanned + ' Label';
-    var uniqLotEl = document.getElementById('add-lot-kpi-unique-lots');
-    if (uniqLotEl) uniqLotEl.textContent = totalUniqueLots + ' Lot Unik';
-
-    var accQtyEl = document.getElementById('add-lot-scanned-total-qty');
-    if (accQtyEl) accQtyEl.textContent = accumulatedTotalQty.toLocaleString();
-    var tgtQtyEl = document.getElementById('add-lot-target-kanban-qty-display');
-    if (tgtQtyEl) tgtQtyEl.textContent = targetKanbanQty > 0 ? targetKanbanQty.toLocaleString() : '-';
-    var srcBrkEl = document.getElementById('add-lot-kpi-source-breakdown');
-    if (srcBrkEl) srcBrkEl.textContent = 'Sesi: ' + sessionTotalQty.toLocaleString() + ' pcs + Ditambah: ' + pendingQty.toLocaleString() + ' pcs';
-
-    var pctEl = document.getElementById('add-lot-kpi-progress-percent');
-    var statusTagEl = document.getElementById('add-lot-kpi-status-tag');
-    var remainDetailEl = document.getElementById('add-lot-kpi-remain-detail');
-    var progressBarEl = document.getElementById('add-lot-progress-bar');
-    var excessMsgEl = document.getElementById('add-lot-scan-excess-msg');
-
-    var activeInspectionType = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.inspection_type) 
-        ? window.lastWorkbenchSessionData.session.inspection_type 
-        : ((currentSessionObj && currentSessionObj.inspection_type) ? currentSessionObj.inspection_type : (typeof currentSessionInspectionType !== 'undefined' ? currentSessionInspectionType : 'kanban'));
-
-    if (activeInspectionType === 'safety_stock') {
-        if (tgtQtyEl) tgtQtyEl.textContent = 'Safety Stock';
-        if (srcBrkEl) srcBrkEl.textContent = 'Sesi: ' + sessionTotalQty.toLocaleString() + ' pcs + Ditambah: ' + pendingQty.toLocaleString() + ' pcs';
-        if (pctEl) pctEl.textContent = '100%';
-        if (statusTagEl) {
-            statusTagEl.textContent = totalLabelsScanned >= 1 ? ('TERDAFTAR (' + totalLabelsScanned + ' BOX)') : 'Belum Ada Box';
-            statusTagEl.style.color = totalLabelsScanned >= 1 ? '#047857' : '#b45309';
-        }
-        if (remainDetailEl) {
-            remainDetailEl.textContent = totalLabelsScanned + ' Box Safety Stock Terdaftar';
-            remainDetailEl.style.color = '#047857';
-        }
-        if (progressBarEl) {
-            progressBarEl.style.width = '100%';
-            progressBarEl.style.backgroundColor = '#9333ea';
-        }
-        if (excessMsgEl) excessMsgEl.classList.add('hidden');
-        return;
-    }
-
-    var pct = targetKanbanQty > 0 ? Math.min(100, Math.round((accumulatedTotalQty / targetKanbanQty) * 100)) : 100;
-    if (pctEl) pctEl.textContent = pct + '%';
-
-    if (targetKanbanQty > 0 && accumulatedTotalQty >= targetKanbanQty) {
-        if (statusTagEl) {
-            statusTagEl.textContent = 'TARGET TERPENUHI';
-            statusTagEl.style.color = '#047857';
-        }
-        var excess = accumulatedTotalQty - targetKanbanQty;
-        if (remainDetailEl) {
-            remainDetailEl.textContent = excess > 0 ? ('Surplus ' + excess.toLocaleString() + ' pcs (Safety Stock)') : 'Target Kanban 100% Tercapai';
-            remainDetailEl.style.color = '#047857';
-        }
-        if (progressBarEl) {
-            progressBarEl.style.width = '100%';
-            progressBarEl.style.backgroundColor = '#059669';
-        }
-        if (excessMsgEl) {
-            if (excess > 0) {
-                excessMsgEl.textContent = 'Kelebihan ' + excess.toLocaleString() + ' pcs dialokasikan ke Safety Stock';
-                excessMsgEl.classList.remove('hidden');
-            } else {
-                excessMsgEl.classList.add('hidden');
-            }
-        }
-    } else {
-        if (statusTagEl) {
-            statusTagEl.textContent = 'Belum Lengkap';
-            statusTagEl.style.color = '#b45309';
-        }
-        var sisa = targetKanbanQty > 0 ? (targetKanbanQty - accumulatedTotalQty) : 0;
-        if (remainDetailEl) {
-            remainDetailEl.textContent = 'Kurang ' + sisa.toLocaleString() + ' pcs lagi';
-            remainDetailEl.style.color = '#6d28d9';
-        }
-        if (progressBarEl) {
-            progressBarEl.style.width = (targetKanbanQty > 0 ? Math.min(100, (accumulatedTotalQty / targetKanbanQty) * 100) : 0) + '%';
-            progressBarEl.style.backgroundColor = '#2563eb';
-        }
-        if (excessMsgEl) excessMsgEl.classList.add('hidden');
+    // Autofocus ke input scan
+    var rawInput = document.getElementById('scan-qr-raw');
+    if (rawInput) {
+        rawInput.value = '';
+        setTimeout(function() { rawInput.focus(); }, 150);
     }
 }
 
-function renderPendingAddLotsTable() {
-    var tbody = document.getElementById('add-lot-table-body');
-    var countEl = document.getElementById('add-lot-scanned-count');
-    var qtyEl = document.getElementById('add-lot-scanned-qty');
-    var btnCountEl = document.getElementById('add-lot-btn-count');
-
-    var count = pendingAddLots.length;
-    var totalQty = 0;
-    pendingAddLots.forEach(function(item) {
-        totalQty += (parseInt(item.qty, 10) || 0);
-    });
-
-    if (countEl) countEl.textContent = count;
-    if (qtyEl) qtyEl.textContent = totalQty.toLocaleString();
-    if (btnCountEl) btnCountEl.textContent = count;
-
-    updateAddLotKpiCards();
-
-    if (!tbody) return;
-
-    if (count === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="padding: 20px; text-align: center; color: #94a3b8; font-size: 11px;">Belum ada box yang ditambahkan. Silakan scan barcode QR atau masukkan manual di atas.</td></tr>';
-        return;
-    }
-
-    var html = '';
-    pendingAddLots.forEach(function(lot, idx) {
-        var refDisplay = lot.ref_number ? ('<span style="font-family: monospace; font-weight: 700; color: #1e40af; background-color: #dbeafe; padding: 2px 6px; border-radius: 4px; font-size: 10px;">' + escapeHtml(lot.ref_number) + '</span>') : '<span style="color:#94a3b8; font-size:10px;">-</span>';
-        var lotDisplay = '<span style="font-family: monospace; font-weight: 700; color: #0f172a; font-size: 11px;">' + escapeHtml(lot.lot_number) + '</span>';
-        
-        var badgesHtml = '';
-        if (lot.is_safety_stock) {
-            badgesHtml += '<div style="margin-top:2px;"><span style="font-size: 9px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 1px 5px; border-radius: 4px;">ALOKASI SAFETY STOCK GUDANG</span></div>';
-        }
-        if (lot.was_rejected_before) {
-            // Tampilkan badge informatif — item pernah NG tapi sudah di-re-inspeksi & passed
-            badgesHtml += '<div style="margin-top:2px;"><span style="font-size: 9px; font-weight: 800; color: #92400e; background-color: #fef3c7; border: 1px solid #fde68a; padding: 1px 5px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>Sudah Passed (Ada Riwayat NG)</span></div>';
-        }
-
-        var qtyDisplay = '<span style="font-family: monospace; font-weight: 800; color: #0f172a; font-size: 11px;">' + (parseInt(lot.qty, 10) || 0).toLocaleString() + '</span> <span style="font-size: 9.5px; color: #64748b;">pcs</span>';
-        var removeBtn = '<button type="button" onclick="removePendingAddLot(' + idx + ')" style="padding: 2px 6px; background-color: #fff1f2; color: #e11d48; border: 1px solid #fecdd3; border-radius: 4px; font-size: 10px; font-weight: 700; cursor: pointer;">Hapus</button>';
-
-        html += '<tr style="border-bottom: 1px solid #f1f5f9; background-color: ' + (idx % 2 === 0 ? '#ffffff' : '#f8fafc') + ';">' +
-                '<td style="padding: 6px 10px; font-size: 11px; color: #64748b; font-weight: 600;">' + (idx + 1) + '</td>' +
-                '<td style="padding: 6px 10px;">' + refDisplay + badgesHtml + '</td>' +
-                '<td style="padding: 6px 10px;">' + lotDisplay + '</td>' +
-                '<td style="padding: 6px 10px; text-align: right;">' + qtyDisplay + '</td>' +
-                '<td style="padding: 6px 10px; text-align: center;">' + removeBtn + '</td>' +
-                '</tr>';
-    });
-    tbody.innerHTML = html;
-}
-
-function removePendingAddLot(idx) {
-    if (idx >= 0 && idx < pendingAddLots.length) {
-        pendingAddLots.splice(idx, 1);
-        renderPendingAddLotsTable();
-    }
-    var qrInput = document.getElementById('add-lot-qr-raw');
-    if (qrInput) qrInput.focus();
-}
-
-function handleModalAddLotQrKeydown(e, inputEl) {
-    if (e.key === 'Enter' || e.keyCode === 13 || e.which === 13) {
-        e.preventDefault();
-        e.stopPropagation();
-        handleModalAddLotQrInput(inputEl, true);
-        return false;
-    }
-}
-
-function handleModalAddLotQrInput(inputEl, force) {
-    if (!inputEl) return;
-    if (isProcessingAddLotScan) return;
-
-    var val = (inputEl.value || '').trim();
-    if (!val) return;
-
-    var parsed = parseBarcodeQR(val);
-    var expectedPartCode = (document.getElementById('add-lot-part-code') ? document.getElementById('add-lot-part-code').value.trim() : '');
-
-    // Part Code Mismatch check
-    if (parsed.Z1 && expectedPartCode && parsed.Z1.toUpperCase() !== expectedPartCode.toUpperCase()) {
-        if (force) {
-            Swal.fire({
-                icon: 'error',
-                title: '⚠️ PART CODE TIDAK COCOK!',
-                html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                      'Part Code pada label box (<b style="color:#be123c;">"' + escapeHtml(parsed.Z1) + '"</b>) tidak cocok dengan Part Sesi ini (<b style="color:#0284c7;">"' + escapeHtml(expectedPartCode) + '"</b>)!<br><br>' +
-                      '<b style="color:#e11d48;">Pastikan Anda men-scan label box yang sesuai dengan part sesi ini!</b>' +
-                      '</div>'
-            }).then(function() {
-                inputEl.value = '';
-                inputEl.focus();
-            });
-            inputEl.value = '';
-        }
-        return;
-    }
-
-    var lotNumber = parsed.Z2 ? parsed.Z2.trim() : '';
-    var qty = parseInt(parsed.Z3, 10) || 0;
-    var refNumber = parsed.Z5 ? parsed.Z5.trim() : '';
-    var partCode = parsed.Z1 ? parsed.Z1.trim() : expectedPartCode;
-
-    // Real-time Preview: Tampilkan langsung ke input manual sebagai umpan balik visual
-    if (lotNumber && document.getElementById('add-lot-number')) {
-        document.getElementById('add-lot-number').value = lotNumber;
-    }
-    if (qty > 0 && document.getElementById('add-lot-qty')) {
-        document.getElementById('add-lot-qty').value = qty;
-    }
-    if (refNumber && document.getElementById('add-lot-ref-number')) {
-        document.getElementById('add-lot-ref-number').value = refNumber;
-    }
-
-    // Eksekusi penambahan ke antrean HANYA jika:
-    // 1. Scanner atau user menekan Enter (force === true)
-    // 2. Barcode scanner menyertakan karakter newline (\n atau \r) di akhir tembakan
-    var hasNewline = (inputEl.value.includes('\n') || inputEl.value.includes('\r'));
-
-    if (!force && !hasNewline) {
-        return;
-    }
-
-    if (!lotNumber) {
-        if (force) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Lot Number Tidak Ditemukan',
-                text: 'QR barcode tidak memuat parameter Z2 (Lot Number). Silakan periksa kembali barcode label.',
-                timer: 3000,
-                timerProgressBar: true
-            }).then(function() {
-                inputEl.value = '';
-                inputEl.focus();
-            });
-            inputEl.value = '';
-        }
-        return;
-    }
-
-    if (qty <= 0) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Qty Box Wajib Diisi',
-            text: 'Qty Box tidak terbaca dari barcode atau bernilai 0. Silakan isi field Qty Box secara manual!',
-            timer: 3000,
-            timerProgressBar: true
-        }).then(function() {
-            inputEl.value = '';
-            inputEl.focus();
-        });
-        inputEl.value = '';
-        return;
-    }
-
-    // Kewajiban Ref Number (Z5) - Selaras dengan Modal 2
-    if (!refNumber) {
-        if (document.getElementById('add-lot-number')) document.getElementById('add-lot-number').value = lotNumber;
-        if (document.getElementById('add-lot-qty')) document.getElementById('add-lot-qty').value = qty;
-        var refInp = document.getElementById('add-lot-ref-number');
-        if (refInp) {
-            refInp.focus();
-            refInp.select();
-        }
-        Swal.fire({
-            icon: 'warning',
-            title: 'Ref Number Wajib Diisi',
-            text: 'Ref Number (Z5) tidak terbaca dari barcode QR. Silakan lengkapi Ref Number unik pada form input manual di bawah, lalu klik "+ Masukkan ke Daftar Box"!'
-        });
-        inputEl.value = '';
-        return;
-    }
-
-    var activeInspectionType = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.inspection_type) 
-        ? window.lastWorkbenchSessionData.session.inspection_type 
-        : ((currentSessionObj && currentSessionObj.inspection_type) ? currentSessionObj.inspection_type : (typeof currentSessionInspectionType !== 'undefined' ? currentSessionInspectionType : 'kanban'));
-
-    // 1. Cek duplikasi di antrean yang sedang disusun (3-way match: ref + lot)
-    var dupInPending = pendingAddLots.some(function(l) {
-        return l.ref_number && refNumber && l.lot_number && lotNumber &&
-               l.ref_number.trim().toUpperCase() === refNumber.toUpperCase() &&
-               l.lot_number.trim().toUpperCase() === lotNumber.toUpperCase();
-    });
-    if (dupInPending) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Box Duplikat di Antrean',
-            text: 'Box dengan Lot "' + lotNumber + '" & Ref Number "' + refNumber + '" sudah ada di daftar antrean.',
-            timer: 3000,
-            timerProgressBar: true
-        }).then(function() {
-            inputEl.value = '';
-            inputEl.focus();
-        });
-        inputEl.value = '';
-        return;
-    }
-
-    // 2. Cek duplikasi dengan box yang sudah ada di sesi aktif saat ini (3-way match: ref + lot)
-    var sData = window.lastWorkbenchSessionData || {};
-    var sessionLotsList = sData.session_lots || sData.lots || (Array.isArray(currentSessionLots) ? currentSessionLots : []);
-    if (Array.isArray(sessionLotsList)) {
-        var isDuplicateInSession = sessionLotsList.some(function(l) {
-            return l.ref_number && refNumber && l.lot_number && lotNumber &&
-                   l.ref_number.trim().toUpperCase() === refNumber.toUpperCase() &&
-                   l.lot_number.trim().toUpperCase() === lotNumber.toUpperCase() &&
-                   l.lot_status !== 'replaced';
-        });
-        if (isDuplicateInSession) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Box Sudah Terdaftar di Sesi',
-                text: 'Box dengan Lot "' + lotNumber + '" & Ref Number "' + refNumber + '" sudah pernah didaftarkan pada sesi ini.',
-                timer: 3000,
-                timerProgressBar: true
-            }).then(function() {
-                inputEl.value = '';
-                inputEl.focus();
-            });
-            inputEl.value = '';
-            return;
-        }
-    }
-
-
-    // 3. Validasi DID (Daily Inspection Data) & Lock Sesi Lain via API secara asynchronous
-    isProcessingAddLotScan = true;
-    inputEl.disabled = true;
-
-    Swal.fire({
-        title: 'Memeriksa Status Label...',
-        text: 'Memverifikasi status label Ref #' + (refNumber || lotNumber) + '...',
-        allowOutsideClick: false,
-        didOpen: function() { Swal.showLoading(); }
-    });
-
-    var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only' +
-                   '&part_code=' + encodeURIComponent(partCode) +
-                   '&lot_number=' + encodeURIComponent(lotNumber) +
-                   '&ref_number=' + encodeURIComponent(refNumber) +
-                   '&inspection_type=' + encodeURIComponent(activeInspectionType) +
-                   '&current_session_id=' + encodeURIComponent(currentSessionId);
-
-    fetch(checkUrl)
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            closeSwalSafely();
-            isProcessingAddLotScan = false;
-            inputEl.disabled = false;
-            inputEl.value = '';
-
-            if (!data.success) {
-                // Skenario: Safety Stock Sudah Habis (0 pcs)
-                if (data.error_type === 'safety_stock_exhausted') {
-                    Swal.fire({
-                        icon: 'error',
-                        title: '⛔ SAFETY STOCK SUDAH HABIS!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Safety Stock sudah habis terpakai.') + '</b><br><br>' +
-                              '<p style="font-size: 11px; color: #64748b; background-color: #f8fafc; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">' +
-                              'Box ini sudah tidak memiliki sisa stok yang tersedia di gudang Safety Stock.' +
-                              '</p>' +
-                              '</div>',
-                        confirmButtonColor: '#ef4444'
-                    }).then(function() { inputEl.focus(); });
-                    return;
-                }
-
-                // Skenario: Duplikasi Data / Label Sudah PASSED di Sesi Lain
-                if (data.error_type === 'already_passed_duplicate') {
-                    showDuplicatePassedModal(data, {
-                        part_code: partCode,
-                        part_name: (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '',
-                        lot_number: lotNumber,
-                        ref_number: refNumber
-                    }, function() { inputEl.focus(); });
-                    return;
-                }
-
-                // Skenario: Sedang In-Progress di Sesi Lain
-                if (data.error_type === 'in_progress_duplicate') {
-                    showDuplicateInProgressModal(data, {
-                        part_code: partCode,
-                        part_name: (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '',
-                        lot_number: lotNumber,
-                        ref_number: refNumber
-                    }, function() { inputEl.focus(); });
-                    return;
-                }
-
-                // Skenario: Master Part Belum Terdaftar
-                if (data.error_type === 'master_part_missing') {
-                    Swal.fire({
-                        icon: 'error',
-                        title: 'PART CODE BELUM TERDAFTAR!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Part Code belum terdaftar di Master Data Part.') + '</b><br><br>' +
-                              'Silakan daftarkan Part Code ini terlebih dahulu melalui menu <b>Master Data Part</b>.' +
-                              '</div>',
-                        confirmButtonColor: '#ef4444',
-                        timer: 4000,
-                        timerProgressBar: true
-                    }).then(function() { inputEl.focus(); });
-                    return;
-                }
-
-                // Skenario: Error DID Missing (Memberikan 2 Opsi: Request DID ke SPV atau Ganti Lot)
-                if (data.error_type === 'did_missing') {
-                    Swal.fire({
-                        icon: 'warning',
-                        title: 'VALIDASI LABEL GAGAL!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Lot Number belum tercatat/lolos di Daily Inspection Data (DID).') + '</b>' +
-                              '<div style="margin-top: 10px; margin-bottom: 12px; background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">' +
-                              '  <div style="background-color: #f0f9ff; border: 1px solid #bae6fd; padding: 8px 10px; border-radius: 8px;">' +
-                              '    <span style="display: block; font-size: 9px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.05em;">PART CODE</span>' +
-                              '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #0c4a6e; margin-top: 2px;">' + escapeHtml(partCode) + '</span>' +
-                              '  </div>' +
-                              '  <div style="background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 8px 10px; border-radius: 8px;">' +
-                              '    <span style="display: block; font-size: 9px; font-weight: 800; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.05em;">LOT NUMBER</span>' +
-                              '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #4c1d95; margin-top: 2px;">' + escapeHtml(lotNumber) + '</span>' +
-                              '  </div>' +
-                              '</div>' +
-                              '<p style="font-size: 11px; color: #64748b; background-color: #f8fafc; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">' +
-                              'Pilih <b>Request DID</b> untuk mengajukan verifikasi ke Supervisor/Admin, atau <b>Ganti Lot</b> untuk menembak barcode lot lain.' +
-                              '</p>' +
-                              '</div>',
-                        showCancelButton: true,
-                        confirmButtonColor: '#2563eb',
-                        cancelButtonColor: '#64748b',
-                        confirmButtonText: 'Request DID ke SPV',
-                        cancelButtonText: 'Ganti Lot',
-                        reverseButtons: true,
-                        allowOutsideClick: false
-                    }).then(function(resChoice) {
-                        if (resChoice.isConfirmed) {
-                            Swal.fire({
-                                title: 'Sending Request...',
-                                text: 'Mengirim notifikasi ke Admin & Supervisor...',
-                                allowOutsideClick: false,
-                                didOpen: function() { Swal.showLoading(); }
-                            });
-
-                            var formData = new FormData();
-                            formData.append('session_id', currentSessionId || 0);
-                            formData.append('part_code', partCode || '');
-                            formData.append('part_name', (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '');
-                            formData.append('lot_number', lotNumber || '');
-                            formData.append('reason', 'Pengajuan persetujuan DID dari Modal Tambah Box QC');
-
-                            fetch('<?= base_url("modules/inspection/api/create_did_request.php") ?>', {
-                                method: 'POST',
-                                body: formData
-                            })
-                            .then(function(r) { return r.json(); })
-                            .then(function(reqResult) {
-                                closeSwalSafely();
-                                if (reqResult.success) {
-                                    Swal.fire({
-                                        icon: 'success',
-                                        title: 'Request DID Terkirim',
-                                        text: reqResult.message || 'Request berhasil dikirim ke Admin & Supervisor.',
-                                        confirmButtonColor: '#2563eb'
-                                    });
-                                    if (typeof refreshNotificationCount === 'function') {
-                                        refreshNotificationCount();
-                                    }
-                                } else {
-                                    Swal.fire({
-                                        icon: 'error',
-                                        title: 'Gagal Kirim Request',
-                                        text: reqResult.message || 'Gagal mengirim request persetujuan DID.'
-                                    });
-                                }
-                                inputEl.focus();
-                            })
-                            .catch(function() {
-                                closeSwalSafely();
-                                Swal.fire({
-                                    icon: 'error',
-                                    title: 'Error Server',
-                                    text: 'Gagal terhubung ke server saat mengirim request.'
-                                });
-                                inputEl.focus();
-                            });
-                        } else {
-                            inputEl.focus();
-                        }
-                    });
-                    return;
-                }
-
-                // Error DID NG atau error validasi lainnya
-                Swal.fire({
-                    icon: 'error',
-                    title: 'VALIDASI LABEL GAGAL!',
-                    html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                          escapeHtml(data.message || 'Label tidak memenuhi syarat untuk didaftarkan.') +
-                          '</div>',
-                    confirmButtonColor: '#ef4444',
-                    timer: 3000,
-                    timerProgressBar: true
-                }).then(function() {
-                    inputEl.focus();
-                });
-                return;
-            }
-
-            // Jika terdeteksi Safety Stock: sesuaikan Qty ke sisa stok aktual di database
-            if (data.is_safety_stock && data.ss_lot && data.ss_lot.available_qty > 0) {
-                var origQty = qty;
-                qty = parseInt(data.ss_lot.available_qty, 10);
-                if (document.getElementById('add-lot-qty')) {
-                    document.getElementById('add-lot-qty').value = qty;
-                }
-                if (origQty !== qty) {
-                    Swal.fire({
-                        toast: true,
-                        position: 'top-end',
-                        icon: 'info',
-                        title: 'Safety Stock Terdeteksi',
-                        text: 'Qty disesuaikan ke sisa stok gudang: ' + qty + ' pcs (Label: ' + origQty + ' pcs)',
-                        timer: 3500,
-                        showConfirmButton: false
-                    });
-                }
-            }
-
-            var pushToPending = function(isSS, isReinspected, rejObj) {
-                pendingAddLots.push({
-                    part_code: partCode,
-                    lot_number: lotNumber,
-                    qty: qty,
-                    ref_number: refNumber,
-                    raw_qr: val.trim(),
-                    is_safety_stock: !!isSS,
-                    was_rejected_before: !!isReinspected,
-                    rejected_info: rejObj || null
-                });
-
-                if (document.getElementById('add-lot-number')) document.getElementById('add-lot-number').value = lotNumber;
-                if (document.getElementById('add-lot-qty')) document.getElementById('add-lot-qty').value = qty;
-                if (document.getElementById('add-lot-ref-number')) document.getElementById('add-lot-ref-number').value = refNumber;
-
-                renderPendingAddLotsTable();
-                inputEl.focus();
-            };
-
-            // Jika label pernah REJECTED / NG sebelumnya
-            if (data.was_rejected_before) {
-                var rej = data.rejected_info || {};
-                var defectsHtml = '';
-                if (Array.isArray(rej.ng_defects) && rej.ng_defects.length > 0) {
-                    rej.ng_defects.forEach(function(d) {
-                        defectsHtml += '<span style="display:inline-block; font-size:10px; font-weight:800; color:#9f1239; background-color:#ffe4e6; border:1px solid #fecdd3; padding:2px 7px; border-radius:6px; margin:2px;">' +
-                                       escapeHtml(d.defect_name) + ' (' + (parseInt(d.qty_ng) || 1) + ' pcs)' +
-                                       '</span>';
-                    });
-                } else {
-                    defectsHtml = '<span style="font-size:10.5px; color:#94a3b8;">Tidak ada rincian defect spesifik</span>';
-                }
-
-                Swal.fire({
-                    icon: 'warning',
-                    title: 'RIWAYAT RE-INSPEKSI DETEKSI NG',
-                    html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                          '<div style="background-color: #fff1f2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;">' +
-                          '  <div style="font-size: 11px; font-weight: 800; color: #9f1239; text-transform: uppercase; margin-bottom: 4px;">LABEL PERNAH REJECTED / NG</div>' +
-                          '  <div style="font-size: 11px; color: #475569;">Ditolak di Sesi #' + (rej.session_id || '-') + ' oleh <b>' + escapeHtml(rej.inspector_name || 'Inspector') + '</b> pada <b>' + escapeHtml(rej.closed_at || '-') + '</b></div>' +
-                          '  <div style="margin-top: 6px;">' + defectsHtml + '</div>' +
-                          '</div>' +
-                          '<p style="margin: 0; font-size: 11px; color: #475569;">Apakah Anda mengonfirmasi bahwa box/lot ini telah diperbaiki/disortir dan siap untuk di-inspeksi ulang?</p>' +
-                          '</div>',
-                    showCancelButton: true,
-                    confirmButtonColor: '#2563eb',
-                    cancelButtonColor: '#64748b',
-                    confirmButtonText: 'Ya, Tambahkan Box Ini',
-                    cancelButtonText: 'Batal',
-                    reverseButtons: true,
-                    allowOutsideClick: false
-                }).then(function(resChoice) {
-                    if (resChoice.isConfirmed) {
-                        pushToPending(data.is_safety_stock, true, rej);
-                    } else {
-                        inputEl.focus();
-                    }
-                });
-                return;
-            }
-
-            pushToPending(data.is_safety_stock, false, null);
-        })
-        .catch(function(err) {
-            closeSwalSafely();
-            isProcessingAddLotScan = false;
-            inputEl.disabled = false;
-            inputEl.value = '';
-            console.error('Validate scan error:', err);
-            Swal.fire({
-                icon: 'error',
-                title: 'Koneksi Terganggu',
-                text: 'Gagal memverifikasi label ke server. Silakan coba scan ulang.',
-                timer: 3000,
-                timerProgressBar: true
-            }).then(function() {
-                inputEl.focus();
-            });
-        });
-}
-
-function addManualLotToPending() {
-    var partInput = document.getElementById('add-lot-part-code');
-    var lotInput = document.getElementById('add-lot-number');
-    var qtyInput = document.getElementById('add-lot-qty');
-    var refInput = document.getElementById('add-lot-ref-number');
-    var qrInput = document.getElementById('add-lot-qr-raw');
-
-    var partCode = (partInput ? partInput.value.trim().toUpperCase() : '');
-    var lotNumber = (lotInput ? lotInput.value.trim().toUpperCase() : '');
-    var qty = parseInt(qtyInput ? qtyInput.value : 0, 10) || 0;
-    var refNumber = (refInput ? refInput.value.trim().toUpperCase() : '');
-
-    if (!lotNumber) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Lot Number Wajib Diisi',
-            text: 'Silakan isi Lot Number box yang akan didaftarkan.',
-            timer: 3000,
-            timerProgressBar: true
-        }).then(function() {
-            if (lotInput) lotInput.focus();
-        });
-        return;
-    }
-
-    if (qty <= 0) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Qty Box Wajib Diisi',
-            text: 'Qty box harus bernilai lebih dari 0 pcs.',
-            timer: 3000,
-            timerProgressBar: true
-        }).then(function() {
-            if (qtyInput) qtyInput.focus();
-        });
-        return;
-    }
-
-    // Kewajiban Ref Number (Z5) - Selaras dengan Modal 2
-    if (!refNumber) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Ref Number Wajib Diisi',
-            text: 'Silakan isi Ref Number terlebih dahulu. Ref Number wajib diisi sebagai identitas unik box.'
-        }).then(function() {
-            if (refInput) refInput.focus();
-        });
-        return;
-    }
-
-    // Duplikasi di antrean (3-way match: ref + lot)
-    var dupInPendingManual = pendingAddLots.some(function(l) {
-        return l.ref_number && refNumber && l.lot_number && lotNumber &&
-               l.ref_number.trim().toUpperCase() === refNumber.toUpperCase() &&
-               l.lot_number.trim().toUpperCase() === lotNumber.toUpperCase();
-    });
-    if (dupInPendingManual) {
-        Swal.fire({
-            icon: 'warning',
-            title: 'Box Duplikat di Antrean',
-            text: 'Box dengan Lot "' + lotNumber + '" & Ref Number "' + refNumber + '" sudah ada di daftar antrean.',
-            timer: 3000,
-            timerProgressBar: true
-        }).then(function() {
-            if (qrInput) qrInput.focus();
-        });
-        return;
-    }
-
-    // Duplikasi di sesi aktif (3-way match: ref + lot)
-    var sDataManual = window.lastWorkbenchSessionData || {};
-    var sessionLotsListManual = sDataManual.session_lots || sDataManual.lots || (Array.isArray(currentSessionLots) ? currentSessionLots : []);
-    if (Array.isArray(sessionLotsListManual)) {
-        var isDuplicateInSessionManual = sessionLotsListManual.some(function(l) {
-            return l.ref_number && refNumber && l.lot_number && lotNumber &&
-                   l.ref_number.trim().toUpperCase() === refNumber.toUpperCase() &&
-                   l.lot_number.trim().toUpperCase() === lotNumber.toUpperCase() &&
-                   l.lot_status !== 'replaced';
-        });
-        if (isDuplicateInSessionManual) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Box Sudah Terdaftar di Sesi',
-                text: 'Box dengan Lot "' + lotNumber + '" & Ref Number "' + refNumber + '" sudah pernah didaftarkan pada sesi ini.',
-                timer: 3000,
-                timerProgressBar: true
-            }).then(function() {
-                if (qrInput) qrInput.focus();
-            });
-            return;
-        }
-    }
-
-    var activeInspectionType = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.inspection_type) 
-        ? window.lastWorkbenchSessionData.session.inspection_type 
-        : ((typeof currentSessionObj !== 'undefined' && currentSessionObj && currentSessionObj.inspection_type) ? currentSessionObj.inspection_type : (typeof currentSessionInspectionType !== 'undefined' ? currentSessionInspectionType : 'kanban'));
-
-    Swal.fire({
-        title: 'Memeriksa Box...',
-        text: 'Memverifikasi status Cek Dimensi (DID)...',
-        allowOutsideClick: false,
-        didOpen: function() { Swal.showLoading(); }
-    });
-
-    var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only' +
-                   '&part_code=' + encodeURIComponent(partCode) +
-                   '&lot_number=' + encodeURIComponent(lotNumber) +
-                   '&ref_number=' + encodeURIComponent(refNumber) +
-                   '&inspection_type=' + encodeURIComponent(activeInspectionType) +
-                   '&current_session_id=' + encodeURIComponent(currentSessionId);
-
-    fetch(checkUrl)
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            closeSwalSafely();
-            if (!data.success) {
-                // Skenario: Safety Stock Sudah Habis (0 pcs)
-                if (data.error_type === 'safety_stock_exhausted') {
-                    Swal.fire({
-                        icon: 'error',
-                        title: '⛔ SAFETY STOCK SUDAH HABIS!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Safety Stock sudah habis terpakai.') + '</b><br><br>' +
-                              '<p style="font-size: 11px; color: #64748b; background-color: #f8fafc; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">' +
-                              'Box ini sudah tidak memiliki sisa stok yang tersedia di gudang Safety Stock.' +
-                              '</p>' +
-                              '</div>',
-                        confirmButtonColor: '#ef4444'
-                    }).then(function() { if (qrInput) qrInput.focus(); });
-                    return;
-                }
-
-                if (data.error_type === 'already_passed_duplicate') {
-                    showDuplicatePassedModal(data, {
-                        part_code: partCode,
-                        part_name: (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '',
-                        lot_number: lotNumber,
-                        ref_number: refNumber
-                    }, function() { if (qrInput) qrInput.focus(); });
-                    return;
-                }
-
-                if (data.error_type === 'in_progress_duplicate') {
-                    showDuplicateInProgressModal(data, {
-                        part_code: partCode,
-                        part_name: (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '',
-                        lot_number: lotNumber,
-                        ref_number: refNumber
-                    }, function() { if (qrInput) qrInput.focus(); });
-                    return;
-                }
-
-                if (data.error_type === 'master_part_missing') {
-                    Swal.fire({
-                        icon: 'error',
-                        title: 'PART CODE BELUM TERDAFTAR!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Part Code belum terdaftar di Master Data Part.') + '</b><br><br>' +
-                              'Silakan daftarkan Part Code ini terlebih dahulu melalui menu <b>Master Data Part</b>.' +
-                              '</div>',
-                        confirmButtonColor: '#ef4444',
-                        timer: 4000,
-                        timerProgressBar: true
-                    }).then(function() { if (qrInput) qrInput.focus(); });
-                    return;
-                }
-
-                if (data.error_type === 'did_missing') {
-                    Swal.fire({
-                        icon: 'warning',
-                        title: 'VALIDASI LABEL GAGAL!',
-                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                              '<b style="color: #be123c;">' + escapeHtml(data.message || 'Lot Number belum tercatat/lolos di Daily Inspection Data (DID).') + '</b>' +
-                              '<div style="margin-top: 10px; margin-bottom: 12px; background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">' +
-                              '  <div style="background-color: #f0f9ff; border: 1px solid #bae6fd; padding: 8px 10px; border-radius: 8px;">' +
-                              '    <span style="display: block; font-size: 9px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.05em;">PART CODE</span>' +
-                              '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #0c4a6e; margin-top: 2px;">' + escapeHtml(partCode) + '</span>' +
-                              '  </div>' +
-                              '  <div style="background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 8px 10px; border-radius: 8px;">' +
-                              '    <span style="display: block; font-size: 9px; font-weight: 800; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.05em;">LOT NUMBER</span>' +
-                              '    <span style="display: block; font-family: monospace; font-size: 14px; font-weight: 900; color: #4c1d95; margin-top: 2px;">' + escapeHtml(lotNumber) + '</span>' +
-                              '  </div>' +
-                              '</div>' +
-                              '<p style="font-size: 11px; color: #64748b; background-color: #f8fafc; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;">' +
-                              'Pilih <b>Request DID</b> untuk mengajukan verifikasi ke Supervisor/Admin, atau <b>Ganti Lot</b> untuk memasukkan lot lain.' +
-                              '</p>' +
-                              '</div>',
-                        showCancelButton: true,
-                        confirmButtonColor: '#2563eb',
-                        cancelButtonColor: '#64748b',
-                        confirmButtonText: 'Request DID ke SPV',
-                        cancelButtonText: 'Ganti Lot',
-                        reverseButtons: true,
-                        allowOutsideClick: false
-                    }).then(function(resChoice) {
-                        if (resChoice.isConfirmed) {
-                            Swal.fire({
-                                title: 'Sending Request...',
-                                text: 'Mengirim notifikasi ke Admin & Supervisor...',
-                                allowOutsideClick: false,
-                                didOpen: function() { Swal.showLoading(); }
-                            });
-
-                            var formData = new FormData();
-                            formData.append('session_id', currentSessionId || 0);
-                            formData.append('part_code', partCode || '');
-                            formData.append('part_name', (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session ? (window.lastWorkbenchSessionData.session.session_part_name || window.lastWorkbenchSessionData.session.part_name) : '') || '');
-                            formData.append('lot_number', lotNumber || '');
-                            formData.append('reason', 'Pengajuan persetujuan DID dari Modal Tambah Box QC (Manual)');
-
-                            fetch('<?= base_url("modules/inspection/api/create_did_request.php") ?>', {
-                                method: 'POST',
-                                body: formData
-                            })
-                            .then(function(r) { return r.json(); })
-                            .then(function(reqResult) {
-                                closeSwalSafely();
-                                if (reqResult.success) {
-                                    Swal.fire({
-                                        icon: 'success',
-                                        title: 'Request DID Terkirim',
-                                        text: reqResult.message || 'Request berhasil dikirim ke Admin & Supervisor.',
-                                        confirmButtonColor: '#2563eb'
-                                    });
-                                    if (typeof refreshNotificationCount === 'function') {
-                                        refreshNotificationCount();
-                                    }
-                                } else {
-                                    Swal.fire({
-                                        icon: 'error',
-                                        title: 'Gagal Kirim Request',
-                                        text: reqResult.message || 'Gagal mengirim request persetujuan DID.'
-                                    });
-                                }
-                                if (qrInput) qrInput.focus();
-                            })
-                            .catch(function() {
-                                closeSwalSafely();
-                                Swal.fire({
-                                    icon: 'error',
-                                    title: 'Error Server',
-                                    text: 'Gagal terhubung ke server saat mengirim request.'
-                                });
-                                if (qrInput) qrInput.focus();
-                            });
-                        } else {
-                            if (qrInput) qrInput.focus();
-                        }
-                    });
-                    return;
-                }
-
-                Swal.fire({
-                    icon: 'error',
-                    title: 'VALIDASI LABEL GAGAL!',
-                    html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                          escapeHtml(data.message || 'Label tidak valid untuk didaftarkan.') +
-                          '</div>',
-                    confirmButtonColor: '#ef4444',
-                    timer: 3000,
-                    timerProgressBar: true
-                }).then(function() {
-                    if (qrInput) qrInput.focus();
-                });
-                return;
-            }
-
-            // Jika terdeteksi Safety Stock: sesuaikan Qty ke sisa stok aktual di database
-            if (data.is_safety_stock && data.ss_lot && parseInt(data.ss_lot.available_qty, 10) > 0) {
-                var origQty = qty;
-                qty = parseInt(data.ss_lot.available_qty, 10);
-                if (qtyInput) qtyInput.value = qty;
-                if (origQty !== qty) {
-                    Swal.fire({
-                        toast: true,
-                        position: 'top-end',
-                        icon: 'info',
-                        title: 'Safety Stock Terdeteksi',
-                        text: 'Qty disesuaikan ke sisa stok gudang: ' + qty + ' pcs (Input: ' + origQty + ' pcs)',
-                        timer: 3500,
-                        showConfirmButton: false
-                    });
-                }
-            }
-
-            var pushManualToPending = function(isSS, isReinspected, rejObj) {
-                pendingAddLots.push({
-                    part_code: partCode,
-                    lot_number: lotNumber,
-                    qty: qty,
-                    ref_number: refNumber,
-                    raw_qr: '',
-                    is_safety_stock: !!isSS,
-                    was_rejected_before: !!isReinspected,
-                    rejected_info: rejObj || null
-                });
-
-                renderPendingAddLotsTable();
-
-                if (lotInput) lotInput.value = '064';
-                if (qtyInput) qtyInput.value = '';
-                if (refInput) refInput.value = '';
-
-                if (qrInput) qrInput.focus();
-            };
-
-            if (data.was_rejected_before) {
-                var rej = data.rejected_info || {};
-                var defectsHtml = '';
-                if (Array.isArray(rej.ng_defects) && rej.ng_defects.length > 0) {
-                    rej.ng_defects.forEach(function(d) {
-                        defectsHtml += '<span style="display:inline-block; font-size:10px; font-weight:800; color:#9f1239; background-color:#ffe4e6; border:1px solid #fecdd3; padding:2px 7px; border-radius:6px; margin:2px;">' +
-                                       escapeHtml(d.defect_name) + ' (' + (parseInt(d.qty_ng) || 1) + ' pcs)' +
-                                       '</span>';
-                    });
-                } else {
-                    defectsHtml = '<span style="font-size:10.5px; color:#94a3b8;">Tidak ada rincian defect spesifik</span>';
-                }
-
-                Swal.fire({
-                    icon: 'warning',
-                    title: 'RIWAYAT RE-INSPEKSI DETEKSI NG',
-                    html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                          '<div style="background-color: #fff1f2; border: 1.5px solid #fca5a5; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;">' +
-                          '  <div style="font-size: 11px; font-weight: 800; color: #9f1239; text-transform: uppercase; margin-bottom: 4px;">LABEL PERNAH REJECTED / NG</div>' +
-                          '  <div style="font-size: 11px; color: #475569;">Ditolak di Sesi #' + (rej.session_id || '-') + ' oleh <b>' + escapeHtml(rej.inspector_name || 'Inspector') + '</b> pada <b>' + escapeHtml(rej.closed_at || '-') + '</b></div>' +
-                          '  <div style="margin-top: 6px;">' + defectsHtml + '</div>' +
-                          '</div>' +
-                          '<p style="margin: 0; font-size: 11px; color: #475569;">Apakah Anda mengonfirmasi bahwa box/lot ini telah diperbaiki/disortir dan siap untuk di-inspeksi ulang?</p>' +
-                          '</div>',
-                    showCancelButton: true,
-                    confirmButtonColor: '#2563eb',
-                    cancelButtonColor: '#64748b',
-                    confirmButtonText: 'Ya, Tambahkan Box Ini',
-                    cancelButtonText: 'Batal',
-                    reverseButtons: true,
-                    allowOutsideClick: false
-                }).then(function(resChoice) {
-                    if (resChoice.isConfirmed) {
-                        pushManualToPending(data.is_safety_stock, true, rej);
-                    } else {
-                        if (qrInput) qrInput.focus();
-                    }
-                });
-                return;
-            }
-
-            pushManualToPending(data.is_safety_stock, false, null);
-        })
-        .catch(function(err) {
-            closeSwalSafely();
-            console.error('Validate manual lot error:', err);
-            Swal.fire({
-                icon: 'error',
-                title: 'Koneksi Terganggu',
-                text: 'Gagal memverifikasi label ke server. Silakan coba kembali.',
-                timer: 3000,
-                timerProgressBar: true
-            }).then(function() {
-                if (qrInput) qrInput.focus();
-            });
-        });
-}
-
-function executeAddLotSubmit() {
+function submitAddBoxesToActiveSession() {
     if (!currentSessionId) {
-        Swal.fire({ icon: 'error', title: 'Sesi Tidak Ditemukan', text: 'ID Sesi aktif tidak tersedia.' });
-        return;
-    }
-
-    // Jika antrean kosong, periksa apakah pengguna sudah mengisi form manual tapi lupa klik "+ Masukkan ke Daftar Box"
-    if (pendingAddLots.length === 0) {
-        var lotInput = document.getElementById('add-lot-number');
-        var qtyInput = document.getElementById('add-lot-qty');
-        var lotNumber = (lotInput ? lotInput.value.trim() : '');
-        var qty = parseInt(qtyInput ? qtyInput.value : 0, 10) || 0;
-
-        if (lotNumber && qty > 0) {
-            addManualLotToPending();
-            return;
-        }
-
         Swal.fire({
-            icon: 'warning',
-            title: 'Daftar Box Masih Kosong',
-            text: 'Silakan scan barcode QR label atau masukkan data box terlebih dahulu sebelum menyimpan.'
+            icon: 'error',
+            title: 'Sesi Tidak Ditemukan',
+            text: 'ID Sesi aktif tidak valid.'
         });
         return;
     }
 
+    if (!scannedLabelsList || scannedLabelsList.length === 0) {
+        Swal.fire({
+            icon: 'warning',
+            title: 'Scan Label Diperlukan',
+            text: 'Silakan scan setidaknya 1 label barcode QR box sebelum menyimpan!'
+        });
+        return;
+    }
 
+    setScanModalLoading(true, 'Mendaftarkan box baru ke sesi #' + currentSessionId + '...');
+    hideScanModalError();
 
-    Swal.fire({
-        title: 'Mendaftarkan Box ke Sesi...',
-        text: 'Memproses ' + pendingAddLots.length + ' box dan memperbarui kalkulasi AQL...',
-        allowOutsideClick: false,
-        didOpen: function() { Swal.showLoading(); }
+    var s = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session) ? window.lastWorkbenchSessionData.session : null;
+    var targetPartCode = s ? (s.session_part_code || s.part_code || selectedPlanningPartCode || '') : (selectedPlanningPartCode || '');
+
+    var lotsPayload = scannedLabelsList.map(function(l) {
+        return {
+            part_code: l.Z1 || targetPartCode,
+            lot_number: l.Z2 || '',
+            qty: parseInt(l.Z3, 10) || 0,
+            ref_number: l.Z5 || '',
+            raw_qr: l.raw || ('Z1' + (l.Z1 || targetPartCode) + '|Z2' + (l.Z2 || '') + '|Z3' + (l.Z3 || 0) + '|Z5' + (l.Z5 || '')),
+            is_safety_stock: !!l.is_safety_stock_alloc,
+            was_rejected_before: !!l.was_rejected_before,
+            rejected_info: l.rejected_info || null
+        };
     });
+
+    var postData = {
+        session_id: currentSessionId,
+        part_code: targetPartCode,
+        lots: lotsPayload
+    };
 
     fetch('<?= base_url("modules/inspection/api/add_session_lot.php") ?>', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: currentSessionId,
-            lots: pendingAddLots
-        })
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: JSON.stringify(postData)
     })
     .then(function(r) { return r.json(); })
-    .then(function(data) {
-        if (!data.success) {
-            if (data.error_type === 'already_passed_duplicate') {
-                showDuplicatePassedModal(data, null, function() {});
-                return;
-            }
-            Swal.fire({
-                icon: 'error',
-                title: 'Gagal Menambahkan Box',
-                html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
-                      escapeHtml(data.message || 'Terjadi kesalahan pada sistem.') +
-                      '</div>'
-            });
+    .then(function(res) {
+        setScanModalLoading(false);
+        if (!res.success) {
+            showScanModalError(res.message || 'Gagal menambahkan box ke sesi.');
             return;
         }
 
-        var addedCount = pendingAddLots.length;
-        closeAddLotModal();
+        // Sukses! Tutup modal scan dan reset flag
+        window.isAddingBoxToActiveSession = false;
+        closeScanModal(true);
 
-        if (data.first_new_lot_id) {
-            activeFocusLotId = parseInt(data.first_new_lot_id, 10);
-        }
+        var addedCount = (res.added_lots && Array.isArray(res.added_lots)) ? res.added_lots.length : scannedLabelsList.length;
 
         Swal.fire({
             icon: 'success',
             title: 'Box Berhasil Ditambahkan',
-            text: data.message || (addedCount + ' box berhasil didaftarkan ke sesi.'),
+            text: res.message || (addedCount + ' box berhasil didaftarkan ke sesi.'),
             confirmButtonColor: '#059669',
             timer: 2000,
             timerProgressBar: true
@@ -11080,14 +10003,12 @@ function executeAddLotSubmit() {
         });
     })
     .catch(function(err) {
+        setScanModalLoading(false);
         console.error('Add session lot error:', err);
-        Swal.fire({
-            icon: 'error',
-            title: 'Koneksi Error',
-            text: 'Gagal menghubungi server saat mendaftarkan box.'
-        });
+        showScanModalError('Gagal menghubungi server saat mendaftarkan box: ' + (err.message || err));
     });
 }
+
 
 function cancelReplacementLot(lotId, lotNumber) {
     if (!lotId) return;
@@ -12663,12 +11584,6 @@ function workbenchChiefUnapprove() {
 
     // Mendapatkan input scan yang saat ini sedang aktif & terlihat di layar
     function getActiveScanInput() {
-        // 0. Modal Tambah Box Baru ke Sesi (Multi-Scan)
-        var addLotModal = document.getElementById('modal-add-lot-to-session');
-        if (addLotModal && addLotModal.style.display !== 'none' && !addLotModal.classList.contains('hidden')) {
-            var addLotInput = document.getElementById('add-lot-qr-raw');
-            if (addLotInput && addLotInput.offsetParent !== null) return addLotInput;
-        }
 
         // 1. Re-inspeksi / Ganti Box Modal
         var reinspModal = document.getElementById('modal-lot-reinspection');
@@ -12894,11 +11809,6 @@ function workbenchChiefUnapprove() {
                 inputs: ['batch-input-z1', 'batch-input-z2', 'batch-input-z3', 'batch-input-z4', 'batch-input-z5'],
                 targetId: 'batch-qr-scan-input',
                 processor: function(val, el) { if (typeof handleSingleBatchQrInput === 'function') handleSingleBatchQrInput(el, true); }
-            },
-            {
-                inputs: ['add-lot-number', 'add-lot-qty', 'add-lot-ref-number'],
-                targetId: 'add-lot-qr-raw',
-                processor: function(val, el) { if (typeof handleModalAddLotQrInput === 'function') handleModalAddLotQrInput(el, true); }
             }
         ];
 

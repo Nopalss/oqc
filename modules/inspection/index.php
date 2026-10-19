@@ -552,9 +552,14 @@ if ($pdo) {
         $mEnd       = date('Y-m-t 23:59:59');
 
         // Session-based badge count cache (TTL 30s) to avoid 4 heavy aggregate queries on every single request
+        $isForceRefresh = isset($_GET['force_refresh']) && $_GET['force_refresh'] == '1';
+        if ($isForceRefresh && isset($_SESSION['oqc_badge_cache'])) {
+            unset($_SESSION['oqc_badge_cache']);
+        }
+
         $badgeCacheTtl = 30;
         $badgeCacheKey = 'badges_' . $currentUserId . '_' . $period . '_' . md5($startDate . '|' . $endDate);
-        $cachedBadges = $_SESSION['oqc_badge_cache'][$badgeCacheKey] ?? null;
+        $cachedBadges = (!$isForceRefresh) ? ($_SESSION['oqc_badge_cache'][$badgeCacheKey] ?? null) : null;
         $isBadgeCacheValid = ($cachedBadges && isset($cachedBadges['time']) && (time() - $cachedBadges['time'] < $badgeCacheTtl));
 
         // =====================================================================
@@ -1102,15 +1107,25 @@ if ($pdo) {
             if ($statusFilter === 'uninspected') {
                 $tableWhere[] = "k.status = 'uninspected' AND NOT EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress')";
             } elseif ($statusFilter === 'in_progress') {
-                $tableWhere[] = "(
-                    k.status IN ('in_progress', 'partial', 'rejected') 
-                    OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status IN ('in_progress', 'rejected'))
-                    OR EXISTS (
-                        SELECT 1 FROM inspection_sessions s_lot
-                        JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
-                        WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status IN ('rejected', 'ng_quarantine', 'ng_found'))
-                    )
-                )";
+                $tableWhere[] = "k.status != 'completed' 
+                    AND NOT (COALESCE((
+                        SELECT SUM(CASE 
+                            WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                          FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                            WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                            ELSE 0
+                        END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                    ), 0) >= k.qty AND k.qty > 0)
+                    AND (
+                        k.status IN ('in_progress', 'partial', 'rejected') 
+                        OR EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status IN ('in_progress', 'rejected'))
+                        OR EXISTS (
+                            SELECT 1 FROM inspection_sessions s_lot
+                            JOIN inspection_session_lots isl_rej ON isl_rej.inspection_session_id = s_lot.id
+                            WHERE s_lot.kanban_item_id = k.id AND (isl_rej.lot_result = 'rejected' OR isl_rej.lot_status IN ('rejected', 'ng_quarantine', 'ng_found'))
+                        )
+                    )";
             } elseif ($statusFilter === 'partial') {
                 $tableWhere[] = "k.status = 'partial' AND k.status != 'completed' AND NOT (COALESCE((
                     SELECT SUM(CASE 
@@ -1185,8 +1200,12 @@ if ($pdo) {
                     k.id ASC
                 ";
             } else {
-                // Paper Sequence: Sesuai urutan baris upload di file / cetakan kertas
+                // Paper Sequence: Kanban belum selesai di atas, yang sudah selesai otomatis turun ke paling bawah
                 $kanbanOrderBy = "
+                    CASE 
+                        WHEN k.status = 'completed' OR total_passed_qty >= k.qty THEN 1 
+                        ELSE 0 
+                    END ASC,
                     COALESCE(b.imported_at, k.created_at) ASC,
                     COALESCE(k.batch_id, 0) ASC,
                     k.id ASC
@@ -3357,6 +3376,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
 
                 <div class="flex items-center gap-2 flex-wrap">
+                    <!-- Tombol Hard Refresh (Bypass Semua Cache Database & Browser) -->
+                    <button type="button" 
+                            id="btn-force-refresh"
+                            onclick="executeHardRefresh()" 
+                            class="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 text-slate-700 font-extrabold text-xs rounded-lg border border-slate-300 shadow-2xs transition-all inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                            title="Force Refresh: Bersihkan semua cache (session & browser) dan tarik ulang data langsung dari database">
+                        <svg id="refresh-spinner-icon" class="w-3.5 h-3.5 text-slate-600 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        <span id="refresh-btn-text">Refresh</span>
+                    </button>
+
                     <?php if ($activeTab === 'kanban'): ?>
                         <!-- Real-Time Live Sync Indicator (Khusus Kanban Workboard) -->
                         <div id="live-sync-indicator" class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-700 text-[11px] font-bold shadow-2xs" title="Sinkronisasi status otomatis antar-laptop setiap 4 detik">
@@ -3367,7 +3398,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                         <!-- Tombol Action: Mulai Inspeksi Baru (Kanban) -->
                         <a href="<?= base_url('modules/inspection/session.php?scan_new=1') ?>" 
-                           class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-extrabold text-xs rounded-lg shadow-xs transition-all inline-flex items-center gap-1.5 whitespace-nowrap">
+                            class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-extrabold text-xs rounded-lg shadow-xs transition-all inline-flex items-center gap-1.5 whitespace-nowrap">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path>
                             </svg>
@@ -6233,6 +6264,34 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
     </main>
 
     <script>
+    /**
+     * Hard / Force Refresh: Bersihkan cache browser & memori, kirim sinyal force_refresh ke backend
+     */
+    function executeHardRefresh() {
+        var btn = document.getElementById('btn-force-refresh');
+        var icon = document.getElementById('refresh-spinner-icon');
+        var txt = document.getElementById('refresh-btn-text');
+
+        if (btn) {
+            btn.disabled = true;
+            btn.classList.add('opacity-75');
+        }
+        if (icon) {
+            icon.classList.add('animate-spin');
+        }
+        if (txt) {
+            txt.innerText = 'Memperbarui...';
+        }
+
+        // Susun URL saat ini dengan menyisipkan parameter force_refresh=1 dan timestamp anti-cache
+        var currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('force_refresh', '1');
+        currentUrl.searchParams.set('_nocache', Date.now());
+
+        // Navigasikan paksa ke URL baru (bypass disk cache browser)
+        window.location.href = currentUrl.toString();
+    }
+
     /**
      * Horizontal Scroll Helper for My Lots Flat Table
      */

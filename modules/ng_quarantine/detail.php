@@ -383,10 +383,6 @@ if ($latestResult === 'passed') {
     $handlingKey        = 'resolved_passed';
     $handlingLabel      = 'Selesai: Lulus Re-Inspeksi';
     $handlingBadgeClass = 'bg-emerald-100 text-emerald-800 border-emerald-200';
-} elseif ($hasReplacementBox && $totalRoundsCount == 1) {
-    $handlingKey        = 'resolved_replaced';
-    $handlingLabel      = 'Selesai: Diganti Lot Baru';
-    $handlingBadgeClass = 'bg-indigo-100 text-indigo-800 border-indigo-200';
 } elseif ($latestResult === 'rejected' && $totalRoundsCount > 1) {
     $handlingKey        = 'reinspection_failed';
     $handlingLabel      = 'RE-INSPEKSI (MASIH NG / REJECTED)';
@@ -408,9 +404,6 @@ if ($latestResult === 'passed') {
     $displayLotStatusClass = 'bg-sky-100 text-sky-800 border-sky-300';
     $handlingLabel         = 'Disposisi Selesai (Divisi)';
     $handlingBadgeClass    = 'bg-sky-100 text-sky-800 border-sky-300';
-} elseif ($hasReplacementBox && $totalRoundsCount == 1) {
-    $displayLotStatus      = 'Diganti Lot Baru';
-    $displayLotStatusClass = 'bg-indigo-100 text-indigo-800 border-indigo-200';
 } elseif ($latestResult === 'rejected' && $totalRoundsCount > 1) {
     $displayLotStatus      = 'Re-Inspeksi (Masih NG)';
     $displayLotStatusClass = 'bg-rose-100 text-rose-800 border-rose-200';

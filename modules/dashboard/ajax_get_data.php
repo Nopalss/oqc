@@ -459,8 +459,28 @@ try {
         }
     }
 
-    $topNDefectTypes   = array_slice($distinctDefectTypes, 0, $selectedTopRank);
-    $otherNDefectTypes = array_slice($distinctDefectTypes, $selectedTopRank);
+    // ── Per-Day Top N Defect Selection (Tanpa 'Others', Defect Asli Hari Tersebut) ──
+    $selectedDefectsPerDay = []; // [dk => [defect_name, ...]]
+    $activeDailyDefectsMap = []; // [defect_name => true]
+
+    foreach ($activeDefectPeriodKeys as $dk) {
+        $dayDefects = $defectMatrix[$dk] ?? [];
+        arsort($dayDefects);
+        // Ambil Top N defect terbesar yang muncul di hari ini
+        $topForDay = array_slice(array_keys($dayDefects), 0, $selectedTopRank);
+        $selectedDefectsPerDay[$dk] = $topForDay;
+        foreach ($topForDay as $dnm) {
+            $activeDailyDefectsMap[$dnm] = true;
+        }
+    }
+
+    // Urutkan jenis defect yang terpilih berdasarkan total frekuensi kemunculannya
+    $topNDefectTypes = array_keys($activeDailyDefectsMap);
+    usort($topNDefectTypes, function($a, $b) use ($defectTypeTotals) {
+        return ($defectTypeTotals[$b] ?? 0) <=> ($defectTypeTotals[$a] ?? 0);
+    });
+
+    $otherNDefectTypes = []; // Hapus kategori Others
 
     $stackedChartLabels = [];
     foreach ($activeDefectPeriodKeys as $dk) {
@@ -527,13 +547,14 @@ try {
             $partMetaPts = [];
 
             foreach ($activeDefectPeriodKeys as $dk) {
-                $qty    = (int)($defectMatrix[$dk][$dname] ?? 0);
+                $isTopThisDay = in_array($dname, $selectedDefectsPerDay[$dk] ?? []);
+                $qty    = $isTopThisDay ? (int)($defectMatrix[$dk][$dname] ?? 0) : 0;
                 $sample = (int)($trendMap[$dk]['sample'] ?? 0);
                 $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
 
                 $dataPtsPcs[]  = $qty;
                 $dataPtsPpm[]  = $ppm;
-                $partMetaPts[] = $defectPartsMatrix[$dk][$dname] ?? [];
+                $partMetaPts[] = $isTopThisDay ? ($defectPartsMatrix[$dk][$dname] ?? []) : [];
             }
 
             $stackedChartDatasetsPcs[] = [
@@ -554,56 +575,6 @@ try {
                 'stack'           => 'defect_stack',
                 'borderRadius'    => 3
             ];
-        }
-
-        if (!empty($otherNDefectTypes)) {
-            $otherPtsPcs   = [];
-            $otherPtsPpm   = [];
-            $otherMetaPts  = [];
-            $hasOtherData  = false;
-
-            foreach ($activeDefectPeriodKeys as $dk) {
-                $otherQty = 0;
-                $combinedOtherParts = [];
-                foreach ($otherNDefectTypes as $odname) {
-                    $otherQty += (int)($defectMatrix[$dk][$odname] ?? 0);
-                    if (!empty($defectPartsMatrix[$dk][$odname])) {
-                        foreach ($defectPartsMatrix[$dk][$odname] as $pItem) {
-                            $combinedOtherParts[] = $pItem;
-                        }
-                    }
-                }
-                if ($otherQty > 0) $hasOtherData = true;
-
-                $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-                $ppm    = ($sample > 0) ? round(($otherQty / $sample) * 1000000, 1) : 0;
-
-                $otherPtsPcs[]  = $otherQty;
-                $otherPtsPpm[]  = $ppm;
-                $otherMetaPts[] = $combinedOtherParts;
-            }
-
-            if ($hasOtherData) {
-                $otherLabel = 'Others (' . count($otherNDefectTypes) . ' jenis lainnya)';
-                $stackedChartDatasetsPcs[] = [
-                    'label'           => $otherLabel,
-                    'data'            => $otherPtsPcs,
-                    'raw_pcs'         => $otherPtsPcs,
-                    'part_meta'       => $otherMetaPts,
-                    'backgroundColor' => '#94a3b8',
-                    'stack'           => 'defect_stack',
-                    'borderRadius'    => 3
-                ];
-                $stackedChartDatasetsPpm[] = [
-                    'label'           => $otherLabel,
-                    'data'            => $otherPtsPpm,
-                    'raw_pcs'         => $otherPtsPcs,
-                    'part_meta'       => $otherMetaPts,
-                    'backgroundColor' => '#94a3b8',
-                    'stack'           => 'defect_stack',
-                    'borderRadius'    => 3
-                ];
-            }
         }
     }
 

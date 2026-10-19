@@ -42,7 +42,7 @@ $queryParams     = [];
 // Scope query to NG lots (lots with NG records or rejected status)
 $whereConditions[] = "(
     isl.lot_result = 'rejected' 
-    OR isl.lot_status IN ('rejected', 'ng_quarantine', 'reinspected', 'replaced')
+    OR isl.lot_status IN ('rejected', 'ng_quarantine')
     OR EXISTS (
         SELECT 1 FROM inspection_ng_records ngr 
         WHERE ngr.session_lot_id = isl.id 
@@ -361,13 +361,6 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
         $rowClass      = 'font-medium';
         $rowStyle      = 'background-color: #f0fdf4; border-left: 4px solid #22c55e;';
         $statsResolvedPassed++;
-    } elseif ($resStatus === 'replaced' || $lotSt === 'replaced') {
-        $handlingCode  = 'resolved_replaced';
-        $handlingLabel = 'REPLACED / GANTI BARU';
-        $badgeClass    = 'bg-indigo-100 text-indigo-800 border-indigo-300';
-        $rowClass      = 'font-medium';
-        $rowStyle      = 'background-color: #f5f3ff; border-left: 4px solid #6366f1;';
-        $statsResolvedReplaced++;
     } elseif ($groupClosure !== null) {
         $handlingCode  = 'closed_external';
         $handlingLabel = 'DISPOSISI SELESAI (DIVISI)';

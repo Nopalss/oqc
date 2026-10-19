@@ -547,9 +547,28 @@ if ($pdo) {
             }
         }
 
-        // Limit to Top N defect types based on $selectedTopRank (3, 5, or 10)
-        $topNDefectTypes   = array_slice($distinctDefectTypes, 0, $selectedTopRank);
-        $otherNDefectTypes = array_slice($distinctDefectTypes, $selectedTopRank);
+        // ── Per-Day Top N Defect Selection (Tanpa 'Others', Defect Asli Hari Tersebut) ──
+        $selectedDefectsPerDay = []; // [dk => [defect_name, ...]]
+        $activeDailyDefectsMap = []; // [defect_name => true]
+
+        foreach ($activeDefectPeriodKeys as $dk) {
+            $dayDefects = $defectMatrix[$dk] ?? [];
+            arsort($dayDefects);
+            // Ambil Top N defect terbesar yang muncul di hari ini
+            $topForDay = array_slice(array_keys($dayDefects), 0, $selectedTopRank);
+            $selectedDefectsPerDay[$dk] = $topForDay;
+            foreach ($topForDay as $dnm) {
+                $activeDailyDefectsMap[$dnm] = true;
+            }
+        }
+
+        // Urutkan jenis defect yang terpilih berdasarkan total frekuensi kemunculannya
+        $topNDefectTypes = array_keys($activeDailyDefectsMap);
+        usort($topNDefectTypes, function($a, $b) use ($defectTypeTotals) {
+            return ($defectTypeTotals[$b] ?? 0) <=> ($defectTypeTotals[$a] ?? 0);
+        });
+
+        $otherNDefectTypes = []; // Hapus kategori Others
 
         $stackedChartLabels = [];
         foreach ($activeDefectPeriodKeys as $dk) {
@@ -621,13 +640,14 @@ if ($pdo) {
                 $partMetaPts = [];
 
                 foreach ($activeDefectPeriodKeys as $dk) {
-                    $qty    = (int)($defectMatrix[$dk][$dname] ?? 0);
+                    $isTopThisDay = in_array($dname, $selectedDefectsPerDay[$dk] ?? []);
+                    $qty    = $isTopThisDay ? (int)($defectMatrix[$dk][$dname] ?? 0) : 0;
                     $sample = (int)($trendMap[$dk]['sample'] ?? 0);
                     $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
 
                     $dataPtsPcs[]  = $qty;
                     $dataPtsPpm[]  = $ppm;
-                    $partMetaPts[] = $defectPartsMatrix[$dk][$dname] ?? [];
+                    $partMetaPts[] = $isTopThisDay ? ($defectPartsMatrix[$dk][$dname] ?? []) : [];
                 }
 
                 $stackedChartDatasetsPcs[] = [
@@ -648,57 +668,6 @@ if ($pdo) {
                     'stack'           => 'defect_stack',
                     'borderRadius'    => 3
                 ];
-            }
-
-            // Tambahkan baris Others jika ada defect di luar Top N
-            if (!empty($otherNDefectTypes)) {
-                $otherPtsPcs   = [];
-                $otherPtsPpm   = [];
-                $otherMetaPts  = [];
-                $hasOtherData  = false;
-
-                foreach ($activeDefectPeriodKeys as $dk) {
-                    $otherQty = 0;
-                    $combinedOtherParts = [];
-                    foreach ($otherNDefectTypes as $odname) {
-                        $otherQty += (int)($defectMatrix[$dk][$odname] ?? 0);
-                        if (!empty($defectPartsMatrix[$dk][$odname])) {
-                            foreach ($defectPartsMatrix[$dk][$odname] as $pItem) {
-                                $combinedOtherParts[] = $pItem;
-                            }
-                        }
-                    }
-                    if ($otherQty > 0) $hasOtherData = true;
-
-                    $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-                    $ppm    = ($sample > 0) ? round(($otherQty / $sample) * 1000000, 1) : 0;
-
-                    $otherPtsPcs[]  = $otherQty;
-                    $otherPtsPpm[]  = $ppm;
-                    $otherMetaPts[] = $combinedOtherParts;
-                }
-
-                if ($hasOtherData) {
-                    $otherLabel = 'Others (' . count($otherNDefectTypes) . ' jenis lainnya)';
-                    $stackedChartDatasetsPcs[] = [
-                        'label'           => $otherLabel,
-                        'data'            => $otherPtsPcs,
-                        'raw_pcs'         => $otherPtsPcs,
-                        'part_meta'       => $otherMetaPts,
-                        'backgroundColor' => '#94a3b8',
-                        'stack'           => 'defect_stack',
-                        'borderRadius'    => 3
-                    ];
-                    $stackedChartDatasetsPpm[] = [
-                        'label'           => $otherLabel,
-                        'data'            => $otherPtsPpm,
-                        'raw_pcs'         => $otherPtsPcs,
-                        'part_meta'       => $otherMetaPts,
-                        'backgroundColor' => '#94a3b8',
-                        'stack'           => 'defect_stack',
-                        'borderRadius'    => 3
-                    ];
-                }
             }
         }
 
@@ -1300,10 +1269,10 @@ $initialDashboardVersion = md5(implode('|', [
                 <div style="flex-shrink:0;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
                     <div>
                         <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:6px;">
-                            <span><?= $isPassedMode ? "Top {$selectedTopRank} Hasil" : "Top {$selectedTopRank} Defect" ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
+                            <span><?= $isPassedMode ? "Tren Hasil Mutu Harian" : "Tren Defect Harian" ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
                         </div>
                         <div style="font-size:10px;color:#94a3b8;margin-top:2px;">
-                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?>
+                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <?= $selectedTopRank ?> besar/hari
                         </div>
                     </div>
 
@@ -2008,7 +1977,7 @@ $initialDashboardVersion = md5(implode('|', [
 
     // ── LocalStorage Caching Engine (Stale-While-Revalidate) ───────────────────
     function getDashboardCacheKey() {
-        return 'oqc_dash_cache_' + [
+        return 'oqc_dash_cache_v2_' + [
             filterParams.customer || 'all',
             filterParams.unit || 'pcs',
             filterParams.sample_basis || 'lot',
@@ -2318,16 +2287,7 @@ $initialDashboardVersion = md5(implode('|', [
                 },
                 plugins: {
                     legend: {
-                        display: true,
-                        position: 'bottom',
-                        labels: {
-                            boxWidth: 9,
-                            boxHeight: 9,
-                            font: { size: 9.5, weight: '600' },
-                            padding: 6,
-                            usePointStyle: true,
-                            pointStyle: 'rectRounded'
-                        }
+                        display: false
                     },
                     tooltip: {
                         mode: 'nearest',
@@ -3560,42 +3520,89 @@ $initialDashboardVersion = md5(implode('|', [
         updateFooterCount(visible, rows.length);
     }
 
-    function exportKpiModalToCsv() {
+    function exportKpiModalToExcel() {
         var table = document.getElementById('kpiDrilldownDataTable');
         if (!table) {
             alert('Tidak ada data tabel yang dapat diunduh.');
             return;
         }
 
-        var csv = [];
-        var rows = table.querySelectorAll('tr');
+        var btn = document.getElementById('btnExportKpiExcel');
+        var origHtml = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" style="display:inline-block;vertical-align:-2px;margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>Menyiapkan...';
+            btn.disabled = true;
+        }
 
-        rows.forEach(function(r) {
-            if (r.style.display === 'none') return; // Lewati yang terfilter
-            var cols = r.querySelectorAll('th, td');
-            var rowData = [];
-            cols.forEach(function(c) {
-                var text = (c.innerText || c.textContent || '').replace(/"/g, '""').trim();
-                rowData.push('"' + text + '"');
-            });
-            if (rowData.length) {
-                csv.push(rowData.join(','));
-            }
+        // Ambil Header Tabel
+        var headers = [];
+        var thCols = table.querySelectorAll('thead th');
+        thCols.forEach(function(th) {
+            headers.push((th.innerText || th.textContent || '').trim());
         });
 
-        var csvString = csv.join('\r\n');
-        var blob = new Blob(["\uFEFF" + csvString], { type: 'text/csv;charset=utf-8;' });
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement('a');
-        var kpiTitle = kpiDrilldownCache ? (kpiDrilldownCache.title || 'KPI_Rincian') : 'KPI_Rincian';
-        var filename = 'OQC_' + kpiTitle.replace(/[^a-zA-Z0-9]/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+        // Ambil Baris Tabel (hanya baris yang tidak disembunyikan oleh filter pencarian)
+        var rows = [];
+        var trRows = table.querySelectorAll('tbody tr');
+        trRows.forEach(function(tr) {
+            if (tr.style.display === 'none') return;
+            var tds = tr.querySelectorAll('td');
+            if (!tds || !tds.length) return;
+            var rowVals = [];
+            tds.forEach(function(td) {
+                rowVals.push((td.innerText || td.textContent || '').trim());
+            });
+            rows.push(rowVals);
+        });
 
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        if (!rows.length) {
+            alert('Tidak ada baris data yang terlihat untuk diunduh.');
+            if (btn) {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+            return;
+        }
+
+        var titleEl = document.getElementById('kpiModalTitle');
+        var subEl   = document.getElementById('kpiModalSubtitle');
+        var perEl   = document.getElementById('kpiModalBadgePeriod');
+
+        var form = document.createElement('form');
+        form.method = 'POST';
+        form.action = 'export_kpi_excel.php';
+        form.style.display = 'none';
+
+        var postData = {
+            title: titleEl ? titleEl.textContent : 'Rincian KPI',
+            subtitle: subEl ? subEl.textContent : '',
+            period: perEl ? perEl.textContent : '',
+            active_tab: activeKpiTab || '',
+            stats: JSON.stringify((kpiDrilldownCache && kpiDrilldownCache.stats) ? kpiDrilldownCache.stats : []),
+            headers: JSON.stringify(headers),
+            rows: JSON.stringify(rows)
+        };
+
+        for (var k in postData) {
+            if (postData.hasOwnProperty(k)) {
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = k;
+                input.value = postData[k];
+                form.appendChild(input);
+            }
+        }
+
+        document.body.appendChild(form);
+        form.submit();
+
+        setTimeout(function() {
+            document.body.removeChild(form);
+            if (btn) {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }, 1500);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -3997,11 +4004,11 @@ $initialDashboardVersion = md5(implode('|', [
                     </div>
                 </div>
 
-                <!-- Export modal data to CSV -->
+                <!-- Export modal data to Excel -->
                 <div>
-                    <button type="button" onclick="exportKpiModalToCsv()" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;background:#ffffff;color:#334155;border:1px solid #cbd5e1;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;transition:all 0.15s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#ffffff'">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                        Unduh CSV
+                    <button type="button" id="btnExportKpiExcel" onclick="exportKpiModalToExcel()" style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:#059669;color:#ffffff;border:1px solid #047857;border-radius:7px;font-size:11px;font-weight:800;cursor:pointer;transition:all 0.15s;box-shadow:0 1px 2px rgba(5,150,105,0.25);" onmouseover="this.style.background='#047857'" onmouseout="this.style.background='#059669'">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Unduh Excel
                     </button>
                 </div>
             </div>

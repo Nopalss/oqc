@@ -278,11 +278,15 @@ try {
                 $latestRecord['part_name'] = $stmtPn->fetchColumn() ?: ($didRow['part_name'] ?? '-');
             }
 
-            if ($latestRecord['lot_result'] === 'rejected' || 
-                in_array($latestRecord['lot_status'], ['ng_found', 'ng_quarantine', 'replaced']) || 
-                $latestRecord['session_status'] === 'rejected') {
+            // Prioritaskan status REJECTED jika lot itu sendiri reject, di-replace, atau ada penanganan karantina
+            $isLotRejectedExplicitly = (
+                $latestRecord['lot_result'] === 'rejected' ||
+                in_array($latestRecord['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'rejected'])
+            );
+
+            if ($isLotRejectedExplicitly || $latestRecord['session_status'] === 'rejected') {
                 $isLatestRejected = true;
-            } elseif (in_array($latestRecord['lot_result'], ['passed', 'skipped']) || $latestRecord['session_status'] === 'passed') {
+            } elseif (!$isLotRejectedExplicitly && (in_array($latestRecord['lot_result'], ['passed', 'skipped']) || $latestRecord['session_status'] === 'passed')) {
                 $isLatestPassed = true;
             }
         }
@@ -641,7 +645,12 @@ try {
                 LEFT JOIN master_parts mp ON mp.id = s.part_id
                 WHERE UPPER(isl.ref_number) IN ($inRefPassPlaceholders)
                   $partLotCond
-                  AND (isl.lot_result IN ('passed', 'skipped') OR s.status = 'passed')
+                  AND (
+                      isl.lot_result IN ('passed', 'skipped')
+                      OR (s.status = 'passed' AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected') AND (isl.lot_status IS NULL OR isl.lot_status NOT IN ('rejected', 'ng_quarantine', 'replaced', 'ng_found')))
+                  )
+                  AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
+                  AND (isl.lot_status IS NULL OR isl.lot_status NOT IN ('rejected', 'ng_quarantine', 'replaced', 'ng_found'))
                   $typeCond
                 LIMIT 1
             ";
