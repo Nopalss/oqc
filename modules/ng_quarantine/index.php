@@ -20,7 +20,7 @@ $pageTitle = "Tracking & Karantina Lot NG";
 $period         = $_GET['period'] ?? 'all';
 $startDate      = sanitize($_GET['start_date'] ?? '');
 $endDate        = sanitize($_GET['end_date'] ?? '');
-$statusHandling = sanitize($_GET['status_handling'] ?? 'all');
+$statusHandling = sanitize($_GET['status_handling'] ?? 'pending');
 $search         = trim(sanitize($_GET['search'] ?? ''));
 
 $page  = max(1, (int)($_GET['page'] ?? 1));

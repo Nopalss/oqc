@@ -915,9 +915,24 @@ try {
         <?php else: ?>
             <?php foreach ($rows as $idx => $row): 
                 $isKanban = ($row['inspection_type'] === 'kanban');
+                $filterDate = date('d M Y', strtotime($row['started_at']));
+                $filterPart = trim($row['part_code'] . ' - ' . $row['part_name']);
+                $filterModel = trim($row['model_name']);
+                $filterDefect = trim($row['defect_name']);
+                $filterType = $isKanban ? 'Kanban' : 'Safety Stock';
+                $filterCustomer = trim($row['customer_name']);
+                $filterInspector = trim($row['inspector_name'] ?? 'System');
             ?>
-                <tr style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
-                    <td style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
+                <tr class="overview-history-row" 
+                    data-filter-date="<?= htmlspecialchars($filterDate) ?>"
+                    data-filter-part="<?= htmlspecialchars($filterPart) ?>"
+                    data-filter-model="<?= htmlspecialchars($filterModel) ?>"
+                    data-filter-defect="<?= htmlspecialchars($filterDefect) ?>"
+                    data-filter-type="<?= htmlspecialchars($filterType) ?>"
+                    data-filter-customer="<?= htmlspecialchars($filterCustomer) ?>"
+                    data-filter-inspector="<?= htmlspecialchars($filterInspector) ?>"
+                    style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+                    <td class="row-index" style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
                         <?= $idx + 1 ?>
                     </td>
                     <td style="padding:10px 14px;">
@@ -996,22 +1011,24 @@ try {
         exit;
 
     } elseif ($action === 'get_trend_timeline') {
-        if ($defectId <= 0) {
-            echo json_encode(['success' => false, 'message' => 'defect_id required']);
+        if ($defectId <= 0 && ($partId === null || $partId <= 0)) {
+            echo json_encode(['success' => false, 'message' => 'defect_id or part_id required']);
             exit;
         }
 
         // Build WHERE for the timeline
         $whereTimeline = [
             "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-            "s.started_at >= :sd AND s.started_at < :ed_next",
-            "ngr.defect_type_id = :defId"
+            "s.started_at >= :sd AND s.started_at < :ed_next"
         ];
         $paramsTimeline = [
             ':sd'      => $startDate . ' 00:00:00',
-            ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
-            ':defId'   => $defectId
+            ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
         ];
+        if ($defectId > 0) {
+            $whereTimeline[] = "ngr.defect_type_id = :defId";
+            $paramsTimeline[':defId'] = $defectId;
+        }
 
         if ($customer !== '') {
             $whereTimeline[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
@@ -1049,14 +1066,16 @@ try {
 
             $wHour = [
                 "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                "ngr.defect_type_id = :defId",
                 "s.started_at >= :sd AND s.started_at < :ed_next"
             ];
             $pHour = [
-                ':defId'   => $defectId,
                 ':sd'      => $startDate . ' 00:00:00',
                 ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
             ];
+            if ($defectId > 0) {
+                $wHour[] = "ngr.defect_type_id = :defId";
+                $pHour[':defId'] = $defectId;
+            }
             if ($partId !== null && $partId > 0) {
                 $wHour[] = "ngr.part_id = :pId";
                 $pHour[':pId'] = $partId;
@@ -1092,14 +1111,16 @@ try {
         } else {
             // Multi-day timeline using pre-aggregated summary table (super-fast)
             $wSumT = [
-                "dds.summary_date >= :sd AND dds.summary_date <= :ed",
-                "dds.defect_type_id = :defId"
+                "dds.summary_date >= :sd AND dds.summary_date <= :ed"
             ];
             $pSumT = [
                 ':sd'    => $startDate,
-                ':ed'    => $endDate,
-                ':defId' => $defectId
+                ':ed'    => $endDate
             ];
+            if ($defectId > 0) {
+                $wSumT[] = "dds.defect_type_id = :defId";
+                $pSumT[':defId'] = $defectId;
+            }
             if ($partId !== null && $partId > 0) {
                 $wSumT[] = "dds.part_id = :pId";
                 $pSumT[':pId'] = $partId;
@@ -1182,14 +1203,16 @@ try {
                 $wActT = [
                     "s.status = 'in_progress'",
                     "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                    "ngr.defect_type_id = :defId",
                     "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
                 ];
                 $pActT = [
-                    ':defId'       => $defectId,
                     ':sd_act'      => $startDate . ' 00:00:00',
                     ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
                 ];
+                if ($defectId > 0) {
+                    $wActT[] = "ngr.defect_type_id = :defId";
+                    $pActT[':defId'] = $defectId;
+                }
                 if ($partId !== null && $partId > 0) {
                     $wActT[] = "ngr.part_id = :pId";
                     $pActT[':pId'] = $partId;
@@ -1405,9 +1428,13 @@ try {
         exit;
 
     } elseif ($action === 'get_part_stacked_trend') {
-        // 1. Get Top N parts for this period
+        // 1. Get Top N parts for this period (optionally filtered by defect_type_id)
         $wSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
         $pSum = [':sd' => $startDate, ':ed' => $endDate];
+        if ($defectId > 0) {
+            $wSum[] = "dds.defect_type_id = :defId";
+            $pSum[':defId'] = $defectId;
+        }
         if ($customer !== '') {
             $wSum[] = "dds.customer = :cust";
             $pSum[':cust'] = $customer;
@@ -1470,6 +1497,10 @@ try {
             "dds.part_id IN ({$placeholders})"
         ];
         $pSumT = array_merge([$startDate, $endDate], $topPartIds);
+        if ($defectId > 0) {
+            $wSumT[] = "dds.defect_type_id = ?";
+            $pSumT[] = $defectId;
+        }
         if ($customer !== '') {
             $wSumT[] = "dds.customer = ?";
             $pSumT[] = $customer;
@@ -1537,6 +1568,10 @@ try {
                 $startDate . ' 00:00:00',
                 date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
             ], $topPartIds);
+            if ($defectId > 0) {
+                $wActT[] = "ngr.defect_type_id = ?";
+                $pActT[] = $defectId;
+            }
             if ($customer !== '') {
                 $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = ?";
                 $pActT[] = $customer;
@@ -2142,9 +2177,24 @@ try {
         <?php else: ?>
             <?php foreach ($rows as $idx => $row): 
                 $isKanban = ($row['inspection_type'] === 'kanban');
+                $filterDate = date('d M Y', strtotime($row['started_at']));
+                $filterPart = trim($row['part_code'] . ' - ' . $row['part_name']);
+                $filterModel = trim($row['model_name']);
+                $filterDefect = trim($row['defect_name']);
+                $filterType = $isKanban ? 'Kanban' : 'Safety Stock';
+                $filterCustomer = trim($row['customer_name']);
+                $filterInspector = trim($row['inspector_name'] ?? 'System');
             ?>
-                <tr style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
-                    <td style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
+                <tr class="part-overview-history-row"
+                    data-filter-date="<?= htmlspecialchars($filterDate) ?>"
+                    data-filter-part="<?= htmlspecialchars($filterPart) ?>"
+                    data-filter-model="<?= htmlspecialchars($filterModel) ?>"
+                    data-filter-defect="<?= htmlspecialchars($filterDefect) ?>"
+                    data-filter-type="<?= htmlspecialchars($filterType) ?>"
+                    data-filter-customer="<?= htmlspecialchars($filterCustomer) ?>"
+                    data-filter-inspector="<?= htmlspecialchars($filterInspector) ?>"
+                    style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
+                    <td class="row-index" style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
                         <?= $idx + 1 ?>
                     </td>
                     <td style="padding:10px 14px;">

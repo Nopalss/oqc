@@ -1,10 +1,15 @@
 <?php
 /**
- * Official Visual Excel Report Generator — Analisis Defect & Deep-Dive OQC
- * Generates an executive-grade, chart-rich XLSX spreadsheet mirroring the web dashboard:
- * 1. Sheet 1: 🎯 Analisis Part & Tren (4 KPI Cards, Timeline Data, Native Line/Bar Chart)
- * 2. Sheet 2: 🍩 Funnel Distribusi Cacat (3 Pie Charts: Defect, Model, Part)
- * 3. Sheet 3: 📋 Riwayat Temuan (Audit Trail detail log with Excel formulas)
+ * Official Visual Excel Report Generator — Analisis Defect & Part OQC (1:1 WYSIWYG Mirror)
+ * Generates an executive-grade, chart-rich XLSX spreadsheet mirroring the active web dashboard tab:
+ * 
+ * Skenario 1 (Tab Analisis & Tren Defect / mode=overview):
+ * - Sheet 1: 🎯 Analisis & Tren Defect (Banner, 3 KPI Cards, Timeline Data & Chart, Top Part Distribution & Donut Chart)
+ * - Sheet 2: 📋 Riwayat Temuan Inspeksi (Filtered by defect_id, Full Audit Trail Log, Excel SUM Formula)
+ * 
+ * Skenario 2 (Tab Analisis & Tren Part / mode=part_overview):
+ * - Sheet 1: 🎯 Analisis & Tren Part (Banner, 3 KPI Cards, Timeline Data & Chart, Top Defect Distribution & Donut Chart)
+ * - Sheet 2: 📋 Riwayat Temuan Inspeksi (Filtered by part_id, Full Audit Trail Log, Excel SUM Formula)
  *
  * PT. Surya Technology Industri — Outgoing Quality Control Division
  */
@@ -38,8 +43,13 @@ use PhpOffice\PhpSpreadsheet\Chart\DataSeriesValues;
 
 $pdo = getDB();
 
-// ── 1. Query Parameters & Active Drilldown Resolvers ────────────────────────
-$selectedUnit     = sanitize($_GET['unit'] ?? 'pcs');
+// ── 1. Query Parameters & Resolvers ──────────────────────────────────────────
+$mode = sanitize($_GET['mode'] ?? 'overview');
+if (!in_array($mode, ['overview', 'part_overview'])) {
+    $mode = 'overview';
+}
+
+$selectedUnit = sanitize($_GET['unit'] ?? 'pcs');
 if (!in_array($selectedUnit, ['pcs', 'lot'])) {
     $selectedUnit = 'pcs';
 }
@@ -49,7 +59,7 @@ if (!in_array($selectedSampleBasis, ['lot', 'session'])) {
     $selectedSampleBasis = 'lot';
 }
 
-$selectedTopRank  = sanitize($_GET['top_rank'] ?? '5');
+$selectedTopRank = sanitize($_GET['top_rank'] ?? '5');
 if (!in_array($selectedTopRank, ['3', '5', '10', 'all'])) {
     $selectedTopRank = '5';
 }
@@ -60,9 +70,7 @@ $filterType       = sanitize($_GET['filter_type'] ?? '');
 $selectedMonth    = isset($_GET['month']) && is_numeric($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
 $selectedYear     = isset($_GET['year']) && is_numeric($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
 
-// Drilldown selections
 $defectId = isset($_GET['defect_id']) && is_numeric($_GET['defect_id']) ? (int)$_GET['defect_id'] : 0;
-$modelId  = isset($_GET['model_id']) && is_numeric($_GET['model_id']) ? (int)$_GET['model_id'] : null;
 $partId   = isset($_GET['part_id']) && is_numeric($_GET['part_id']) ? (int)$_GET['part_id'] : 0;
 
 $monthNames = [
@@ -144,634 +152,801 @@ if (!empty($customStartDate) && !empty($customEndDate)) {
     }
 }
 
-// ── 2. Fallback Auto-Detection if URL accessed directly without drilldown ────
-if ($pdo && ($defectId <= 0 || $partId <= 0)) {
-    // Pick the highest defect in current date range
-    $sdParam = $startDate . ' 00:00:00';
-    $edParam = date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00';
-    if ($defectId <= 0 || $modelId === null || $partId <= 0) {
-        if (function_exists('set_flash') && function_exists('redirect')) {
-            set_flash('danger', 'Ekspor Excel Analisis Cacat mewajibkan Anda memilih Jenis Defect, Model Produk, dan Part Code secara lengkap terlebih dahulu.');
-            redirect(base_url('modules/defect_analysis/index.php'));
-        } else {
-            echo "<script>alert('Silakan pilih jenis defect, model produk, dan part code terlebih dahulu.'); window.history.back();</script>";
-        }
-        exit;
+// ── 2. Automatic Smart Selection for Rank 1 if not specified ─────────────────
+if ($pdo) {
+    if ($mode === 'overview' && $defectId <= 0) {
+        // Find Top 1 Defect
+        try {
+            $wDef = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+            $pDef = [':sd' => $startDate, ':ed' => $endDate];
+            if ($selectedCustomer !== '') {
+                $wDef[] = "dds.customer = :cust";
+                $pDef[':cust'] = $selectedCustomer;
+            }
+            $wDefSql = implode(' AND ', $wDef);
+            $metricCol = ($selectedUnit === 'lot') ? "SUM(dds.lot_count)" : "SUM(dds.qty_ng)";
+            $stDefTop = $pdo->prepare("SELECT dds.defect_type_id, {$metricCol} as total_metric
+                                       FROM oqc_daily_defect_summary dds
+                                       WHERE {$wDefSql}
+                                       GROUP BY dds.defect_type_id
+                                       ORDER BY total_metric DESC
+                                       LIMIT 1");
+            $stDefTop->execute($pDef);
+            $topD = $stDefTop->fetch(PDO::FETCH_ASSOC);
+            if ($topD && !empty($topD['defect_type_id'])) {
+                $defectId = (int)$topD['defect_type_id'];
+            }
+            // Fallback to active sessions if no summary rows
+            if ($defectId <= 0) {
+                $wActD = [
+                    "s.status = 'in_progress'",
+                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                    "s.started_at >= :sd AND s.started_at < :ed_next"
+                ];
+                $pActD = [
+                    ':sd'      => $startDate . ' 00:00:00',
+                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                ];
+                if ($selectedCustomer !== '') {
+                    $wActD[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pActD[':cust'] = $selectedCustomer;
+                }
+                $wActDSql = implode(' AND ', $wActD);
+                $stActDef = $pdo->prepare("SELECT ngr.defect_type_id, SUM(ngr.qty_ng) as total_metric
+                                           FROM inspection_ng_records ngr
+                                           INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                           LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                           WHERE {$wActDSql}
+                                           GROUP BY ngr.defect_type_id
+                                           ORDER BY total_metric DESC
+                                           LIMIT 1");
+                $stActDef->execute($pActD);
+                $actD = $stActDef->fetch(PDO::FETCH_ASSOC);
+                if ($actD && !empty($actD['defect_type_id'])) {
+                    $defectId = (int)$actD['defect_type_id'];
+                }
+            }
+        } catch (Exception $e) {}
+    } elseif ($mode === 'part_overview' && $partId <= 0) {
+        // Find Top 1 Part
+        try {
+            $wPart = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+            $pPart = [':sd' => $startDate, ':ed' => $endDate];
+            if ($selectedCustomer !== '') {
+                $wPart[] = "dds.customer = :cust";
+                $pPart[':cust'] = $selectedCustomer;
+            }
+            $wPartSql = implode(' AND ', $wPart);
+            $metricCol = ($selectedUnit === 'lot') ? "SUM(dds.lot_count)" : "SUM(dds.qty_ng)";
+            $stPartTop = $pdo->prepare("SELECT dds.part_id, {$metricCol} as total_metric
+                                        FROM oqc_daily_defect_summary dds
+                                        WHERE {$wPartSql}
+                                        GROUP BY dds.part_id
+                                        ORDER BY total_metric DESC
+                                        LIMIT 1");
+            $stPartTop->execute($pPart);
+            $topP = $stPartTop->fetch(PDO::FETCH_ASSOC);
+            if ($topP && !empty($topP['part_id'])) {
+                $partId = (int)$topP['part_id'];
+            }
+            if ($partId <= 0) {
+                $wActP = [
+                    "s.status = 'in_progress'",
+                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                    "s.started_at >= :sd AND s.started_at < :ed_next"
+                ];
+                $pActP = [
+                    ':sd'      => $startDate . ' 00:00:00',
+                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                ];
+                if ($selectedCustomer !== '') {
+                    $wActP[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pActP[':cust'] = $selectedCustomer;
+                }
+                $wActPSql = implode(' AND ', $wActP);
+                $stActPart = $pdo->prepare("SELECT ngr.part_id, SUM(ngr.qty_ng) as total_metric
+                                            FROM inspection_ng_records ngr
+                                            INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                            LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                            WHERE {$wActPSql}
+                                            GROUP BY ngr.part_id
+                                            ORDER BY total_metric DESC
+                                            LIMIT 1");
+                $stActPart->execute($pActP);
+                $actP = $stActPart->fetch(PDO::FETCH_ASSOC);
+                if ($actP && !empty($actP['part_id'])) {
+                    $partId = (int)$actP['part_id'];
+                }
+            }
+        } catch (Exception $e) {}
     }
 }
 
-// Fetch Active Names for Context Header
-$defectName = 'Defect #' . $defectId;
-$modelName  = ($modelId > 0) ? ('Model #' . $modelId) : 'General Model';
-$partCode   = 'PART-' . $partId;
-$partName   = 'Part #' . $partId;
+// Fetch Identity Names
+$defectName = 'Semua Defect';
+$partCode   = 'Semua Part';
+$partName   = '-';
+$modelName  = 'Semua Model';
 
 if ($pdo) {
     if ($defectId > 0) {
         $stD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
         $stD->execute([':id' => $defectId]);
-        $defectName = $stD->fetchColumn() ?: $defectName;
-    }
-    if ($modelId > 0) {
-        $stM = $pdo->prepare("SELECT name FROM master_models WHERE id = :id");
-        $stM->execute([':id' => $modelId]);
-        $modelName = $stM->fetchColumn() ?: $modelName;
-    } elseif ($modelId === 0) {
-        $modelName = 'General / Unspecified Model';
+        $defectName = $stD->fetchColumn() ?: ('Defect #' . $defectId);
     }
     if ($partId > 0) {
-        $stP = $pdo->prepare("SELECT part_code, part_name FROM master_parts WHERE id = :id");
+        $stP = $pdo->prepare("SELECT mp.part_code, mp.part_name, COALESCE(mm.name, mp.model, 'General Model') as model_name 
+                              FROM master_parts mp 
+                              LEFT JOIN master_models mm ON mp.model_id = mm.id 
+                              WHERE mp.id = :id");
         $stP->execute([':id' => $partId]);
         $pRow = $stP->fetch(PDO::FETCH_ASSOC);
         if ($pRow) {
-            $partCode = $pRow['part_code'];
-            $partName = $pRow['part_name'];
+            $partCode  = $pRow['part_code'];
+            $partName  = $pRow['part_name'];
+            $modelName = $pRow['model_name'];
         }
     }
 }
 
-// Common WHERE base
-$whereBase = [
-    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-    "s.started_at >= :sd AND s.started_at < :ed_next"
-];
-$paramsBase = [
-    ':sd'      => $startDate . ' 00:00:00',
-    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-];
-if ($selectedCustomer !== '') {
-    $whereBase[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-    $paramsBase[':cust'] = $selectedCustomer;
+// ── 3. Timeframe Intervals Generator ─────────────────────────────────────────
+$isSingleDay = ($startDate === $endDate);
+$daysDiff = (strtotime($endDate) - strtotime($startDate)) / 86400;
+$trendMap = [];
+$intervalType = 'bulan';
+
+if ($isSingleDay) {
+    $intervalType = 'jam';
+    for ($h = 6; $h <= 22; $h++) {
+        $hKey = sprintf('%02d:00', $h);
+        $trendMap[$hKey] = ['label' => $hKey, 'pcs' => 0, 'lot' => 0];
+    }
+} elseif ($filterType === 'all_years' || ($filterType === 'custom' && $daysDiff > 730)) {
+    $intervalType = 'tahun';
+    $minY = (int)date('Y', strtotime($startDate));
+    $maxY = (int)date('Y', strtotime($endDate));
+    for ($yr = $minY; $yr <= $maxY; $yr++) {
+        $yKey = (string)$yr;
+        $trendMap[$yKey] = ['label' => $yKey, 'pcs' => 0, 'lot' => 0];
+    }
+} elseif ($daysDiff <= 90) {
+    $intervalType = 'hari';
+    $startPeriod = new DateTime($startDate);
+    $endPeriod   = new DateTime($endDate);
+    $endPeriod->modify('+1 day');
+    $interval    = new DateInterval('P1D');
+    $period      = new DatePeriod($startPeriod, $interval, $endPeriod);
+
+    foreach ($period as $dt) {
+        $dKey = $dt->format('Y-m-d');
+        $lbl  = $dt->format('d M');
+        $trendMap[$dKey] = ['label' => $lbl, 'pcs' => 0, 'lot' => 0];
+    }
+} else {
+    $intervalType = 'bulan';
+    $startPeriod = new DateTime(date('Y-m-01', strtotime($startDate)));
+    $endPeriod   = new DateTime(date('Y-m-01', strtotime($endDate)));
+    $endPeriod->modify('+1 month');
+    $interval    = DateInterval::createFromDateString('1 month');
+    $period      = new DatePeriod($startPeriod, $interval, $endPeriod);
+
+    $mNamesShort = [
+        1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+        7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+    ];
+
+    foreach ($period as $dt) {
+        $mKey = $dt->format('Y-m');
+        $lbl  = ($mNamesShort[(int)$dt->format('n')] ?? $dt->format('M')) . ' ' . $dt->format('y');
+        $trendMap[$mKey] = ['label' => $lbl, 'pcs' => 0, 'lot' => 0];
+    }
 }
 
-// ── 3. Data Extraction ──────────────────────────────────────────────────────
-$funnelDefects = [];
-$funnelModels  = [];
-$funnelParts   = [];
-$trendMap      = [];
-$auditRecords  = [];
-
-$partPcsTotal  = 0;
-$partLotsTotal = 0;
-$topLimit = is_numeric($selectedTopRank) ? (int)$selectedTopRank : 0;
+// ── 4. Query Data: Timeline, Distribution & Audit Log ────────────────────────
+$distributionList = [];
+$auditRecords     = [];
 
 if ($pdo) {
-    // ── A. Funnel Level 1: All Defects (Hybrid Summary + Active) ─────────────
-    try {
-        $wSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
-        $pSum = [':sd' => $startDate, ':ed' => $endDate];
-        if ($selectedCustomer !== '') {
-            $wSum[] = "dds.customer = :cust";
-            $pSum[':cust'] = $selectedCustomer;
-        }
-        $wSumSql = implode(' AND ', $wSum);
-
-        $sqlSum = "SELECT 
-                    dt.id,
-                    dt.name,
-                    COALESCE(SUM(dds.qty_ng), 0) AS pcs,
-                    COALESCE(SUM(dds.lot_count), 0) AS lots
-                   FROM oqc_daily_defect_summary dds
-                   INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
-                   WHERE {$wSumSql}
-                   GROUP BY dt.id, dt.name";
-        $stSum = $pdo->prepare($sqlSum);
-        $stSum->execute($pSum);
-        $rowsSum = $stSum->fetchAll(PDO::FETCH_ASSOC);
-
-        $rowsAct = [];
-        if ($endDate >= date('Y-m-d')) {
-            $pAct = [
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            $custActSql = "";
-            if ($selectedCustomer !== '') {
-                $custActSql = "AND COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pAct[':cust_act'] = $selectedCustomer;
-            }
-            $sqlAct = "SELECT 
-                        dt.id,
-                        dt.name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS pcs,
-                        COUNT(DISTINCT s.id) AS lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE s.status = 'in_progress'
-                         AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                         AND s.started_at >= :sd_act AND s.started_at < :ed_act_next
-                         {$custActSql}
-                       GROUP BY dt.id, dt.name";
-            $stAct = $pdo->prepare($sqlAct);
-            $stAct->execute($pAct);
-            $rowsAct = $stAct->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        $mergedD = [];
-        foreach ($rowsSum as $r) {
-            $id = (int)$r['id'];
-            $mergedD[$id] = [
-                'id'   => $id,
-                'name' => $r['name'],
-                'pcs'  => (int)$r['pcs'],
-                'lots' => (int)$r['lots']
-            ];
-        }
-        foreach ($rowsAct as $r) {
-            $id = (int)$r['id'];
-            if (!isset($mergedD[$id])) {
-                $mergedD[$id] = ['id' => $id, 'name' => $r['name'], 'pcs' => 0, 'lots' => 0];
-            }
-            $mergedD[$id]['pcs']  += (int)$r['pcs'];
-            $mergedD[$id]['lots'] += (int)$r['lots'];
-        }
-
-        $rawD = array_values($mergedD);
-        usort($rawD, function($a, $b) use ($selectedUnit) {
-            $vA = ($selectedUnit === 'lot') ? $a['lots'] : $a['pcs'];
-            $vB = ($selectedUnit === 'lot') ? $b['lots'] : $b['pcs'];
-            if ($vA === $vB) return $b['pcs'] <=> $a['pcs'];
-            return $vB <=> $vA;
-        });
-
-        if ($topLimit > 0 && count($rawD) > $topLimit) {
-            $funnelDefects = array_slice($rawD, 0, $topLimit);
-            $oth = array_slice($rawD, $topLimit);
-            $oPcs = array_sum(array_column($oth, 'pcs'));
-            $oLots = array_sum(array_column($oth, 'lots'));
-            $funnelDefects[] = ['id' => 0, 'name' => 'Lainnya (' . count($oth) . ' jenis)', 'pcs' => $oPcs, 'lots' => $oLots];
-        } else {
-            $funnelDefects = $rawD;
-        }
-    } catch (Exception $e) {}
-
-    // ── B. Funnel Level 2: Models for Selected Defect ───────────────────────
-    try {
-        $wSumM = [
-            "dds.summary_date >= :sd AND dds.summary_date <= :ed",
-            "dds.defect_type_id = :defId"
-        ];
-        $pSumM = [':sd' => $startDate, ':ed' => $endDate, ':defId' => $defectId];
-        if ($selectedCustomer !== '') {
-            $wSumM[] = "dds.customer = :cust";
-            $pSumM[':cust'] = $selectedCustomer;
-        }
-        $wSumMSql = implode(' AND ', $wSumM);
-
-        $sqlM = "SELECT 
-                    COALESCE(dds.model_id, 0) AS id,
-                    COALESCE(NULLIF(TRIM(mm.name), ''), 'General / Unspecified Model') AS name,
-                    COALESCE(SUM(dds.qty_ng), 0) AS pcs,
-                    COALESCE(SUM(dds.lot_count), 0) AS lots
-                 FROM oqc_daily_defect_summary dds
-                 LEFT JOIN master_models mm ON dds.model_id = mm.id
-                 WHERE {$wSumMSql}
-                 GROUP BY id, name";
-        $stM = $pdo->prepare($sqlM);
-        $stM->execute($pSumM);
-        $rowsSumM = $stM->fetchAll(PDO::FETCH_ASSOC);
-
-        $rowsActM = [];
-        if ($endDate >= date('Y-m-d')) {
-            $pActM = [
-                ':defId'       => $defectId,
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            $custActSql = "";
-            if ($selectedCustomer !== '') {
-                $custActSql = "AND COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pActM[':cust_act'] = $selectedCustomer;
-            }
-            $sqlActM = "SELECT 
-                        COALESCE(mp.model_id, 0) AS id,
-                        COALESCE(NULLIF(TRIM(mm.name), ''), NULLIF(TRIM(mp.model), ''), 'General / Unspecified Model') AS name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS pcs,
-                        COUNT(DISTINCT s.id) AS lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                       LEFT JOIN master_models mm ON mp.model_id = mm.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE s.status = 'in_progress'
-                         AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                         AND ngr.defect_type_id = :defId
-                         AND s.started_at >= :sd_act AND s.started_at < :ed_act_next
-                         {$custActSql}
-                       GROUP BY id, name";
-            $stActM = $pdo->prepare($sqlActM);
-            $stActM->execute($pActM);
-            $rowsActM = $stActM->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        $mergedM = [];
-        foreach ($rowsSumM as $r) {
-            $id = (int)$r['id'];
-            $mergedM[$id] = [
-                'id'   => $id,
-                'name' => $r['name'],
-                'pcs'  => (int)$r['pcs'],
-                'lots' => (int)$r['lots']
-            ];
-        }
-        foreach ($rowsActM as $r) {
-            $id = (int)$r['id'];
-            if (!isset($mergedM[$id])) {
-                $mergedM[$id] = ['id' => $id, 'name' => $r['name'], 'pcs' => 0, 'lots' => 0];
-            }
-            $mergedM[$id]['pcs']  += (int)$r['pcs'];
-            $mergedM[$id]['lots'] += (int)$r['lots'];
-        }
-
-        $rawM = array_values($mergedM);
-        usort($rawM, function($a, $b) use ($selectedUnit) {
-            $vA = ($selectedUnit === 'lot') ? $a['lots'] : $a['pcs'];
-            $vB = ($selectedUnit === 'lot') ? $b['lots'] : $b['pcs'];
-            if ($vA === $vB) return $b['pcs'] <=> $a['pcs'];
-            return $vB <=> $vA;
-        });
-
-        if ($topLimit > 0 && count($rawM) > $topLimit) {
-            $funnelModels = array_slice($rawM, 0, $topLimit);
-            $othM = array_slice($rawM, $topLimit);
-            $oMPcs = array_sum(array_column($othM, 'pcs'));
-            $oMLots = array_sum(array_column($othM, 'lots'));
-            $funnelModels[] = ['id' => 0, 'name' => 'Lainnya (' . count($othM) . ' model)', 'pcs' => $oMPcs, 'lots' => $oMLots];
-        } else {
-            $funnelModels = $rawM;
-        }
-    } catch (Exception $e) {}
-
-    // ── C. Funnel Level 3: Parts for Selected Defect & Model ────────────────
-    try {
-        $wSumP = [
-            "dds.summary_date >= :sd AND dds.summary_date <= :ed",
-            "dds.defect_type_id = :defId"
-        ];
-        $pSumP = [':sd' => $startDate, ':ed' => $endDate, ':defId' => $defectId];
-        if ($modelId !== null) {
-            if ($modelId > 0) {
-                $wSumP[] = "dds.model_id = :mId";
-                $pSumP[':mId'] = $modelId;
-            } else {
-                $wSumP[] = "(dds.model_id IS NULL OR dds.model_id = 0)";
-            }
-        }
-        if ($selectedCustomer !== '') {
-            $wSumP[] = "dds.customer = :cust";
-            $pSumP[':cust'] = $selectedCustomer;
-        }
-        $wSumPSql = implode(' AND ', $wSumP);
-
-        $sqlP = "SELECT 
-                    mp.id,
-                    CONCAT(mp.part_code, ' - ', mp.part_name) AS name,
-                    COALESCE(SUM(dds.qty_ng), 0) AS pcs,
-                    COALESCE(SUM(dds.lot_count), 0) AS lots
-                 FROM oqc_daily_defect_summary dds
-                 INNER JOIN master_parts mp ON dds.part_id = mp.id
-                 WHERE {$wSumPSql}
-                 GROUP BY mp.id, mp.part_code, mp.part_name";
-        $stP = $pdo->prepare($sqlP);
-        $stP->execute($pSumP);
-        $rowsSumP = $stP->fetchAll(PDO::FETCH_ASSOC);
-
-        $rowsActP = [];
-        if ($endDate >= date('Y-m-d')) {
-            $wActP = [
-                "s.status = 'in_progress'",
-                "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                "ngr.defect_type_id = :defId",
-                "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
-            ];
-            $pActP = [
-                ':defId'       => $defectId,
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            if ($modelId !== null) {
-                if ($modelId > 0) {
-                    $wActP[] = "mp.model_id = :mId";
-                    $pActP[':mId'] = $modelId;
-                } else {
-                    $wActP[] = "(mp.model_id IS NULL OR mp.model_id = 0)";
-                }
-            }
-            if ($selectedCustomer !== '') {
-                $wActP[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pActP[':cust_act'] = $selectedCustomer;
-            }
-            $wActPSql = implode(' AND ', $wActP);
-            $sqlActP = "SELECT 
-                        mp.id,
-                        CONCAT(mp.part_code, ' - ', mp.part_name) AS name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS pcs,
-                        COUNT(DISTINCT s.id) AS lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       INNER JOIN master_parts mp ON ngr.part_id = mp.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE {$wActPSql}
-                       GROUP BY mp.id, mp.part_code, mp.part_name";
-            $stActP = $pdo->prepare($sqlActP);
-            $stActP->execute($pActP);
-            $rowsActP = $stActP->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        $mergedP = [];
-        foreach ($rowsSumP as $r) {
-            $id = (int)$r['id'];
-            $mergedP[$id] = [
-                'id'   => $id,
-                'name' => $r['name'],
-                'pcs'  => (int)$r['pcs'],
-                'lots' => (int)$r['lots']
-            ];
-        }
-        foreach ($rowsActP as $r) {
-            $id = (int)$r['id'];
-            if (!isset($mergedP[$id])) {
-                $mergedP[$id] = ['id' => $id, 'name' => $r['name'], 'pcs' => 0, 'lots' => 0];
-            }
-            $mergedP[$id]['pcs']  += (int)$r['pcs'];
-            $mergedP[$id]['lots'] += (int)$r['lots'];
-        }
-
-        $rawP = array_values($mergedP);
-        usort($rawP, function($a, $b) use ($selectedUnit) {
-            $vA = ($selectedUnit === 'lot') ? $a['lots'] : $a['pcs'];
-            $vB = ($selectedUnit === 'lot') ? $b['lots'] : $b['pcs'];
-            if ($vA === $vB) return $b['pcs'] <=> $a['pcs'];
-            return $vB <=> $vA;
-        });
-
-        if ($topLimit > 0 && count($rawP) > $topLimit) {
-            $funnelParts = array_slice($rawP, 0, $topLimit);
-            $othP = array_slice($rawP, $topLimit);
-            $oPPcs = array_sum(array_column($othP, 'pcs'));
-            $oPLots = array_sum(array_column($othP, 'lots'));
-            $funnelParts[] = ['id' => 0, 'name' => 'Lainnya (' . count($othP) . ' part)', 'pcs' => $oPPcs, 'lots' => $oPLots];
-        } else {
-            $funnelParts = $rawP;
-        }
-    } catch (Exception $e) {}
-
-    // ── D. Deep-Dive Timeline Trend for Part (Hybrid) ────────────────────────
-    try {
-        $isSingleDay = ($startDate === $endDate);
-        $daysDiff = (strtotime($endDate) - strtotime($startDate)) / 86400;
-
-        if ($isSingleDay) {
-            for ($h = 6; $h <= 22; $h++) {
-                $hKey = sprintf('%02d:00', $h);
-                $trendMap[$hKey] = ['label' => $hKey, 'pcs' => 0, 'lot' => 0];
-            }
-            $wHour = [
-                "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                "ngr.defect_type_id = :defId",
-                "s.started_at >= :sd AND s.started_at < :ed_next"
-            ];
-            $pHour = [
-                ':defId'   => $defectId,
-                ':sd'      => $startDate . ' 00:00:00',
-                ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            if ($partId > 0) {
-                $wHour[] = "ngr.part_id = :pId";
-                $pHour[':pId'] = $partId;
-            } elseif ($modelId !== null && $modelId > 0) {
-                $wHour[] = "mp.model_id = :mId";
-                $pHour[':mId'] = $modelId;
-            }
-            if ($selectedCustomer !== '') {
-                $wHour[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-                $pHour[':cust'] = $selectedCustomer;
-            }
-            $wHourSql = implode(' AND ', $wHour);
-
-            $sqlT = "SELECT DATE_FORMAT(s.started_at, '%H:00') as time_key,
-                            COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                            COUNT(DISTINCT s.id) as total_lots
-                     FROM inspection_ng_records ngr
-                     INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                     LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                     LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                     WHERE {$wHourSql}
-                     GROUP BY time_key";
-            $stT = $pdo->prepare($sqlT);
-            $stT->execute($pHour);
-            foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                $tk = $r['time_key'];
-                if (isset($trendMap[$tk])) {
-                    $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
-                    $trendMap[$tk]['lot'] = (int)$r['total_lots'];
-                }
-            }
-        } else {
-            // Multi-day timeline using pre-aggregated summary table
-            $wSumT = [
-                "dds.summary_date >= :sd AND dds.summary_date <= :ed",
-                "dds.defect_type_id = :defId"
-            ];
-            $pSumT = [
-                ':sd'    => $startDate,
-                ':ed'    => $endDate,
-                ':defId' => $defectId
-            ];
-            if ($partId > 0) {
-                $wSumT[] = "dds.part_id = :pId";
-                $pSumT[':pId'] = $partId;
-            } elseif ($modelId !== null) {
-                if ($modelId > 0) {
-                    $wSumT[] = "dds.model_id = :mId";
-                    $pSumT[':mId'] = $modelId;
-                } else {
-                    $wSumT[] = "(dds.model_id IS NULL OR dds.model_id = 0)";
-                }
-            }
-            if ($selectedCustomer !== '') {
-                $wSumT[] = "dds.customer = :cust";
-                $pSumT[':cust'] = $selectedCustomer;
-            }
-            $wSumTSql = implode(' AND ', $wSumT);
-
-            if ($filterType === 'all_years' || ($filterType === 'custom' && $daysDiff > 730)) {
-                $minY = (int)date('Y', strtotime($startDate));
-                $maxY = (int)date('Y', strtotime($endDate));
-                for ($yr = $minY; $yr <= $maxY; $yr++) {
-                    $trendMap[(string)$yr] = ['label' => (string)$yr, 'pcs' => 0, 'lot' => 0];
-                }
-                $dateFormat = '%Y';
-            } elseif ($daysDiff <= 90) {
-                $sp = new DateTime($startDate);
-                $ep = new DateTime($endDate);
-                $ep->modify('+1 day');
-                foreach (new DatePeriod($sp, new DateInterval('P1D'), $ep) as $dt) {
-                    $trendMap[$dt->format('Y-m-d')] = ['label' => $dt->format('d M'), 'pcs' => 0, 'lot' => 0];
-                }
-                $dateFormat = '%Y-%m-%d';
-            } else {
-                $sp = new DateTime(date('Y-m-01', strtotime($startDate)));
-                $ep = new DateTime(date('Y-m-01', strtotime($endDate)));
-                $ep->modify('+1 month');
-                foreach (new DatePeriod($sp, DateInterval::createFromDateString('1 month'), $ep) as $dt) {
-                    $trendMap[$dt->format('Y-m')] = ['label' => $dt->format('M y'), 'pcs' => 0, 'lot' => 0];
-                }
-                $dateFormat = '%Y-%m';
-            }
-
-            $sqlSumT = "SELECT DATE_FORMAT(dds.summary_date, '{$dateFormat}') as time_key,
-                               COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
-                               COALESCE(SUM(dds.lot_count), 0) as total_lots
-                        FROM oqc_daily_defect_summary dds
-                        WHERE {$wSumTSql}
-                        GROUP BY time_key";
-            $stSumT = $pdo->prepare($sqlSumT);
-            $stSumT->execute($pSumT);
-            foreach ($stSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                $tk = $r['time_key'];
-                if (isset($trendMap[$tk])) {
-                    $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                    $trendMap[$tk]['lot'] += (int)$r['total_lots'];
-                }
-            }
-
-            // Merge active in-progress sessions if range covers today
-            if ($endDate >= date('Y-m-d')) {
-                $wActT = [
-                    "s.status = 'in_progress'",
+    if ($mode === 'overview') {
+        // ── Skenario 1: Overview Mode (Focus on Defect) ───────────────────────
+        // 1. Timeline Data for Defect
+        try {
+            if ($isSingleDay) {
+                $wHour = [
                     "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                    "ngr.defect_type_id = :defId",
-                    "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                    "s.started_at >= :sd AND s.started_at < :ed_next"
                 ];
-                $pActT = [
-                    ':defId'       => $defectId,
-                    ':sd_act'      => $startDate . ' 00:00:00',
-                    ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                $pHour = [
+                    ':sd'      => $startDate . ' 00:00:00',
+                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
                 ];
-                if ($partId > 0) {
-                    $wActT[] = "ngr.part_id = :pId";
-                    $pActT[':pId'] = $partId;
-                } elseif ($modelId !== null && $modelId > 0) {
-                    $wActT[] = "mp.model_id = :mId";
-                    $pActT[':mId'] = $modelId;
+                if ($defectId > 0) {
+                    $wHour[] = "ngr.defect_type_id = :defId";
+                    $pHour[':defId'] = $defectId;
                 }
                 if ($selectedCustomer !== '') {
-                    $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                    $pActT[':cust_act'] = $selectedCustomer;
+                    $wHour[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pHour[':cust'] = $selectedCustomer;
                 }
-                $wActTSql = implode(' AND ', $wActT);
+                $wHourSql = implode(' AND ', $wHour);
+                $stT = $pdo->prepare("SELECT DATE_FORMAT(s.started_at, '%H:00') as time_key,
+                                             COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                             COUNT(DISTINCT s.id) as total_lots
+                                      FROM inspection_ng_records ngr
+                                      INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                      LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                      WHERE {$wHourSql}
+                                      GROUP BY time_key");
+                $stT->execute($pHour);
+                foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $tk = $r['time_key'];
+                    if (isset($trendMap[$tk])) {
+                        $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
+                        $trendMap[$tk]['lot'] = (int)$r['total_lots'];
+                    }
+                }
+            } else {
+                $wSumT = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+                $pSumT = [':sd' => $startDate, ':ed' => $endDate];
+                if ($defectId > 0) {
+                    $wSumT[] = "dds.defect_type_id = :defId";
+                    $pSumT[':defId'] = $defectId;
+                }
+                if ($selectedCustomer !== '') {
+                    $wSumT[] = "dds.customer = :cust";
+                    $pSumT[':cust'] = $selectedCustomer;
+                }
+                $wSumTSql = implode(' AND ', $wSumT);
 
-                $sqlActT = "SELECT DATE_FORMAT(s.started_at, '{$dateFormat}') as time_key,
-                                   COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                                   COUNT(DISTINCT s.id) as total_lots
-                            FROM inspection_ng_records ngr
-                            INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                            LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                            LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                            WHERE {$wActTSql}
-                            GROUP BY time_key";
-                $stActT = $pdo->prepare($sqlActT);
-                $stActT->execute($pActT);
-                foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                if ($intervalType === 'tahun') {
+                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y')";
+                } elseif ($intervalType === 'hari') {
+                    $groupExpr = "dds.summary_date";
+                } else {
+                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y-%m')";
+                }
+
+                $stSumT = $pdo->prepare("SELECT {$groupExpr} as time_key,
+                                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                                COALESCE(SUM(dds.lot_count), 0) as total_lots
+                                         FROM oqc_daily_defect_summary dds
+                                         WHERE {$wSumTSql}
+                                         GROUP BY time_key");
+                $stSumT->execute($pSumT);
+                foreach ($stSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
                     $tk = $r['time_key'];
                     if (isset($trendMap[$tk])) {
                         $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
                         $trendMap[$tk]['lot'] += (int)$r['total_lots'];
                     }
                 }
-            }
-        }
-    } catch (Exception $e) {}
 
-    // ── E. Detailed Audit Trail Log for Part (Direct Indexed Join) ───────────
-    try {
-        $wAudit = [
-            "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-            "s.started_at >= :sd AND s.started_at < :ed_next"
-        ];
-        $pAudit = [
-            ':sd'      => $startDate . ' 00:00:00',
-            ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-        ];
-        if ($defectId > 0) {
-            $wAudit[] = "ngr.defect_type_id = :dId";
-            $pAudit[':dId'] = $defectId;
-        }
-        if ($partId > 0) {
-            $wAudit[] = "ngr.part_id = :pId";
-            $pAudit[':pId'] = $partId;
-        } elseif ($modelId !== null) {
-            if ($modelId > 0) {
-                $wAudit[] = "mp.model_id = :mId";
-                $pAudit[':mId'] = $modelId;
+                // In-progress active session if range covers today
+                if ($endDate >= date('Y-m-d')) {
+                    $wActT = [
+                        "s.status = 'in_progress'",
+                        "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                        "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                    ];
+                    $pActT = [
+                        ':sd_act'      => $startDate . ' 00:00:00',
+                        ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                    ];
+                    if ($defectId > 0) {
+                        $wActT[] = "ngr.defect_type_id = :defId";
+                        $pActT[':defId'] = $defectId;
+                    }
+                    if ($selectedCustomer !== '') {
+                        $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                        $pActT[':cust'] = $selectedCustomer;
+                    }
+                    $wActTSql = implode(' AND ', $wActT);
+
+                    if ($intervalType === 'tahun') {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y')";
+                    } elseif ($intervalType === 'hari') {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m-%d')";
+                    } else {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m')";
+                    }
+
+                    $stActT = $pdo->prepare("SELECT {$groupAct} as time_key,
+                                                    COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                                    COUNT(DISTINCT s.id) as total_lots
+                                             FROM inspection_ng_records ngr
+                                             INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                             LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                             WHERE {$wActTSql}
+                                             GROUP BY time_key");
+                    $stActT->execute($pActT);
+                    foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $tk = $r['time_key'];
+                        if (isset($trendMap[$tk])) {
+                            $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
+                            $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                        }
+                    }
+                }
+            }
+        } catch (Exception $e) {}
+
+        // 2. Distribution Data: Top Parts for this Defect
+        try {
+            $wPartSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+            $pPartSum = [':sd' => $startDate, ':ed' => $endDate];
+            if ($defectId > 0) {
+                $wPartSum[] = "dds.defect_type_id = :defId";
+                $pPartSum[':defId'] = $defectId;
+            }
+            if ($selectedCustomer !== '') {
+                $wPartSum[] = "dds.customer = :cust";
+                $pPartSum[':cust'] = $selectedCustomer;
+            }
+            $wPartSumSql = implode(' AND ', $wPartSum);
+            $stPSum = $pdo->prepare("SELECT mp.id, mp.part_code, mp.part_name,
+                                            COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) as total_lots
+                                     FROM oqc_daily_defect_summary dds
+                                     INNER JOIN master_parts mp ON dds.part_id = mp.id
+                                     WHERE {$wPartSumSql}
+                                     GROUP BY mp.id, mp.part_code, mp.part_name");
+            $stPSum->execute($pPartSum);
+            $rowsPSum = $stPSum->fetchAll(PDO::FETCH_ASSOC);
+
+            $rowsPAct = [];
+            if ($endDate >= date('Y-m-d')) {
+                $wPAct = [
+                    "s.status = 'in_progress'",
+                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                    "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                ];
+                $pPAct = [
+                    ':sd_act'      => $startDate . ' 00:00:00',
+                    ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                ];
+                if ($defectId > 0) {
+                    $wPAct[] = "ngr.defect_type_id = :defId";
+                    $pPAct[':defId'] = $defectId;
+                }
+                if ($selectedCustomer !== '') {
+                    $wPAct[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pPAct[':cust'] = $selectedCustomer;
+                }
+                $wPActSql = implode(' AND ', $wPAct);
+                $stPAct = $pdo->prepare("SELECT mp.id, mp.part_code, mp.part_name,
+                                                COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                                COUNT(DISTINCT s.id) as total_lots
+                                         FROM inspection_ng_records ngr
+                                         INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                         INNER JOIN master_parts mp ON ngr.part_id = mp.id
+                                         LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                         WHERE {$wPActSql}
+                                         GROUP BY mp.id, mp.part_code, mp.part_name");
+                $stPAct->execute($pPAct);
+                $rowsPAct = $stPAct->fetchAll(PDO::FETCH_ASSOC);
+            }
+
+            $mergedParts = [];
+            foreach ($rowsPSum as $r) {
+                $id = (int)$r['id'];
+                $mergedParts[$id] = [
+                    'item_id'    => $id,
+                    'item_code'  => $r['part_code'],
+                    'item_name'  => $r['part_name'],
+                    'full_label' => $r['part_code'] . ' - ' . $r['part_name'],
+                    'total_pcs'  => (int)$r['total_pcs'],
+                    'total_lots' => (int)$r['total_lots']
+                ];
+            }
+            foreach ($rowsPAct as $r) {
+                $id = (int)$r['id'];
+                if (!isset($mergedParts[$id])) {
+                    $mergedParts[$id] = [
+                        'item_id'    => $id,
+                        'item_code'  => $r['part_code'],
+                        'item_name'  => $r['part_name'],
+                        'full_label' => $r['part_code'] . ' - ' . $r['part_name'],
+                        'total_pcs'  => 0,
+                        'total_lots' => 0
+                    ];
+                }
+                $mergedParts[$id]['total_pcs']  += (int)$r['total_pcs'];
+                $mergedParts[$id]['total_lots'] += (int)$r['total_lots'];
+            }
+
+            $rawDist = array_values($mergedParts);
+            usort($rawDist, function($a, $b) use ($selectedUnit) {
+                $vA = ($selectedUnit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
+                $vB = ($selectedUnit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
+                if ($vA === $vB) return $b['total_pcs'] <=> $a['total_pcs'];
+                return $vB <=> $vA;
+            });
+
+            $topLimit = is_numeric($selectedTopRank) ? (int)$selectedTopRank : 0;
+            if ($topLimit > 0 && count($rawDist) > $topLimit) {
+                $distributionList = array_slice($rawDist, 0, $topLimit);
+                $otherRows = array_slice($rawDist, $topLimit);
+                $oPcs  = array_sum(array_column($otherRows, 'total_pcs'));
+                $oLots = array_sum(array_column($otherRows, 'total_lots'));
+                $distributionList[] = [
+                    'item_id'    => null,
+                    'item_code'  => 'LAINNYA',
+                    'item_name'  => 'Part Lainnya (' . count($otherRows) . ' part)',
+                    'full_label' => 'Part Lainnya (' . count($otherRows) . ' part)',
+                    'total_pcs'  => $oPcs,
+                    'total_lots' => $oLots,
+                    'is_other'   => true
+                ];
             } else {
-                $wAudit[] = "(mp.model_id IS NULL OR mp.model_id = 0)";
+                $distributionList = $rawDist;
             }
-        }
-        if ($selectedCustomer !== '') {
-            $wAudit[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-            $pAudit[':cust'] = $selectedCustomer;
-        }
-        $wAuditSql = implode(' AND ', $wAudit);
+        } catch (Exception $e) {}
 
-        $sqlAudit = "SELECT 
-                        ngr.id AS ng_id,
-                        s.started_at,
-                        s.inspection_type,
-                        s.status AS session_status,
-                        COALESCE(u.name, 'System') AS inspector_name,
-                        COALESCE(ki.kanban_no, '-') AS kanban_no,
-                        COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name,
-                        COALESCE(mp.part_code, '-') AS part_code,
-                        COALESCE(mp.part_name, 'Unknown Part') AS part_name,
-                        COALESCE(NULLIF(TRIM(mm.name), ''), NULLIF(TRIM(mp.model), ''), 'General Model') AS model_name,
-                        dt.name AS defect_name,
-                        COALESCE(ngr.qty_ng, 1) AS qty_ng,
-                        COALESCE(NULLIF(ngr.lot_number, ''), NULLIF(isl.lot_number, ''), '-') AS lot_number,
-                        COALESCE(NULLIF(ngr.ref_number, ''), NULLIF(isl.ref_number, ''), '-') AS ref_number
-                     FROM inspection_ng_records ngr
-                     INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                     INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
-                     LEFT JOIN inspection_session_lots isl ON ngr.session_lot_id = isl.id
-                     LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                     LEFT JOIN master_models mm ON mp.model_id = mm.id
-                     LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                     LEFT JOIN users u ON s.inspector_id = u.id
-                     WHERE {$wAuditSql}
-                     ORDER BY s.started_at DESC, ngr.id DESC
-                     LIMIT 3000";
-        $stA = $pdo->prepare($sqlAudit);
-        $stA->execute($pAudit);
-        $auditRecords = $stA->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Exception $e) {}
+        // 3. Audit Trail Records for Defect
+        try {
+            $wAud = [
+                "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                "s.started_at >= :sd AND s.started_at < :ed_next"
+            ];
+            $pAud = [
+                ':sd'      => $startDate . ' 00:00:00',
+                ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+            ];
+            if ($defectId > 0) {
+                $wAud[] = "ngr.defect_type_id = :defId";
+                $pAud[':defId'] = $defectId;
+            }
+            if ($selectedCustomer !== '') {
+                $wAud[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                $pAud[':cust'] = $selectedCustomer;
+            }
+            $wAudSql = implode(' AND ', $wAud);
+
+            $stAud = $pdo->prepare("SELECT 
+                                        ngr.id AS ng_id,
+                                        s.started_at,
+                                        s.inspection_type,
+                                        u.name AS inspector_name,
+                                        COALESCE(ki.kanban_no, '-') AS kanban_no,
+                                        COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name,
+                                        COALESCE(mp.part_code, '-') AS part_code,
+                                        COALESCE(mp.part_name, 'Unknown Part') AS part_name,
+                                        COALESCE(NULLIF(TRIM(mm.name), ''), NULLIF(TRIM(mp.model), ''), 'General Model') AS model_name,
+                                        dt.name AS defect_name,
+                                        COALESCE(ngr.qty_ng, 1) AS qty_ng,
+                                        COALESCE(NULLIF(ngr.lot_number, ''), NULLIF(isl.lot_number, ''), '-') AS lot_number,
+                                        COALESCE(NULLIF(ngr.ref_number, ''), NULLIF(isl.ref_number, ''), '-') AS ref_number
+                                    FROM inspection_ng_records ngr
+                                    INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                    INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                                    LEFT JOIN inspection_session_lots isl ON ngr.session_lot_id = isl.id
+                                    LEFT JOIN master_parts mp ON ngr.part_id = mp.id
+                                    LEFT JOIN master_models mm ON mp.model_id = mm.id
+                                    LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                    LEFT JOIN users u ON s.inspector_id = u.id
+                                    WHERE {$wAudSql}
+                                    ORDER BY s.started_at DESC, ngr.id DESC
+                                    LIMIT 3000");
+            $stAud->execute($pAud);
+            $auditRecords = $stAud->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {}
+
+    } else {
+        // ── Skenario 2: Part Overview Mode (Focus on Part) ───────────────────
+        // 1. Timeline Data for Part
+        try {
+            if ($isSingleDay) {
+                $wHour = [
+                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                    "s.started_at >= :sd AND s.started_at < :ed_next"
+                ];
+                $pHour = [
+                    ':sd'      => $startDate . ' 00:00:00',
+                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                ];
+                if ($partId > 0) {
+                    $wHour[] = "ngr.part_id = :pId";
+                    $pHour[':pId'] = $partId;
+                }
+                if ($selectedCustomer !== '') {
+                    $wHour[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pHour[':cust'] = $selectedCustomer;
+                }
+                $wHourSql = implode(' AND ', $wHour);
+                $stT = $pdo->prepare("SELECT DATE_FORMAT(s.started_at, '%H:00') as time_key,
+                                             COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                             COUNT(DISTINCT s.id) as total_lots
+                                      FROM inspection_ng_records ngr
+                                      INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                      LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                      WHERE {$wHourSql}
+                                      GROUP BY time_key");
+                $stT->execute($pHour);
+                foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $tk = $r['time_key'];
+                    if (isset($trendMap[$tk])) {
+                        $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
+                        $trendMap[$tk]['lot'] = (int)$r['total_lots'];
+                    }
+                }
+            } else {
+                $wSumT = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+                $pSumT = [':sd' => $startDate, ':ed' => $endDate];
+                if ($partId > 0) {
+                    $wSumT[] = "dds.part_id = :pId";
+                    $pSumT[':pId'] = $partId;
+                }
+                if ($selectedCustomer !== '') {
+                    $wSumT[] = "dds.customer = :cust";
+                    $pSumT[':cust'] = $selectedCustomer;
+                }
+                $wSumTSql = implode(' AND ', $wSumT);
+
+                if ($intervalType === 'tahun') {
+                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y')";
+                } elseif ($intervalType === 'hari') {
+                    $groupExpr = "dds.summary_date";
+                } else {
+                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y-%m')";
+                }
+
+                $stSumT = $pdo->prepare("SELECT {$groupExpr} as time_key,
+                                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                                COALESCE(SUM(dds.lot_count), 0) as total_lots
+                                         FROM oqc_daily_defect_summary dds
+                                         WHERE {$wSumTSql}
+                                         GROUP BY time_key");
+                $stSumT->execute($pSumT);
+                foreach ($stSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $tk = $r['time_key'];
+                    if (isset($trendMap[$tk])) {
+                        $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
+                        $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                    }
+                }
+
+                if ($endDate >= date('Y-m-d')) {
+                    $wActT = [
+                        "s.status = 'in_progress'",
+                        "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                        "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                    ];
+                    $pActT = [
+                        ':sd_act'      => $startDate . ' 00:00:00',
+                        ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                    ];
+                    if ($partId > 0) {
+                        $wActT[] = "ngr.part_id = :pId";
+                        $pActT[':pId'] = $partId;
+                    }
+                    if ($selectedCustomer !== '') {
+                        $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                        $pActT[':cust'] = $selectedCustomer;
+                    }
+                    $wActTSql = implode(' AND ', $wActT);
+
+                    if ($intervalType === 'tahun') {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y')";
+                    } elseif ($intervalType === 'hari') {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m-%d')";
+                    } else {
+                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m')";
+                    }
+
+                    $stActT = $pdo->prepare("SELECT {$groupAct} as time_key,
+                                                    COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                                    COUNT(DISTINCT s.id) as total_lots
+                                             FROM inspection_ng_records ngr
+                                             INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                             LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                             WHERE {$wActTSql}
+                                             GROUP BY time_key");
+                    $stActT->execute($pActT);
+                    foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $tk = $r['time_key'];
+                        if (isset($trendMap[$tk])) {
+                            $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
+                            $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                        }
+                    }
+                }
+            }
+        } catch (Exception $e) {}
+
+        // 2. Distribution Data: Top Defects for this Part
+        try {
+            $wDefSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
+            $pDefSum = [':sd' => $startDate, ':ed' => $endDate];
+            if ($partId > 0) {
+                $wDefSum[] = "dds.part_id = :pId";
+                $pDefSum[':pId'] = $partId;
+            }
+            if ($selectedCustomer !== '') {
+                $wDefSum[] = "dds.customer = :cust";
+                $pDefSum[':cust'] = $selectedCustomer;
+            }
+            $wDefSumSql = implode(' AND ', $wDefSum);
+            $stDSum = $pdo->prepare("SELECT dt.id, dt.name,
+                                            COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) as total_lots
+                                     FROM oqc_daily_defect_summary dds
+                                     INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
+                                     WHERE {$wDefSumSql}
+                                     GROUP BY dt.id, dt.name");
+            $stDSum->execute($pDefSum);
+            $rowsDSum = $stDSum->fetchAll(PDO::FETCH_ASSOC);
+
+            $rowsDAct = [];
+            if ($endDate >= date('Y-m-d')) {
+                $wDAct = [
+                    "s.status = 'in_progress'",
+                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                    "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                ];
+                $pDAct = [
+                    ':sd_act'      => $startDate . ' 00:00:00',
+                    ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                ];
+                if ($partId > 0) {
+                    $wDAct[] = "ngr.part_id = :pId";
+                    $pDAct[':pId'] = $partId;
+                }
+                if ($selectedCustomer !== '') {
+                    $wDAct[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                    $pDAct[':cust'] = $selectedCustomer;
+                }
+                $wDActSql = implode(' AND ', $wDAct);
+                $stDAct = $pdo->prepare("SELECT dt.id, dt.name,
+                                                COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
+                                                COUNT(DISTINCT s.id) as total_lots
+                                         FROM inspection_ng_records ngr
+                                         INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                         INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                                         LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                         WHERE {$wDActSql}
+                                         GROUP BY dt.id, dt.name");
+                $stDAct->execute($pDAct);
+                $rowsDAct = $stDAct->fetchAll(PDO::FETCH_ASSOC);
+            }
+
+            $mergedDefects = [];
+            foreach ($rowsDSum as $r) {
+                $id = (int)$r['id'];
+                $mergedDefects[$id] = [
+                    'item_id'    => $id,
+                    'item_code'  => $r['name'],
+                    'item_name'  => $r['name'],
+                    'full_label' => $r['name'],
+                    'total_pcs'  => (int)$r['total_pcs'],
+                    'total_lots' => (int)$r['total_lots']
+                ];
+            }
+            foreach ($rowsDAct as $r) {
+                $id = (int)$r['id'];
+                if (!isset($mergedDefects[$id])) {
+                    $mergedDefects[$id] = [
+                        'item_id'    => $id,
+                        'item_code'  => $r['name'],
+                        'item_name'  => $r['name'],
+                        'full_label' => $r['name'],
+                        'total_pcs'  => 0,
+                        'total_lots' => 0
+                    ];
+                }
+                $mergedDefects[$id]['total_pcs']  += (int)$r['total_pcs'];
+                $mergedDefects[$id]['total_lots'] += (int)$r['total_lots'];
+            }
+
+            $rawDist = array_values($mergedDefects);
+            usort($rawDist, function($a, $b) use ($selectedUnit) {
+                $vA = ($selectedUnit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
+                $vB = ($selectedUnit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
+                if ($vA === $vB) return $b['total_pcs'] <=> $a['total_pcs'];
+                return $vB <=> $vA;
+            });
+
+            $topLimit = is_numeric($selectedTopRank) ? (int)$selectedTopRank : 0;
+            if ($topLimit > 0 && count($rawDist) > $topLimit) {
+                $distributionList = array_slice($rawDist, 0, $topLimit);
+                $otherRows = array_slice($rawDist, $topLimit);
+                $oPcs  = array_sum(array_column($otherRows, 'total_pcs'));
+                $oLots = array_sum(array_column($otherRows, 'total_lots'));
+                $distributionList[] = [
+                    'item_id'    => null,
+                    'item_code'  => 'LAINNYA',
+                    'item_name'  => 'Defect Lainnya (' . count($otherRows) . ' jenis)',
+                    'full_label' => 'Defect Lainnya (' . count($otherRows) . ' jenis)',
+                    'total_pcs'  => $oPcs,
+                    'total_lots' => $oLots,
+                    'is_other'   => true
+                ];
+            } else {
+                $distributionList = $rawDist;
+            }
+        } catch (Exception $e) {}
+
+        // 3. Audit Trail Records for Part
+        try {
+            $wAud = [
+                "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
+                "s.started_at >= :sd AND s.started_at < :ed_next"
+            ];
+            $pAud = [
+                ':sd'      => $startDate . ' 00:00:00',
+                ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+            ];
+            if ($partId > 0) {
+                $wAud[] = "ngr.part_id = :pId";
+                $pAud[':pId'] = $partId;
+            }
+            if ($selectedCustomer !== '') {
+                $wAud[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                $pAud[':cust'] = $selectedCustomer;
+            }
+            $wAudSql = implode(' AND ', $wAud);
+
+            $stAud = $pdo->prepare("SELECT 
+                                        ngr.id AS ng_id,
+                                        s.started_at,
+                                        s.inspection_type,
+                                        u.name AS inspector_name,
+                                        COALESCE(ki.kanban_no, '-') AS kanban_no,
+                                        COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name,
+                                        COALESCE(mp.part_code, '-') AS part_code,
+                                        COALESCE(mp.part_name, 'Unknown Part') AS part_name,
+                                        COALESCE(NULLIF(TRIM(mm.name), ''), NULLIF(TRIM(mp.model), ''), 'General Model') AS model_name,
+                                        dt.name AS defect_name,
+                                        COALESCE(ngr.qty_ng, 1) AS qty_ng,
+                                        COALESCE(NULLIF(ngr.lot_number, ''), NULLIF(isl.lot_number, ''), '-') AS lot_number,
+                                        COALESCE(NULLIF(ngr.ref_number, ''), NULLIF(isl.ref_number, ''), '-') AS ref_number
+                                    FROM inspection_ng_records ngr
+                                    INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                                    INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                                    LEFT JOIN inspection_session_lots isl ON ngr.session_lot_id = isl.id
+                                    LEFT JOIN master_parts mp ON ngr.part_id = mp.id
+                                    LEFT JOIN master_models mm ON mp.model_id = mm.id
+                                    LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                                    LEFT JOIN users u ON s.inspector_id = u.id
+                                    WHERE {$wAudSql}
+                                    ORDER BY s.started_at DESC, ngr.id DESC
+                                    LIMIT 3000");
+            $stAud->execute($pAud);
+            $auditRecords = $stAud->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {}
+    }
 }
 
-// Compute Deep-Dive Part KPIs
-$peakVal   = 0;
-$peakLabel = 'Nihil / 0 Cacat';
+// ── 5. Compute Executive KPIs (Matching Web Cards) ───────────────────────────
+$totalPcsAcc  = 0;
+$totalLotsAcc = 0;
+$peakVal      = 0;
+$peakLabel    = 'Nihil / 0 Cacat';
 $activeIntervalCount = count($trendMap);
 
 foreach ($trendMap as $t) {
-    $partPcsTotal  += $t['pcs'];
-    $partLotsTotal += $t['lot'];
+    $totalPcsAcc  += $t['pcs'];
+    $totalLotsAcc += $t['lot'];
     $val = ($selectedUnit === 'lot') ? $t['lot'] : $t['pcs'];
     if ($val > $peakVal) {
-        $peakVal = $val;
+        $peakVal   = $val;
         $peakLabel = $t['label'] . ' (' . number_format($val) . ' ' . strtoupper($selectedUnit) . ')';
     }
 }
-$partMetricActive = ($selectedUnit === 'lot') ? $partLotsTotal : $partPcsTotal;
-$partAvgPerInterval = ($activeIntervalCount > 0 && $partMetricActive > 0) ? round($partMetricActive / $activeIntervalCount, 1) : 0;
+$metricAcc = ($selectedUnit === 'lot') ? $totalLotsAcc : $totalPcsAcc;
+$avgPerInterval = ($activeIntervalCount > 0 && $metricAcc > 0) ? round($metricAcc / $activeIntervalCount, 1) : 0;
 
-// ── 4. Spreadsheet Styling Helpers ──────────────────────────────────────────
+// Grand Metric for Distribution Percentages
+$grandDistMetric = 0;
+foreach ($distributionList as $di) {
+    $grandDistMetric += ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
+}
+
+// ── 6. Setup Spreadsheet & Formatting Functions ──────────────────────────────
 $spreadsheet = new Spreadsheet();
 $spreadsheet->getProperties()
     ->setCreator("OQC Quality Control System")
-    ->setTitle("Laporan Analisis Mendalam Defect & Part OQC")
-    ->setSubject("Analisis Cacat Mutu - PT. Surya Technology Industri")
+    ->setTitle($mode === 'overview' ? "Laporan Analisis & Tren Defect" : "Laporan Analisis & Tren Part")
+    ->setSubject("OQC Defect Analysis Report")
     ->setCompany("PT. Surya Technology Industri");
 
 function applyStyle($ws, $range, array $s) {
@@ -797,101 +972,105 @@ function dataStyle($bg = 'FFFFFF', $fg = '1E293B', $bold = false, $align = Align
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHEET 1: 🎯 ANALISIS PART & TREN (Mencerminkan Deep-Dive Panel di Web)
+// SHEET 1: 🎯 DASBOR VISUAL EKSEKUTIF (1:1 Web Overview)
 // ═══════════════════════════════════════════════════════════════════════════
 $ws1 = $spreadsheet->getActiveSheet();
-$ws1->setTitle("🎯 Analisis Part & Tren");
+$sheet1Title = ($mode === 'overview') ? "🎯 Analisis & Tren Defect" : "🎯 Analisis & Tren Part";
+$ws1->setTitle($sheet1Title);
 
+// Column Widths
 $ws1->getColumnDimension('A')->setWidth(6);
 $ws1->getColumnDimension('B')->setWidth(20);
-$ws1->getColumnDimension('C')->setWidth(18);
-$ws1->getColumnDimension('D')->setWidth(16);
-$ws1->getColumnDimension('E')->setWidth(18);
+$ws1->getColumnDimension('C')->setWidth(15);
+$ws1->getColumnDimension('D')->setWidth(15);
+$ws1->getColumnDimension('E')->setWidth(17);
+$ws1->getColumnDimension('F')->setWidth(4);  // Divider gap
+
+$ws1->getColumnDimension('G')->setWidth(6);
+$ws1->getColumnDimension('H')->setWidth(22);
+$ws1->getColumnDimension('I')->setWidth(24);
+$ws1->getColumnDimension('J')->setWidth(15);
+$ws1->getColumnDimension('K')->setWidth(15);
+$ws1->getColumnDimension('L')->setWidth(15);
+$ws1->getColumnDimension('M')->setWidth(15);
 
 // Header Banner
-$ws1->getRowDimension(1)->setRowHeight(38);
+$ws1->getRowDimension(1)->setRowHeight(36);
 $ws1->getRowDimension(2)->setRowHeight(24);
-$ws1->mergeCells('A1:P1');
-$ws1->setCellValue('A1', 'PT. SURYA TECHNOLOGY INDUSTRI — QUALITY CONTROL DIVISION');
+$ws1->mergeCells('A1:M1');
+$ws1->setCellValue('A1', 'PT. SURYA TECHNOLOGY INDUSTRI — OUTGOING QUALITY CONTROL DIVISION');
 applyStyle($ws1, 'A1', [
-    'font'      => ['bold' => true, 'size' => 15, 'color' => ['argb' => 'FF0F172A']],
+    'font'      => ['bold' => true, 'size' => 14, 'color' => ['argb' => 'FF0F172A']],
     'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFDBEAFE']],
     'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
     'borders'   => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => 'FF93C5FD']]]
 ]);
 
-$ws1->mergeCells('A2:P2');
-$ws1->setCellValue('A2', 'LAPORAN ANALISIS MENDALAM DEFECT & PART  |  PART: ' . strtoupper($partCode . ' - ' . $partName) . '  |  DEFECT: ' . strtoupper($defectName) . '  |  MODEL: ' . strtoupper($modelName) . '  |  BASIS: ' . strtoupper($selectedSampleBasis === 'session' ? 'PER SESI' : 'PER LOT'));
+$ws1->mergeCells('A2:M2');
+if ($mode === 'overview') {
+    $subHeader = "LAPORAN ANALISIS & TREN DEFECT  |  DEFECT: " . strtoupper($defectName) . "  |  PERIODE: " . strtoupper($filterTitleDesc) . "  |  CUSTOMER: " . strtoupper($selectedCustomer ?: 'SEMUA') . "  |  SATUAN: " . strtoupper($selectedUnit);
+} else {
+    $subHeader = "LAPORAN ANALISIS & TREN PART  |  PART: " . strtoupper($partCode . ' - ' . $partName) . "  |  MODEL: " . strtoupper($modelName) . "  |  PERIODE: " . strtoupper($filterTitleDesc) . "  |  CUSTOMER: " . strtoupper($selectedCustomer ?: 'SEMUA') . "  |  SATUAN: " . strtoupper($selectedUnit);
+}
+$ws1->setCellValue('A2', $subHeader);
 applyStyle($ws1, 'A2', [
     'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF1E40AF']],
     'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEFF6FF']],
     'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]
 ]);
 
-// ── 4 Executive KPI Cards (Rows 4 to 6) ─────────────────────────────────────
+// ── 3 Executive KPI Cards (Rows 4 to 6) ──────────────────────────────────────
 $ws1->getRowDimension(4)->setRowHeight(18);
 $ws1->getRowDimension(5)->setRowHeight(32);
 $ws1->getRowDimension(6)->setRowHeight(18);
 
-// KPI Card 1: Total Cacat Part
-$ws1->mergeCells('A4:C4');
-$ws1->setCellValue('A4', 'TOTAL CACAT PART');
+// KPI Card 1: Total Temuan Defect / Total Cacat Part
+$kpi1Title = ($mode === 'overview') ? 'TOTAL TEMUAN DEFECT' : 'TOTAL CACAT PART';
+$ws1->mergeCells('A4:D4');
+$ws1->setCellValue('A4', $kpi1Title);
 applyStyle($ws1, 'A4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FFBE123C']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFF1F2']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 
-$ws1->mergeCells('A5:C5');
-$ws1->setCellValue('A5', number_format($partMetricActive));
+$ws1->mergeCells('A5:D5');
+$ws1->setCellValue('A5', number_format($metricAcc));
 applyStyle($ws1, 'A5', ['font' => ['bold' => true, 'size' => 20, 'color' => ['argb' => 'FFBE123C']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFF1F2']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
 
-$ws1->mergeCells('A6:C6');
-$ws1->setCellValue('A6', strtoupper($selectedUnit) . ' total akumulasi');
+$ws1->mergeCells('A6:D6');
+$ws1->setCellValue('A6', strtoupper($selectedUnit) . ' akumulasi (' . number_format($totalLotsAcc) . ' insiden lot)');
 applyStyle($ws1, 'A6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF9F1239']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFF1F2']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'A4:C6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFECDD3']]]]);
+applyStyle($ws1, 'A4:D6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFECDD3']]]]);
 
-// KPI Card 2: Puncak Lonjakan Cacat
-$ws1->mergeCells('E4:G4');
-$ws1->setCellValue('E4', 'PUNCAK LONJAKAN CACAT');
+// KPI Card 2: Puncak Kasus (Peak)
+$ws1->mergeCells('E4:H4');
+$ws1->setCellValue('E4', 'PUNCAK KASUS (PEAK PERIOD)');
 applyStyle($ws1, 'E4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FFB45309']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 
-$ws1->mergeCells('E5:G5');
+$ws1->mergeCells('E5:H5');
 $ws1->setCellValue('E5', $peakLabel);
-applyStyle($ws1, 'E5', ['font' => ['bold' => true, 'size' => 13, 'color' => ['argb' => 'FFB45309']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
+applyStyle($ws1, 'E5', ['font' => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FFB45309']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
 
-$ws1->mergeCells('E6:G6');
-$ws1->setCellValue('E6', 'Frekuensi insiden tertinggi');
+$ws1->mergeCells('E6:H6');
+$ws1->setCellValue('E6', 'Periode dengan intensitas kasus tertinggi');
 applyStyle($ws1, 'E6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF92400E']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'E4:G6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFEF3C7']]]]);
+applyStyle($ws1, 'E4:H6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFEF3C7']]]]);
 
-// KPI Card 3: Rata-rata per Interval
-$ws1->mergeCells('I4:K4');
-$ws1->setCellValue('I4', 'RATA-RATA PER INTERVAL');
+// KPI Card 3: Rata-Rata per Periode
+$ws1->mergeCells('I4:M4');
+$ws1->setCellValue('I4', 'RATA-RATA TEMUAN PER INTERVAL');
 applyStyle($ws1, 'I4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 
-$ws1->mergeCells('I5:K5');
-$ws1->setCellValue('I5', number_format($partAvgPerInterval, 1) . ' ' . strtoupper($selectedUnit));
+$ws1->mergeCells('I5:M5');
+$ws1->setCellValue('I5', number_format($avgPerInterval, 1) . ' ' . strtoupper($selectedUnit));
 applyStyle($ws1, 'I5', ['font' => ['bold' => true, 'size' => 18, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
 
-$ws1->mergeCells('I6:K6');
-$ws1->setCellValue('I6', 'Dari ' . $activeIntervalCount . ' interval pengamatan');
+$ws1->mergeCells('I6:M6');
+$ws1->setCellValue('I6', 'Rata-rata dari ' . $activeIntervalCount . ' interval pemantauan');
 applyStyle($ws1, 'I6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF3730A3']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'I4:K6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFE0E7FF']]]]);
+applyStyle($ws1, 'I4:M6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFE0E7FF']]]]);
 
-// KPI Card 4: Kasus Lot Terdampak
-$ws1->mergeCells('M4:O4');
-$ws1->setCellValue('M4', 'KASUS LOT TERDAMPAK');
-applyStyle($ws1, 'M4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF6B21A8']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFAF5FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-
-$ws1->mergeCells('M5:O5');
-$ws1->setCellValue('M5', number_format($partLotsTotal) . ' Lot');
-applyStyle($ws1, 'M5', ['font' => ['bold' => true, 'size' => 18, 'color' => ['argb' => 'FF6B21A8']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFAF5FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
-
-$ws1->mergeCells('M6:O6');
-$ws1->setCellValue('M6', 'Total insiden di line OQC');
-applyStyle($ws1, 'M6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF581C87']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFAF5FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'M4:O6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFF3E8FF']]]]);
-
-// ── Timeline Data Table & Chart (Row 8+) ────────────────────────────────────
+// ── Left Side Panel: Timeline Data Table (Columns A to E, Rows 8+) ───────────
+$leftSectionTitle = ($mode === 'overview') ? 'TREN KEJADIAN DEFECT' : 'TREN KEJADIAN PART';
 $ws1->mergeCells('A8:E8');
-$ws1->setCellValue('A8', 'DATA TREN KEJADIAN CACAT SEPANJANG WAKTU');
+$ws1->setCellValue('A8', $leftSectionTitle . ' SEPANJANG WAKTU');
 applyStyle($ws1, 'A8', [
     'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => 'FFFFFFFF']],
     'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF2563EB']],
@@ -899,10 +1078,10 @@ applyStyle($ws1, 'A8', [
 ]);
 
 $ws1->setCellValue('A9', 'NO');
-$ws1->setCellValue('B9', 'INTERVAL / TANGGAL');
-$ws1->setCellValue('C9', 'CACAT (PCS)');
+$ws1->setCellValue('B9', 'INTERVAL / WAKTU');
+$ws1->setCellValue('C9', 'TEMUAN (PCS)');
 $ws1->setCellValue('D9', 'KASUS (LOT)');
-$ws1->setCellValue('E9', 'METRIK (' . strtoupper($selectedUnit) . ')');
+$ws1->setCellValue('E9', 'AKTIF (' . strtoupper($selectedUnit) . ')');
 applyStyle($ws1, 'A9:E9', hdrStyle('0F172A'));
 
 $trRow = 10;
@@ -911,7 +1090,7 @@ $tIndex = 1;
 
 if (empty($trendMap)) {
     $ws1->mergeCells('A10:E10');
-    $ws1->setCellValue('A10', 'Tidak ada riwayat fluktuasi waktu pada filter ini.');
+    $ws1->setCellValue('A10', 'Tidak ada data fluktuasi waktu pada filter ini.');
     applyStyle($ws1, 'A10:E10', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
     $trRow++;
 } else {
@@ -939,24 +1118,89 @@ if (empty($trendMap)) {
 $trendEndRow = $trRow - 1;
 $trendDataCount = count($trendMap);
 
-// Native Excel Line/Column Chart for Timeline Trend
+// ── Right Side Panel: Distribution Data Table (Columns G to M, Rows 8+) ──────
+$rightSectionTitle = ($mode === 'overview') ? 'SEBARAN PART TERDAMPAK' : 'SEBARAN JENIS DEFECT';
+$ws1->mergeCells('G8:M8');
+$ws1->setCellValue('G8', $rightSectionTitle . ' (TOP RANK & KONTRIBUSI)');
+applyStyle($ws1, 'G8', [
+    'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => 'FFFFFFFF']],
+    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF059669']],
+    'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
+]);
+
+$ws1->setCellValue('G9', 'NO');
+$ws1->setCellValue('H9', ($mode === 'overview') ? 'PART CODE' : 'KODE DEFECT');
+$ws1->setCellValue('I9', ($mode === 'overview') ? 'PART NAME' : 'NAMA DEFECT');
+$ws1->setCellValue('J9', 'LABEL LENGKAP');
+$ws1->setCellValue('K9', 'TEMUAN (PCS)');
+$ws1->setCellValue('L9', 'KASUS (LOT)');
+$ws1->setCellValue('M9', '% KONTRIBUSI');
+applyStyle($ws1, 'G9:M9', hdrStyle('064E3B'));
+
+$distRow = 10;
+$distStartRow = $distRow;
+$dIndex = 1;
+
+if (empty($distributionList)) {
+    $ws1->mergeCells('G10:M10');
+    $ws1->setCellValue('G10', 'Tidak ada data sebaran pada filter ini.');
+    applyStyle($ws1, 'G10:M10', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
+    $distRow++;
+} else {
+    foreach ($distributionList as $di) {
+        $valAct = ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
+        $share = ($grandDistMetric > 0 && $valAct > 0) ? round(($valAct / $grandDistMetric) * 100, 1) : 0;
+
+        $ws1->setCellValue("G{$distRow}", $dIndex++);
+        $ws1->setCellValue("H{$distRow}", $di['item_code']);
+        $ws1->setCellValue("I{$distRow}", $di['item_name']);
+        $ws1->setCellValue("J{$distRow}", $di['full_label']);
+        $ws1->setCellValue("K{$distRow}", (int)$di['total_pcs']);
+        $ws1->setCellValue("L{$distRow}", (int)$di['total_lots']);
+        $ws1->setCellValue("M{$distRow}", $share / 100);
+
+        $bg = ($dIndex % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
+        applyStyle($ws1, "G{$distRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws1, "H{$distRow}", dataStyle($bg, '1D4ED8', true, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws1, "I{$distRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws1, "J{$distRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws1, "K{$distRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "L{$distRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "M{$distRow}", dataStyle($bg, '047857', true, Alignment::HORIZONTAL_RIGHT));
+
+        $ws1->getStyle("K{$distRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws1->getStyle("L{$distRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws1->getStyle("M{$distRow}")->getNumberFormat()->setFormatCode('0.0%');
+        $distRow++;
+    }
+}
+$distEndRow = $distRow - 1;
+$distDataCount = count($distributionList);
+
+// Hide Column J (Helper label column used cleanly for Donut Chart labels)
+$ws1->getColumnDimension('J')->setVisible(false);
+
+// ── Native Excel Charts Placement below the data tables ──────────────────────
+$chartStartRow = max($trendEndRow, $distEndRow) + 3;
+$chartEndRow   = $chartStartRow + 18;
+
+// 1. Native Excel Line / Column Chart for Timeline Trend (Placed on Left: Cols A to E)
 if ($trendDataCount > 0 && $trendEndRow >= $trendStartRow) {
     try {
         $xAxisLabels = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'🎯 Analisis Part & Tren'!\$B\${$trendStartRow}:\$B\${$trendEndRow}", null, $trendDataCount)
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$B\${$trendStartRow}:\$B\${$trendEndRow}", null, $trendDataCount)
         ];
         $dataValues = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'🎯 Analisis Part & Tren'!\$E\${$trendStartRow}:\$E\${$trendEndRow}", null, $trendDataCount)
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\$E\${$trendStartRow}:\$E\${$trendEndRow}", null, $trendDataCount)
         ];
         $seriesTitle = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'🎯 Analisis Part & Tren'!\$E\$9", null, 1)
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$E\$9", null, 1)
         ];
 
-        // Choose Line Chart or Bar Chart based on interval count
         $chartType = ($trendDataCount <= 12) ? DataSeries::TYPE_BARCHART : DataSeries::TYPE_LINECHART;
         $barDir    = ($trendDataCount <= 12) ? DataSeries::DIRECTION_COL : null;
 
-        $series = new DataSeries(
+        $seriesTrend = new DataSeries(
             $chartType,
             $barDir ? DataSeries::GROUPING_CLUSTERED : DataSeries::GROUPING_STANDARD,
             [0],
@@ -964,327 +1208,198 @@ if ($trendDataCount > 0 && $trendEndRow >= $trendStartRow) {
             $xAxisLabels,
             $dataValues
         );
-        if ($barDir) $series->setPlotDirection($barDir);
+        if ($barDir) $seriesTrend->setPlotDirection($barDir);
 
-        $layout = new Layout();
-        $layout->setShowVal(true);
+        $layoutTrend = new Layout();
+        $layoutTrend->setShowVal(true);
 
-        $plotArea = new PlotArea($layout, [$series]);
-        $legend   = new Legend(Legend::POSITION_BOTTOM, null, false);
-        $chartTitle = new Title("Grafik Tren Kejadian Cacat: " . $defectName . " (" . $partCode . ")");
-        $chartObj = new Chart('chart_timeline_part', $chartTitle, $legend, $plotArea, true);
+        $plotAreaTrend = new PlotArea($layoutTrend, [$seriesTrend]);
+        $legendTrend   = new Legend(Legend::POSITION_BOTTOM, null, false);
+        $chartTitleTrendText = ($mode === 'overview') 
+            ? ("Grafik Tren Fluktuasi Defect: " . $defectName)
+            : ("Grafik Tren Fluktuasi Part: " . $partCode);
+        $chartTitleTrend = new Title($chartTitleTrendText);
+        $chartObjTrend   = new Chart('chart_trend_timeline', $chartTitleTrend, $legendTrend, $plotAreaTrend, true);
 
-        // Position Chart from Column G to P (Rows 8 to max 26)
-        $chartObj->setTopLeftPosition('G8');
-        $chartObj->setBottomRightPosition('P' . max(25, $trendEndRow + 2));
-        $ws1->addChart($chartObj);
-    } catch (Exception $chartEx) {}
+        $chartObjTrend->setTopLeftPosition("A{$chartStartRow}");
+        $chartObjTrend->setBottomRightPosition("E{$chartEndRow}");
+        $ws1->addChart($chartObjTrend);
+    } catch (Exception $ex) {}
+}
+
+// 2. Native Excel Donut / Pie Chart for Distribution (Placed on Right: Cols G to M)
+if ($distDataCount > 0 && $distEndRow >= $distStartRow) {
+    try {
+        $distValCol = ($selectedUnit === 'lot') ? 'L' : 'K';
+        $xAxisLabelsDist = [
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$J\${$distStartRow}:\$J\${$distEndRow}", null, $distDataCount)
+        ];
+        $dataValuesDist = [
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\${$distValCol}\${$distStartRow}:\${$distValCol}\${$distEndRow}", null, $distDataCount)
+        ];
+        $seriesTitleDist = [
+            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\${$distValCol}\$9", null, 1)
+        ];
+
+        $seriesDist = new DataSeries(
+            DataSeries::TYPE_DOUGHNUTCHART,
+            null,
+            range(0, count($dataValuesDist) - 1),
+            $seriesTitleDist,
+            $xAxisLabelsDist,
+            $dataValuesDist
+        );
+
+        $layoutDist = new Layout();
+        $layoutDist->setShowVal(true);
+        $layoutDist->setShowPercent(true);
+
+        $plotAreaDist = new PlotArea($layoutDist, [$seriesDist]);
+        $legendDist   = new Legend(Legend::POSITION_RIGHT, null, false);
+        $chartTitleDistText = ($mode === 'overview') 
+            ? ("Proporsi Sebaran Part Terdampak") 
+            : ("Proporsi Sebaran Jenis Defect");
+        $chartTitleDist = new Title($chartTitleDistText);
+        $chartObjDist   = new Chart('chart_distribution_donut', $chartTitleDist, $legendDist, $plotAreaDist, true);
+
+        $chartObjDist->setTopLeftPosition("G{$chartStartRow}");
+        $chartObjDist->setBottomRightPosition("M{$chartEndRow}");
+        $ws1->addChart($chartObjDist);
+    } catch (Exception $ex) {}
 }
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHEET 2: 🍩 FUNNEL DISTRIBUSI CACAT (3 Pie Charts: Defect, Model, Part)
+// SHEET 2: 📋 RIWAYAT TEMUAN INSPEKSI (Detail Audit Trail Log)
 // ═══════════════════════════════════════════════════════════════════════════
 $ws2 = $spreadsheet->createSheet();
-$ws2->setTitle("🍩 Funnel Distribusi");
+$ws2->setTitle("📋 Riwayat Temuan");
 
+// Column Widths
 $ws2->getColumnDimension('A')->setWidth(6);
-$ws2->getColumnDimension('B')->setWidth(26);
-$ws2->getColumnDimension('C')->setWidth(16);
-$ws2->getColumnDimension('D')->setWidth(16);
-$ws2->getColumnDimension('E')->setWidth(4);
+$ws2->getColumnDimension('B')->setWidth(20);
+$ws2->getColumnDimension('C')->setWidth(18);
+$ws2->getColumnDimension('D')->setWidth(28);
+$ws2->getColumnDimension('E')->setWidth(20);
+$ws2->getColumnDimension('F')->setWidth(24);
+$ws2->getColumnDimension('G')->setWidth(15);
+$ws2->getColumnDimension('H')->setWidth(16);
+$ws2->getColumnDimension('I')->setWidth(16);
+$ws2->getColumnDimension('J')->setWidth(16);
+$ws2->getColumnDimension('K')->setWidth(16);
+$ws2->getColumnDimension('L')->setWidth(20);
+$ws2->getColumnDimension('M')->setWidth(16);
 
 // Header Banner
 $ws2->getRowDimension(1)->setRowHeight(32);
-$ws2->mergeCells('A1:O1');
-$ws2->setCellValue('A1', 'POHON FUNNEL SEBARAN CACAT MUTU (DEFECT → MODEL → PART) — ' . strtoupper($filterTitleDesc));
+$ws2->getRowDimension(2)->setRowHeight(22);
+$ws2->mergeCells('A1:M1');
+$ws2->setCellValue('A1', 'DAFTAR RIWAYAT TEMUAN INSPEKSI (AUDIT TRAIL LOG) — OQC SYSTEM');
 applyStyle($ws2, 'A1', [
-    'font'      => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FFFFFFFF']],
-    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF1E293B']],
-    'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]
+    'font'      => ['bold' => true, 'size' => 13, 'color' => ['argb' => 'FFFFFFFF']],
+    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF065F46']],
+    'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER],
+    'borders'   => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => 'FF047857']]]
 ]);
 
-// ── Funnel 1: Distribusi Jenis Defect ────────────────────────────────────────
-$ws2->mergeCells('A3:D3');
-$ws2->setCellValue('A3', '1. DISTRIBUSI JENIS DEFECT (LEVEL 1)');
-applyStyle($ws2, 'A3', hdrStyle('2563EB'));
-
-$ws2->setCellValue('A4', 'NO');
-$ws2->setCellValue('B4', 'JENIS DEFECT');
-$ws2->setCellValue('C4', 'QTY (' . strtoupper($selectedUnit) . ')');
-$ws2->setCellValue('D4', 'KONTRIBUSI');
-applyStyle($ws2, 'A4:D4', hdrStyle('0F172A'));
-
-$f1Row = 5;
-$f1Start = $f1Row;
-$totD1 = array_sum(array_column($funnelDefects, $selectedUnit === 'lot' ? 'lots' : 'pcs')) ?: 1;
-
-foreach ($funnelDefects as $i => $fd) {
-    $v = ($selectedUnit === 'lot') ? (int)$fd['lots'] : (int)$fd['pcs'];
-    $ws2->setCellValue("A{$f1Row}", $i + 1);
-    $ws2->setCellValue("B{$f1Row}", $fd['name']);
-    $ws2->setCellValue("C{$f1Row}", $v);
-    $ws2->setCellValue("D{$f1Row}", round($v / $totD1, 3));
-
-    $bg = ($i % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-    applyStyle($ws2, "A{$f1Row}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-    applyStyle($ws2, "B{$f1Row}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
-    applyStyle($ws2, "C{$f1Row}", dataStyle($bg, 'BE123C', true, Alignment::HORIZONTAL_RIGHT));
-    applyStyle($ws2, "D{$f1Row}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_RIGHT));
-
-    $ws2->getStyle("C{$f1Row}")->getNumberFormat()->setFormatCode('#,##0');
-    $ws2->getStyle("D{$f1Row}")->getNumberFormat()->setFormatCode('0.0%');
-    $f1Row++;
+$ws2->mergeCells('A2:M2');
+if ($mode === 'overview') {
+    $auditSubHeader = "TARGET DEFECT: " . strtoupper($defectName) . "  |  PERIODE: " . strtoupper($filterTitleDesc) . "  |  CUSTOMER: " . strtoupper($selectedCustomer ?: 'SEMUA CUSTOMER');
+} else {
+    $auditSubHeader = "TARGET PART: " . strtoupper($partCode . ' - ' . $partName) . "  |  MODEL: " . strtoupper($modelName) . "  |  PERIODE: " . strtoupper($filterTitleDesc) . "  |  CUSTOMER: " . strtoupper($selectedCustomer ?: 'SEMUA CUSTOMER');
 }
-$f1End = $f1Row - 1;
-
-// Native Pie Chart 1: Jenis Defect
-if (!empty($funnelDefects) && $f1End >= $f1Start) {
-    try {
-        $lbl1 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'🍩 Funnel Distribusi'!\$B\${$f1Start}:\$B\${$f1End}", null, count($funnelDefects))];
-        $val1 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'🍩 Funnel Distribusi'!\$C\${$f1Start}:\$C\${$f1End}", null, count($funnelDefects))];
-        $ser1 = new DataSeries(DataSeries::TYPE_PIECHART, DataSeries::GROUPING_STANDARD, [0], [], $lbl1, $val1);
-
-        $lay1 = new Layout();
-        $lay1->setShowPercent(true);
-        $lay1->setShowCatName(true);
-
-        $plot1  = new PlotArea($lay1, [$ser1]);
-        $leg1   = new Legend(Legend::POSITION_RIGHT, null, false);
-        $chart1 = new Chart('chart_funnel_1', new Title("Peringkat Jenis Defect (Level 1)"), $leg1, $plot1, true);
-        $chart1->setTopLeftPosition('F3');
-        $chart1->setBottomRightPosition('O17');
-        $ws2->addChart($chart1);
-    } catch (Exception $e) {}
-}
-
-// ── Funnel 2: Distribusi Model Produk (Defect Terpilih) ──────────────────────
-$f2HeaderRow = 19;
-$ws2->mergeCells("A{$f2HeaderRow}:D{$f2HeaderRow}");
-$ws2->setCellValue("A{$f2HeaderRow}", '2. MODEL TERDAMPAK: ' . strtoupper($defectName) . ' (LEVEL 2)');
-applyStyle($ws2, "A{$f2HeaderRow}", hdrStyle('4F46E5'));
-
-$ws2->setCellValue("A" . ($f2HeaderRow + 1), 'NO');
-$ws2->setCellValue("B" . ($f2HeaderRow + 1), 'MODEL PRODUK');
-$ws2->setCellValue("C" . ($f2HeaderRow + 1), 'QTY (' . strtoupper($selectedUnit) . ')');
-$ws2->setCellValue("D" . ($f2HeaderRow + 1), 'KONTRIBUSI');
-applyStyle($ws2, "A" . ($f2HeaderRow + 1) . ":D" . ($f2HeaderRow + 1), hdrStyle('0F172A'));
-
-$f2Row = $f2HeaderRow + 2;
-$f2Start = $f2Row;
-$totM2 = array_sum(array_column($funnelModels, $selectedUnit === 'lot' ? 'lots' : 'pcs')) ?: 1;
-
-foreach ($funnelModels as $j => $fm) {
-    $vM = ($selectedUnit === 'lot') ? (int)$fm['lots'] : (int)$fm['pcs'];
-    $ws2->setCellValue("A{$f2Row}", $j + 1);
-    $ws2->setCellValue("B{$f2Row}", $fm['name']);
-    $ws2->setCellValue("C{$f2Row}", $vM);
-    $ws2->setCellValue("D{$f2Row}", round($vM / $totM2, 3));
-
-    $bg = ($j % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-    applyStyle($ws2, "A{$f2Row}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-    applyStyle($ws2, "B{$f2Row}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
-    applyStyle($ws2, "C{$f2Row}", dataStyle($bg, '4338CA', true, Alignment::HORIZONTAL_RIGHT));
-    applyStyle($ws2, "D{$f2Row}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_RIGHT));
-
-    $ws2->getStyle("C{$f2Row}")->getNumberFormat()->setFormatCode('#,##0');
-    $ws2->getStyle("D{$f2Row}")->getNumberFormat()->setFormatCode('0.0%');
-    $f2Row++;
-}
-$f2End = $f2Row - 1;
-
-// Native Pie Chart 2: Model Produk
-if (!empty($funnelModels) && $f2End >= $f2Start) {
-    try {
-        $lbl2 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'🍩 Funnel Distribusi'!\$B\${$f2Start}:\$B\${$f2End}", null, count($funnelModels))];
-        $val2 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'🍩 Funnel Distribusi'!\$C\${$f2Start}:\$C\${$f2End}", null, count($funnelModels))];
-        $ser2 = new DataSeries(DataSeries::TYPE_PIECHART, DataSeries::GROUPING_STANDARD, [0], [], $lbl2, $val2);
-
-        $lay2 = new Layout();
-        $lay2->setShowPercent(true);
-        $lay2->setShowCatName(true);
-
-        $plot2  = new PlotArea($lay2, [$ser2]);
-        $leg2   = new Legend(Legend::POSITION_RIGHT, null, false);
-        $chart2 = new Chart('chart_funnel_2', new Title("Sebaran Model: " . $defectName), $leg2, $plot2, true);
-        $chart2->setTopLeftPosition('F19');
-        $chart2->setBottomRightPosition('O33');
-        $ws2->addChart($chart2);
-    } catch (Exception $e) {}
-}
-
-// ── Funnel 3: Distribusi Part Code (Model Terpilih) ─────────────────────────
-$f3HeaderRow = 35;
-$ws2->mergeCells("A{$f3HeaderRow}:D{$f3HeaderRow}");
-$ws2->setCellValue("A{$f3HeaderRow}", '3. PART TERDAMPAK: ' . strtoupper($modelName) . ' (LEVEL 3)');
-applyStyle($ws2, "A{$f3HeaderRow}", hdrStyle('059669'));
-
-$ws2->setCellValue("A" . ($f3HeaderRow + 1), 'NO');
-$ws2->setCellValue("B" . ($f3HeaderRow + 1), 'PART CODE & NAME');
-$ws2->setCellValue("C" . ($f3HeaderRow + 1), 'QTY (' . strtoupper($selectedUnit) . ')');
-$ws2->setCellValue("D" . ($f3HeaderRow + 1), 'KONTRIBUSI');
-applyStyle($ws2, "A" . ($f3HeaderRow + 1) . ":D" . ($f3HeaderRow + 1), hdrStyle('0F172A'));
-
-$f3Row = $f3HeaderRow + 2;
-$f3Start = $f3Row;
-$totP3 = array_sum(array_column($funnelParts, $selectedUnit === 'lot' ? 'lots' : 'pcs')) ?: 1;
-
-foreach ($funnelParts as $k => $fp) {
-    $vP = ($selectedUnit === 'lot') ? (int)$fp['lots'] : (int)$fp['pcs'];
-    $ws2->setCellValue("A{$f3Row}", $k + 1);
-    $ws2->setCellValue("B{$f3Row}", $fp['name']);
-    $ws2->setCellValue("C{$f3Row}", $vP);
-    $ws2->setCellValue("D{$f3Row}", round($vP / $totP3, 3));
-
-    $bg = ($k % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-    applyStyle($ws2, "A{$f3Row}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-    applyStyle($ws2, "B{$f3Row}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
-    applyStyle($ws2, "C{$f3Row}", dataStyle($bg, '065F46', true, Alignment::HORIZONTAL_RIGHT));
-    applyStyle($ws2, "D{$f3Row}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_RIGHT));
-
-    $ws2->getStyle("C{$f3Row}")->getNumberFormat()->setFormatCode('#,##0');
-    $ws2->getStyle("D{$f3Row}")->getNumberFormat()->setFormatCode('0.0%');
-    $f3Row++;
-}
-$f3End = $f3Row - 1;
-
-// Native Pie Chart 3: Part Code
-if (!empty($funnelParts) && $f3End >= $f3Start) {
-    try {
-        $lbl3 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'🍩 Funnel Distribusi'!\$B\${$f3Start}:\$B\${$f3End}", null, count($funnelParts))];
-        $val3 = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'🍩 Funnel Distribusi'!\$C\${$f3Start}:\$C\${$f3End}", null, count($funnelParts))];
-        $ser3 = new DataSeries(DataSeries::TYPE_PIECHART, DataSeries::GROUPING_STANDARD, [0], [], $lbl3, $val3);
-
-        $lay3 = new Layout();
-        $lay3->setShowPercent(true);
-        $lay3->setShowCatName(true);
-
-        $plot3  = new PlotArea($lay3, [$ser3]);
-        $leg3   = new Legend(Legend::POSITION_RIGHT, null, false);
-        $chart3 = new Chart('chart_funnel_3', new Title("Sebaran Part: " . $modelName), $leg3, $plot3, true);
-        $chart3->setTopLeftPosition('F35');
-        $chart3->setBottomRightPosition('O49');
-        $ws2->addChart($chart3);
-    } catch (Exception $e) {}
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SHEET 3: 📋 RIWAYAT TEMUAN (Detailed Audit Trail Log for Part)
-// ═══════════════════════════════════════════════════════════════════════════
-$ws3 = $spreadsheet->createSheet();
-$ws3->setTitle("📋 Riwayat Temuan");
-
-$ws3->getColumnDimension('A')->setWidth(6);   // No
-$ws3->getColumnDimension('B')->setWidth(18);  // Tanggal & Jam
-$ws3->getColumnDimension('C')->setWidth(18);  // Part Code
-$ws3->getColumnDimension('D')->setWidth(26);  // Part Name
-$ws3->getColumnDimension('E')->setWidth(18);  // Model
-$ws3->getColumnDimension('F')->setWidth(20);  // Defect Type
-$ws3->getColumnDimension('G')->setWidth(14);  // Tipe Inspeksi
-$ws3->getColumnDimension('H')->setWidth(16);  // No Kanban
-$ws3->getColumnDimension('I')->setWidth(22);  // Customer
-$ws3->getColumnDimension('J')->setWidth(16);  // Lot Number
-$ws3->getColumnDimension('K')->setWidth(16);  // Ref Number
-$ws3->getColumnDimension('L')->setWidth(18);  // QC Inspector
-$ws3->getColumnDimension('M')->setWidth(15);  // Qty Temuan
-
-// Header Banner
-$ws3->getRowDimension(1)->setRowHeight(32);
-$ws3->mergeCells('A1:M1');
-$ws3->setCellValue('A1', 'CATATAN KRONOLOGIS TEMUAN CACAT MUTU (AUDIT TRAIL LOG)');
-applyStyle($ws3, 'A1', [
-    'font'      => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FFFFFFFF']],
-    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF059669']],
-    'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]
-]);
-
-$ws3->mergeCells('A2:M2');
-$ws3->setCellValue('A2', 'PART: ' . strtoupper($partCode . ' - ' . $partName) . '  |  DEFECT: ' . strtoupper($defectName) . '  |  PERIODE: ' . strtoupper($filterTitleDesc) . '  |  CUSTOMER: ' . strtoupper($selectedCustomer ?: 'SEMUA CUSTOMER'));
-applyStyle($ws3, 'A2', [
+$ws2->setCellValue('A2', $auditSubHeader);
+applyStyle($ws2, 'A2', [
     'font'      => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF065F46']],
     'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFECFDF5']],
     'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]
 ]);
 
-// Table Headers
-$ws3->setCellValue('A4', 'NO');
-$ws3->setCellValue('B4', 'TANGGAL & JAM');
-$ws3->setCellValue('C4', 'PART CODE');
-$ws3->setCellValue('D4', 'PART NAME');
-$ws3->setCellValue('E4', 'MODEL PRODUK');
-$ws3->setCellValue('F4', 'JENIS DEFECT');
-$ws3->setCellValue('G4', 'INSPEKSI');
-$ws3->setCellValue('H4', 'NO KANBAN');
-$ws3->setCellValue('I4', 'CUSTOMER');
-$ws3->setCellValue('J4', 'LOT NUMBER');
-$ws3->setCellValue('K4', 'REF NUMBER');
-$ws3->setCellValue('L4', 'INSPECTOR');
-$ws3->setCellValue('M4', 'JUMLAH (PCS)');
-applyStyle($ws3, 'A4:M4', hdrStyle('0F172A'));
-$ws3->freezePane('A5'); // Freeze panes on row 5 so header stays fixed on scroll
+// Table Column Headers
+$ws2->setCellValue('A4', 'NO');
+$ws2->setCellValue('B4', 'TANGGAL & JAM');
+$ws2->setCellValue('C4', 'PART CODE');
+$ws2->setCellValue('D4', 'PART NAME');
+$ws2->setCellValue('E4', 'MODEL PRODUK');
+$ws2->setCellValue('F4', 'JENIS DEFECT');
+$ws2->setCellValue('G4', 'INSPEKSI');
+$ws2->setCellValue('H4', 'NO KANBAN');
+$ws2->setCellValue('I4', 'CUSTOMER');
+$ws2->setCellValue('J4', 'LOT NUMBER');
+$ws2->setCellValue('K4', 'REF NUMBER');
+$ws2->setCellValue('L4', 'INSPECTOR');
+$ws2->setCellValue('M4', 'JUMLAH (PCS)');
+applyStyle($ws2, 'A4:M4', hdrStyle('0F172A'));
+$ws2->freezePane('A5'); // Freeze row 4 header so it stays fixed on scroll
 
 $aRow = 5;
 $auditStartRow = $aRow;
 
 if (empty($auditRecords)) {
-    $ws3->mergeCells('A5:M5');
-    $ws3->setCellValue('A5', 'Tidak ada riwayat catatan temuan cacat pada filter ini.');
-    applyStyle($ws3, 'A5:M5', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
+    $ws2->mergeCells('A5:M5');
+    $ws2->setCellValue('A5', 'Tidak ada riwayat catatan temuan inspeksi pada filter ini.');
+    applyStyle($ws2, 'A5:M5', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
     $aRow++;
 } else {
     foreach ($auditRecords as $ai => $a) {
         $no = $ai + 1;
-        $ws3->setCellValue("A{$aRow}", $no);
-        $ws3->setCellValue("B{$aRow}", date('d/m/Y H:i', strtotime($a['started_at'])) . ' WIB');
-        $ws3->setCellValue("C{$aRow}", $a['part_code']);
-        $ws3->setCellValue("D{$aRow}", $a['part_name']);
-        $ws3->setCellValue("E{$aRow}", $a['model_name']);
-        $ws3->setCellValue("F{$aRow}", $a['defect_name']);
-        $ws3->setCellValue("G{$aRow}", strtoupper($a['inspection_type']));
-        $ws3->setCellValue("H{$aRow}", $a['kanban_no']);
-        $ws3->setCellValue("I{$aRow}", $a['customer_name']);
-        $ws3->setCellValue("J{$aRow}", $a['lot_number']);
-        $ws3->setCellValue("K{$aRow}", $a['ref_number']);
-        $ws3->setCellValue("L{$aRow}", $a['inspector_name']);
-        $ws3->setCellValue("M{$aRow}", (int)$a['qty_ng']);
+        $ws2->setCellValue("A{$aRow}", $no);
+        $ws2->setCellValue("B{$aRow}", date('d/m/Y H:i', strtotime($a['started_at'])) . ' WIB');
+        $ws2->setCellValue("C{$aRow}", $a['part_code']);
+        $ws2->setCellValue("D{$aRow}", $a['part_name']);
+        $ws2->setCellValue("E{$aRow}", $a['model_name']);
+        $ws2->setCellValue("F{$aRow}", $a['defect_name']);
+        $ws2->setCellValue("G{$aRow}", strtoupper($a['inspection_type']));
+        $ws2->setCellValue("H{$aRow}", $a['kanban_no']);
+        $ws2->setCellValue("I{$aRow}", $a['customer_name']);
+        $ws2->setCellValue("J{$aRow}", $a['lot_number']);
+        $ws2->setCellValue("K{$aRow}", $a['ref_number']);
+        $ws2->setCellValue("L{$aRow}", $a['inspector_name']);
+        $ws2->setCellValue("M{$aRow}", (int)$a['qty_ng']);
 
         $bg = ($ai % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-        applyStyle($ws3, "A{$aRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "B{$aRow}", dataStyle($bg, '334155', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "C{$aRow}", dataStyle($bg, '1D4ED8', true, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "D{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "E{$aRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "F{$aRow}", dataStyle($bg, 'BE123C', true, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "G{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "H{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "I{$aRow}", dataStyle($bg, '334155', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "J{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "K{$aRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws3, "L{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws3, "M{$aRow}", dataStyle($bg, 'DC2626', true, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2, "A{$aRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "B{$aRow}", dataStyle($bg, '334155', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "C{$aRow}", dataStyle($bg, '1D4ED8', true, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "D{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "E{$aRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "F{$aRow}", dataStyle($bg, 'BE123C', true, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "G{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "H{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "I{$aRow}", dataStyle($bg, '334155', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "J{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "K{$aRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2, "L{$aRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws2, "M{$aRow}", dataStyle($bg, 'DC2626', true, Alignment::HORIZONTAL_RIGHT));
 
-        $ws3->getStyle("M{$aRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws2->getStyle("M{$aRow}")->getNumberFormat()->setFormatCode('#,##0');
         $aRow++;
     }
 }
 $auditEndRow = $aRow - 1;
 
-// Total Summary Row on Audit Sheet
-$ws3->mergeCells("A{$aRow}:L{$aRow}");
-$ws3->setCellValue("A{$aRow}", "TOTAL TEMUAN CACAT (PCS)");
-$ws3->setCellValue("M{$aRow}", "=SUM(M{$auditStartRow}:M{$auditEndRow})");
-applyStyle($ws3, "A{$aRow}:L{$aRow}", dataStyle('0F172A', 'FFFFFF', true, Alignment::HORIZONTAL_RIGHT));
-applyStyle($ws3, "M{$aRow}", dataStyle('0F172A', 'FFFFFF', true, Alignment::HORIZONTAL_RIGHT));
-$ws3->getStyle("M{$aRow}")->getNumberFormat()->setFormatCode('#,##0');
+// Total Summary Row on Audit Sheet with Excel SUM Formula
+$ws2->mergeCells("A{$aRow}:L{$aRow}");
+$ws2->setCellValue("A{$aRow}", "TOTAL TEMUAN CACAT (PCS)");
+$ws2->setCellValue("M{$aRow}", "=SUM(M{$auditStartRow}:M{$auditEndRow})");
+applyStyle($ws2, "A{$aRow}:L{$aRow}", dataStyle('0F172A', 'FFFFFF', true, Alignment::HORIZONTAL_RIGHT));
+applyStyle($ws2, "M{$aRow}", dataStyle('0F172A', 'FFFFFF', true, Alignment::HORIZONTAL_RIGHT));
+$ws2->getStyle("M{$aRow}")->getNumberFormat()->setFormatCode('#,##0');
 
-// ── 5. Set Active Sheet & Stream Output ──────────────────────────────────────
+// ── 7. Set Active Sheet & Stream XLSX Output ─────────────────────────────────
 $spreadsheet->setActiveSheetIndex(0);
 
 $filenameDate = date('Ymd_His');
-$safePartCode = preg_replace('/[^a-zA-Z0-9_\-]/', '_', $partCode);
+if ($mode === 'overview') {
+    $cleanDefect = preg_replace('/[^a-zA-Z0-9_\-]/', '_', $defectName);
+    $filename = "Analisis_Defect_{$cleanDefect}_{$filenameDate}.xlsx";
+} else {
+    $cleanPart = preg_replace('/[^a-zA-Z0-9_\-]/', '_', $partCode);
+    $filename = "Analisis_Part_{$cleanPart}_{$filenameDate}.xlsx";
+}
+
 header("Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-header("Content-Disposition: attachment; filename=Analisis_Defect_{$safePartCode}_{$filenameDate}.xlsx");
+header("Content-Disposition: attachment; filename={$filename}");
 header("Cache-Control: max-age=0");
 header("Pragma: no-cache");
 

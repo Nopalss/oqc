@@ -117,9 +117,10 @@ function nav_active($keyword, $currentUri) {
                     $pdoSide = getDB();
                     if ($pdoSide) {
                         $cntPendingNg = (int)$pdoSide->query("
-                            SELECT COUNT(*) 
+                            SELECT COUNT(DISTINCT CONCAT(COALESCE(k.item_code, ''), '|', COALESCE(isl.lot_number, ''), '|', COALESCE(isl.ref_number, ''))) 
                             FROM inspection_session_lots isl
                             JOIN inspection_sessions s ON isl.inspection_session_id = s.id
+                            JOIN kanban_items k ON k.id = s.kanban_item_id
                             WHERE (
                                 isl.lot_result = 'rejected' 
                                 OR isl.lot_status IN ('rejected', 'ng_quarantine')
@@ -129,14 +130,28 @@ function nav_active($keyword, $currentUri) {
                                       AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
                                 )
                             )
-                            AND (isl.lot_result != 'passed' AND isl.lot_status NOT IN ('passed', 'reinspected', 'replaced'))
-                            AND isl.replaced_by_lot_id IS NULL
+                            AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                            AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
                             AND NOT EXISTS (
                                 SELECT 1 FROM lot_quarantine_closures lqc 
                                 WHERE lqc.session_lot_id = isl.id
                             )
-                            AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
-                            AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
+                            AND NOT EXISTS (
+                                SELECT 1 
+                                FROM inspection_session_lots isl_pass
+                                JOIN inspection_sessions s_pass ON isl_pass.inspection_session_id = s_pass.id
+                                JOIN kanban_items k_pass ON k_pass.id = s_pass.kanban_item_id
+                                WHERE (
+                                    (isl.ref_number IS NOT NULL AND isl.ref_number != '' AND isl_pass.ref_number = isl.ref_number)
+                                    OR (
+                                        (isl.ref_number IS NULL OR isl.ref_number = '') 
+                                        AND isl_pass.lot_number = isl.lot_number 
+                                        AND k_pass.item_code = k.item_code
+                                    )
+                                )
+                                AND (isl_pass.lot_result = 'passed' OR isl_pass.lot_status = 'passed')
+                                AND isl_pass.id > isl.id
+                            )
                         ")->fetchColumn();
                         if ($cntPendingNg > 0) {
                             echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px] ml-auto flex-shrink-0">' . ($cntPendingNg > 99 ? '99+' : $cntPendingNg) . '</span>';

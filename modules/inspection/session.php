@@ -961,80 +961,8 @@ require_once __DIR__ . '/../../layouts/header.php';
     <!-- Main Workspace Area: 2 Main Columns -->
     <div style="flex: 1; min-height: 0; overflow: hidden; display: flex; padding: 12px; gap: 12px;">
         
-        <!-- Left Main Panel: Interactive Drawing Viewer 2D PDF & 3D STP (Flex-1) -->
-        <div id="drawing-viewer-panel" style="flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden;" class="bg-white rounded-2xl border border-slate-200/80 shadow-xs">
-            
-            <!-- Drawing Header & Toolbar -->
-            <div class="px-3 py-1.5 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
-                
-                <!-- Tab Switcher -->
-                <div class="flex items-center space-x-1.5 bg-slate-200/70 p-1 rounded-xl">
-                    <button type="button" id="tab-btn-2d" onclick="switchDrawingTab('2d')" class="px-3 py-1 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs flex items-center">
-                        <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
-                        </svg>
-                        Gambar 2D (PDF)
-                    </button>
-                    <button type="button" id="tab-btn-3d" onclick="switchDrawingTab('3d')" class="px-3 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center">
-                        <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
-                        </svg>
-                        Tampilan 3D
-                    </button>
-                </div>
-
-                <!-- Zoom & Viewport Controls Toolbar -->
-                <div class="flex items-center space-x-1 text-slate-600">
-                    <button type="button" onclick="adjustZoom(0.1)" class="p-1 hover:bg-slate-200 rounded-lg text-slate-600 hover:text-slate-900 transition-colors" title="Zoom In">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7"></path></svg>
-                    </button>
-                    <button type="button" onclick="adjustZoom(-0.1)" class="p-1 hover:bg-slate-200 rounded-lg text-slate-600 hover:text-slate-900 transition-colors" title="Zoom Out">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM13 10H7"></path></svg>
-                    </button>
-                    <button type="button" id="btn-fullscreen-toggle" onclick="toggleDrawingFullscreen()" class="p-1 hover:bg-slate-200 rounded-lg text-slate-600 hover:text-slate-900 transition-colors" title="Layar Penuh (Fullscreen)">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-                    </button>
-                    <button type="button" onclick="resetZoom()" class="p-1 hover:bg-slate-200 rounded-lg text-slate-600 hover:text-slate-900 transition-colors" title="Reset Zoom">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                    </button>
-                </div>
-
-            </div>
-
-            <!-- Viewport Container for 2D & 3D Drawings -->
-            <div style="flex: 1; min-height: 0; position: relative; overflow: hidden; background-color: #020617;">
-                
-                <!-- 2D PDF Viewport -->
-                <div id="viewport-2d" class="w-full h-full flex items-center justify-center overflow-auto p-2">
-                    <iframe id="pdf-frame" src="<?= ($session && !empty($session['drawing_2d_path'])) ? (base_url($session['drawing_2d_path']) . '#toolbar=0') : '' ?>" class="w-full h-full border-0 rounded-lg transition-transform duration-200" style="display: <?= ($session && !empty($session['drawing_2d_path'])) ? 'block' : 'none' ?>;"></iframe>
-                    <div id="drawing-placeholder-box" class="w-full h-full bg-[#f8fafc] border border-dashed border-slate-300 rounded-xl p-4 flex flex-col items-center justify-center text-center relative" style="display: <?= ($session && !empty($session['drawing_2d_path'])) ? 'none' : 'flex' ?>;">
-                        <svg class="w-full h-full max-h-[360px] text-slate-300" viewBox="0 0 600 350" fill="none" stroke="currentColor">
-                            <rect x="50" y="40" width="500" height="270" rx="4" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="4 4" />
-                            <rect x="150" y="80" width="300" height="180" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2" />
-                            <circle cx="200" cy="130" r="20" stroke="#64748b" stroke-width="2" />
-                            <circle cx="200" cy="210" r="20" stroke="#64748b" stroke-width="2" />
-                            <circle cx="400" cy="130" r="15" stroke="#64748b" stroke-width="2" />
-                            <line x1="150" y1="80" x2="450" y2="260" stroke="#cbd5e1" stroke-width="1" />
-                            <text x="300" y="170" font-family="monospace" font-size="14" font-weight="bold" fill="#334155" text-anchor="middle" id="placeholder-part-code-text"><?= $session ? htmlspecialchars($session['part_code']) : 'TECHNICAL DRAWING' ?></text>
-                        </svg>
-                        <p class="text-xs font-bold text-slate-500 mt-2">Gambar Teknis PDF belum diunggah untuk Part Code ini.</p>
-                    </div>
-                </div>
-
-                <!-- 3D STP Model Viewport -->
-                <div id="viewport-3d" class="hidden w-full h-full bg-slate-900 relative">
-                    <div id="cad-3d-viewport" class="w-full h-full" data-stp-url="<?= ($session && !empty($session['drawing_3d_path'])) ? htmlspecialchars(base_url($session['drawing_3d_path'])) : '' ?>" style="display: <?= ($session && !empty($session['drawing_3d_path'])) ? 'block' : 'none' ?>;"></div>
-                    <div id="cad-3d-placeholder-box" class="w-full h-full flex flex-col items-center justify-center text-white p-6 text-center" style="display: <?= ($session && !empty($session['drawing_3d_path'])) ? 'none' : 'flex' ?>;">
-                        <svg class="w-12 h-12 text-slate-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
-                        </svg>
-                        <p class="text-xs font-bold text-slate-400">File 3D (.STP) tidak tersedia untuk Part ini.</p>
-                    </div>
-                </div>
-
-            </div>
-
-        </div>
+        <!-- Left Main Panel: Modular Multi-Document Workbench Viewer (2D, 3D, PI, Q-Point, PAC, Standar Packing) -->
+        <?php require_once __DIR__ . '/components/document_viewer_panel.php'; ?>
 
         <!-- Right Control Panel: Compact Zero-Scroll Inspection Panel (~420px Fixed) -->
         <div id="right-control-panel" style="width: 420px; flex-shrink: 0; height: 100%; display: flex; flex-direction: column; overflow-y: auto; box-sizing: border-box; padding-bottom: 30px;" class="pr-1 custom-scrollbar">
@@ -5743,9 +5671,10 @@ function init3dViewer() {
 
 function adjustZoom(delta) {
     currentZoom = Math.min(2.0, Math.max(0.5, currentZoom + delta));
-    var iframe = document.getElementById('pdf-frame');
-    if (iframe) {
-        iframe.style.transform = 'scale(' + currentZoom + ')';
+    var activeIframe = (activeDocumentTab === '2d') ? document.getElementById('pdf-frame') : document.getElementById('custom-doc-frame');
+    if (activeIframe) {
+        activeIframe.style.transform = 'scale(' + currentZoom + ')';
+        activeIframe.style.transformOrigin = 'top left';
     }
     var zoomLbl = document.getElementById('zoom-level-label');
     if (zoomLbl) {
@@ -5755,9 +5684,13 @@ function adjustZoom(delta) {
 
 function resetZoom() {
     currentZoom = 1.0;
-    var iframe = document.getElementById('pdf-frame');
-    if (iframe) {
-        iframe.style.transform = 'scale(1)';
+    var iframe2d = document.getElementById('pdf-frame');
+    if (iframe2d) {
+        iframe2d.style.transform = 'scale(1)';
+    }
+    var iframeCustom = document.getElementById('custom-doc-frame');
+    if (iframeCustom) {
+        iframeCustom.style.transform = 'scale(1)';
     }
     var zoomLbl = document.getElementById('zoom-level-label');
     if (zoomLbl) {
@@ -6012,6 +5945,11 @@ function selectPlanningItem(id, itemCode, itemDesc, customer, qty, checkType, pl
 
     // Fetch multi-lot Safety Stock sessions via API
     fetchAndRenderAvailableSsLots(itemCode, selectedPlanningQty);
+
+    // Refresh Multi-Document Workbench Badges & Metadata (PI, Q-Point, PAC, Standar Packing)
+    if (typeof fetchPartDocuments === 'function') {
+        fetchPartDocuments(itemCode);
+    }
 
     // Switch step UI
     var p1 = document.getElementById('step-pill-1');
@@ -11904,5 +11842,6 @@ document.addEventListener('DOMContentLoaded', function() {
 <script src="<?= base_url('assets/js/vendor/OrbitControls.js') ?>"></script>
 <script src="<?= base_url('assets/js/vendor/occt-import-js.js') ?>"></script>
 <script src="<?= base_url('assets/js/cad_viewer.js') ?>"></script>
+<script src="<?= base_url('assets/js/modules/inspection_doc_viewer.js') ?>"></script>
 </body>
 </html>
