@@ -62,14 +62,63 @@ function fetchPartDocuments(partCode) {
 function switchDocumentTab(tab) {
     activeDocumentTab = tab;
 
+    var tabThemeMap = {
+        '2d': {
+            activeBtn: 'bg-blue-600 text-white border-blue-600 shadow-xs',
+            inactiveIcon: 'text-blue-600'
+        },
+        '3d': {
+            activeBtn: 'bg-cyan-700 text-white border-cyan-700 shadow-xs',
+            inactiveIcon: 'text-cyan-600'
+        },
+        'pi': {
+            activeBtn: 'bg-indigo-600 text-white border-indigo-600 shadow-xs',
+            inactiveIcon: 'text-indigo-600'
+        },
+        'qpoint': {
+            activeBtn: 'bg-amber-600 text-white border-amber-600 shadow-xs',
+            inactiveIcon: 'text-amber-500'
+        },
+        'pac': {
+            activeBtn: 'bg-emerald-600 text-white border-emerald-600 shadow-xs',
+            inactiveIcon: 'text-emerald-600'
+        },
+        'standar_packing': {
+            activeBtn: 'bg-orange-700 text-white border-orange-700 shadow-xs',
+            inactiveIcon: 'text-orange-600'
+        }
+    };
+
+    var tabColors = {
+        '2d': { bg: '#2563eb', border: '#2563eb' },
+        '3d': { bg: '#0e7490', border: '#0e7490' },
+        'pi': { bg: '#4f46e5', border: '#4f46e5' },
+        'qpoint': { bg: '#d97706', border: '#d97706' },
+        'pac': { bg: '#059669', border: '#059669' },
+        'standar_packing': { bg: '#c2410c', border: '#c2410c' }
+    };
+
     var allTabs = ['2d', '3d', 'pi', 'qpoint', 'pac', 'standar_packing'];
     allTabs.forEach(function(t) {
         var btn = document.getElementById('tab-btn-' + t);
         if (!btn) return;
+        var icon = btn.querySelector('svg');
+
         if (t === tab) {
-            btn.className = 'px-2.5 py-1 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs flex items-center whitespace-nowrap';
+            btn.className = 'px-3 py-1.5 rounded-lg text-xs font-bold transition-all border shadow-xs flex items-center whitespace-nowrap cursor-pointer doc-tab-active-' + t;
+            var c = tabColors[t] || { bg: '#2563eb', border: '#2563eb' };
+            btn.setAttribute('style', 'background-color: ' + c.bg + ' !important; border-color: ' + c.border + ' !important; color: #ffffff !important;');
+            if (icon) {
+                icon.className = 'w-3.5 h-3.5 mr-1.5 flex-shrink-0 text-white';
+                icon.setAttribute('style', 'color: #ffffff !important; stroke: #ffffff !important;');
+            }
         } else {
-            btn.className = 'px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap';
+            btn.className = 'px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer doc-tab-hover-' + t;
+            btn.removeAttribute('style');
+            if (icon) {
+                icon.className = 'w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-' + t;
+                icon.removeAttribute('style');
+            }
         }
     });
 
@@ -123,7 +172,7 @@ function updateVersionDropdownForTab(docType) {
     if (!docInfo || !docInfo.has_document || !docInfo.versions || docInfo.versions.length <= 1) {
         // Only 1 version or no version: show single label or hide dropdown
         if (docInfo && docInfo.has_document && docInfo.latest) {
-            select.innerHTML = '<option value="' + docInfo.latest.version + '">' + docInfo.latest.version_label_full + '</option>';
+            select.innerHTML = '<option value="' + escapeHtml(docInfo.latest.filename) + '">' + escapeHtml(docInfo.latest.version_label_full) + '</option>';
             versionContainer.classList.remove('hidden');
         } else {
             versionContainer.classList.add('hidden');
@@ -134,7 +183,7 @@ function updateVersionDropdownForTab(docType) {
     // Multiple versions available
     var html = '';
     docInfo.versions.forEach(function(v) {
-        html += '<option value="' + v.version + '">' + v.version_label_full + '</option>';
+        html += '<option value="' + escapeHtml(v.filename) + '">' + escapeHtml(v.version_label_full) + '</option>';
     });
     select.innerHTML = html;
     versionContainer.classList.remove('hidden');
@@ -143,9 +192,9 @@ function updateVersionDropdownForTab(docType) {
 /**
  * Handle Version Dropdown Change
  */
-function onDocumentVersionChange(versionVal) {
+function onDocumentVersionChange(fileKey) {
     if (activeDocumentTab !== '2d' && activeDocumentTab !== '3d') {
-        loadCustomDocumentViewer(activeDocumentTab, parseInt(versionVal, 10));
+        loadCustomDocumentViewer(activeDocumentTab, fileKey);
     }
 }
 
@@ -160,8 +209,24 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     var pDesc = document.getElementById('custom-doc-placeholder-desc');
     var pFolder = document.getElementById('custom-doc-placeholder-folder');
 
-    var pCodeElem = document.getElementById('card-part-code') || document.getElementById('selected-plan-part-code');
-    var partCode = pCodeElem ? (pCodeElem.textContent || pCodeElem.innerText).trim() : '';
+    // Robust Part Code resolution: check global session state, inputs, and card elements
+    var partCode = '';
+    if (typeof currentSessionPartCode !== 'undefined' && currentSessionPartCode && currentSessionPartCode !== '-') {
+        partCode = String(currentSessionPartCode).trim();
+    } else if (typeof currentSessionObj !== 'undefined' && currentSessionObj && currentSessionObj.part_code) {
+        partCode = String(currentSessionObj.part_code).trim();
+    } else {
+        var pCodeElem = document.getElementById('card-part-code') || document.getElementById('selected-plan-part-code');
+        partCode = pCodeElem ? (pCodeElem.textContent || pCodeElem.innerText).trim() : '';
+    }
+
+    // Fallback if still empty or '-'
+    if (partCode === '-' || partCode === '') {
+        var inputCode = document.getElementById('scan-part-code');
+        if (inputCode && inputCode.value) {
+            partCode = inputCode.value.trim();
+        }
+    }
 
     var docInfo = currentPartDocuments[docType];
     var folderName = docInfo ? docInfo.folder : docType.toUpperCase();
@@ -184,21 +249,30 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     }
 
     // Determine target version
-    var ver = targetVersion;
-    if (!ver) {
+    var targetDoc = null;
+    var targetFileKey = (typeof targetVersion === 'string') ? targetVersion : null;
+
+    if (!targetFileKey) {
         var select = document.getElementById('doc-version-select');
-        ver = select && select.value ? parseInt(select.value, 10) : (docInfo.latest ? docInfo.latest.version : 1);
+        if (select && select.value) {
+            targetFileKey = select.value;
+        }
     }
 
-    var targetDoc = null;
-    docInfo.versions.forEach(function(v) {
-        if (v.version === ver) targetDoc = v;
-    });
+    if (targetFileKey) {
+        docInfo.versions.forEach(function(v) {
+            if (v.filename === targetFileKey || String(v.version) === String(targetFileKey)) {
+                targetDoc = v;
+            }
+        });
+    }
+
     if (!targetDoc) targetDoc = docInfo.latest;
 
     var previewUrl = window.APP_BASE_URL + '/modules/inspection/api/document_preview.php?type=' + encodeURIComponent(docType) +
         '&part_code=' + encodeURIComponent(partCode) +
-        '&version=' + (targetDoc ? targetDoc.version : 1);
+        '&file=' + encodeURIComponent(targetDoc ? targetDoc.filename : '') +
+        '&version=' + (targetDoc ? targetDoc.version : 0);
 
     // If PDF, add #toolbar=0 for sleek zero-scroll view
     if (targetDoc && targetDoc.ext === 'pdf') {

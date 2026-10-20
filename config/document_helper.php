@@ -1,7 +1,7 @@
 <?php
 /**
- * OQC Document Helper
- * Handles discovery, versioning, and caching for PI, Q-Point, PAC, and Standar Packing documents.
+ * OQC Document Helper (PDF Only Edition - Precision Match & Revision Parser)
+ * Handles exact part code isolation, versioning (_v1, _v2), and drawing revisions (_00, _01).
  */
 
 if (!function_exists('get_document_types_config')) {
@@ -12,7 +12,7 @@ if (!function_exists('get_document_types_config')) {
                 'label' => 'PI',
                 'full_label' => 'Process Inspection (PI)',
                 'folder' => 'PI',
-                'icon' => '<svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>',
+                'icon' => '<svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414A1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>',
             ],
             'qpoint' => [
                 'code' => 'qpoint',
@@ -40,12 +40,17 @@ if (!function_exists('get_document_types_config')) {
 }
 
 /**
- * Scan uploads/documents/ for all available documents for a specific Part Code.
- * Supports patterns:
- *   [PartCode]_v[Version].[ext]  (e.g., 176799901_v1.xlsx, 176799901_v2.pdf)
- *   [PartCode].[ext]             (default to v1)
- *
- * Automatically marks the highest version as 'is_latest' and default.
+ * Scan uploads/documents/ for all available PDF documents for a specific Part Code.
+ * 
+ * Strict Isolation:
+ *   Ensures part code '1' ONLY matches '1_00.pdf', '1_v1.pdf', '1.pdf', etc.
+ *   Never matches '187385503_00.pdf' or '101_v1.pdf'!
+ * 
+ * Supported patterns:
+ *   [PartCode]_00.pdf / [PartCode]-01.pdf   (Standard Drawing Revisions)
+ *   [PartCode]_v1.pdf / [PartCode]-v2.pdf   (Version format)
+ *   [PartCode]_rev01.pdf                    (Rev format)
+ *   [PartCode].pdf                          (Base format)
  */
 if (!function_exists('get_part_documents_summary')) {
     function get_part_documents_summary($partCode) {
@@ -62,46 +67,57 @@ if (!function_exists('get_part_documents_summary')) {
             $versions = [];
 
             if ($cleanPartCode !== '' && $docFolder && is_dir($docFolder)) {
-                // Find matching files starting with part code
-                $pattern = $docFolder . DIRECTORY_SEPARATOR . $cleanPartCode . '*.*';
-                $foundFiles = glob($pattern);
+                // Read all PDF files in this directory to perform strict regex matching
+                $allPdfFiles = glob($docFolder . DIRECTORY_SEPARATOR . '*.pdf');
 
-                if (!empty($foundFiles)) {
-                    foreach ($foundFiles as $filePath) {
+                if (!empty($allPdfFiles)) {
+                    // Regex boundary: Part Code must be followed by [_-](prefix)(number) OR end with .pdf
+                    $quotedCode = preg_quote($cleanPartCode, '/');
+                    $pattern = '/^' . $quotedCode . '(?:[_-](v(?:er)?|rev)?([0-9]+))?\.pdf$/i';
+
+                    foreach ($allPdfFiles as $filePath) {
                         $filename = basename($filePath);
-                        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
 
-                        // Allowed formats: pdf, xlsx, xls
-                        if (!in_array($ext, ['pdf', 'xlsx', 'xls', 'png', 'jpg', 'jpeg'])) {
-                            continue;
+                        if (preg_match($pattern, $filename, $matches)) {
+                            $prefix = strtolower($matches[1] ?? '');
+                            $rawNum = $matches[2] ?? null;
+
+                            // Determine numeric order and display label
+                            if ($rawNum !== null) {
+                                $versionOrder = (int)$rawNum;
+                                if ($prefix === 'v' || $prefix === 'ver') {
+                                    $versionLabel = 'v' . $rawNum;
+                                } elseif ($prefix === 'rev') {
+                                    $versionLabel = 'Rev ' . $rawNum;
+                                } else {
+                                    // Numeric revision like _00, _01
+                                    $versionLabel = 'Revisi ' . $rawNum;
+                                }
+                            } else {
+                                // Default / base file like PartCode.pdf
+                                $versionOrder = 0;
+                                $versionLabel = 'Revisi 00';
+                            }
+
+                            $relativeRelPath = 'uploads/documents/' . $folderName . '/' . $filename;
+
+                            $versions[] = [
+                                'version' => $versionOrder,
+                                'version_key' => $filename,
+                                'version_label' => $versionLabel,
+                                'filename' => $filename,
+                                'ext' => 'pdf',
+                                'format' => 'pdf',
+                                'file_path' => $relativeRelPath,
+                                'file_size' => filesize($filePath),
+                                'modified_at' => filemtime($filePath),
+                            ];
                         }
-
-                        // Determine version number
-                        // Pattern: PartCode_v2.xlsx or PartCode-v2.xlsx or PartCode_rev2.xlsx
-                        $versionNum = 1;
-                        if (preg_match('/[_-]v(?:er)?([0-9]+)/i', $filename, $mVer)) {
-                            $versionNum = (int)$mVer[1];
-                        } elseif (preg_match('/[_-]rev([0-9]+)/i', $filename, $mRev)) {
-                            $versionNum = (int)$mRev[1];
-                        }
-
-                        $relativeRelPath = 'uploads/documents/' . $folderName . '/' . $filename;
-
-                        $versions[] = [
-                            'version' => $versionNum,
-                            'version_label' => 'v' . $versionNum,
-                            'filename' => $filename,
-                            'ext' => $ext,
-                            'format' => in_array($ext, ['xlsx', 'xls']) ? 'excel' : ($ext === 'pdf' ? 'pdf' : 'image'),
-                            'file_path' => $relativeRelPath,
-                            'file_size' => filesize($filePath),
-                            'modified_at' => filemtime($filePath),
-                        ];
                     }
                 }
             }
 
-            // Sort versions descending: latest version first (v3, v2, v1)
+            // Sort versions descending: latest revision first (e.g., 02 > 01 > 00 or v2 > v1)
             usort($versions, function ($a, $b) {
                 if ($a['version'] === $b['version']) {
                     return $b['modified_at'] - $a['modified_at'];
@@ -109,11 +125,11 @@ if (!function_exists('get_part_documents_summary')) {
                 return $b['version'] - $a['version'];
             });
 
-            // Mark latest
+            // Mark latest version
             if (!empty($versions)) {
                 foreach ($versions as $idx => &$v) {
                     $v['is_latest'] = ($idx === 0);
-                    $v['version_label_full'] = $v['version_label'] . ($v['is_latest'] ? ' (Terbaru)' : '') . ' - ' . strtoupper($v['ext']);
+                    $v['version_label_full'] = $v['version_label'] . ($v['is_latest'] ? ' (Terbaru)' : '');
                 }
                 unset($v);
             }

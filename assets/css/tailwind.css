@@ -1496,3 +1496,72 @@ button,
   .slim-scrollbar::-webkit-scrollbar-thumb:hover {
     background: #94a3b8;
   }
+
+/* =========================================================
+   Unified Multi-Document Tab Signature Color Styling
+   ========================================================= */
+/* Active Tabs */
+.doc-tab-active-2d {
+  background-color: #2563eb !important;
+  border-color: #2563eb !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-3d {
+  background-color: #0e7490 !important;
+  border-color: #0e7490 !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-pi {
+  background-color: #4f46e5 !important;
+  border-color: #4f46e5 !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-qpoint {
+  background-color: #d97706 !important;
+  border-color: #d97706 !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-pac {
+  background-color: #059669 !important;
+  border-color: #059669 !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-standar_packing {
+  background-color: #c2410c !important;
+  border-color: #c2410c !important;
+  color: #ffffff !important;
+}
+.doc-tab-active-2d,
+.doc-tab-active-3d,
+.doc-tab-active-pi,
+.doc-tab-active-qpoint,
+.doc-tab-active-pac,
+.doc-tab-active-standar_packing {
+  color: #ffffff !important;
+}
+
+.doc-tab-active-2d svg,
+.doc-tab-active-3d svg,
+.doc-tab-active-pi svg,
+.doc-tab-active-qpoint svg,
+.doc-tab-active-pac svg,
+.doc-tab-active-standar_packing svg {
+  color: #ffffff !important;
+  stroke: #ffffff !important;
+}
+
+/* Inactive Tab Icons */
+.doc-icon-2d { color: #2563eb !important; }
+.doc-icon-3d { color: #0891b2 !important; }
+.doc-icon-pi { color: #4f46e5 !important; }
+.doc-icon-qpoint { color: #f59e0b !important; }
+.doc-icon-pac { color: #059669 !important; }
+.doc-icon-standar_packing { color: #ea580c !important; }
+
+/* Inactive Tab Hover States */
+.doc-tab-hover-2d:hover { background-color: #eff6ff !important; border-color: #60a5fa !important; color: #1e40af !important; }
+.doc-tab-hover-3d:hover { background-color: #ecfeff !important; border-color: #22d3ee !important; color: #155e75 !important; }
+.doc-tab-hover-pi:hover { background-color: #eef2ff !important; border-color: #818cf8 !important; color: #3730a3 !important; }
+.doc-tab-hover-qpoint:hover { background-color: #fffbeb !important; border-color: #fbbf24 !important; color: #92400e !important; }
+.doc-tab-hover-pac:hover { background-color: #ecfdf5 !important; border-color: #34d399 !important; color: #065f46 !important; }
+.doc-tab-hover-standar_packing:hover { background-color: #fff7ed !important; border-color: #fb923c !important; color: #9a3412 !important; }

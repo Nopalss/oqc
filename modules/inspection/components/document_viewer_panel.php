@@ -16,52 +16,52 @@ $initialDocs = $currPartCode ? get_part_documents_summary($currPartCode) : [];
     <div class="px-3 py-1.5 bg-slate-50/90 border-b border-slate-200 flex items-center justify-between flex-shrink-0 gap-2">
         
         <!-- Tab Switcher (Scrollable if screen is narrow) -->
-        <div class="flex items-center space-x-1 bg-slate-200/70 p-1 rounded-xl overflow-x-auto custom-scrollbar flex-shrink-0 max-w-[70vw]">
+        <div class="flex items-center space-x-1.5 overflow-x-auto custom-scrollbar flex-shrink-0 max-w-[70vw] py-0.5">
             
-            <!-- 1. Tab 2D PDF -->
-            <button type="button" id="tab-btn-2d" onclick="switchDocumentTab('2d')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs flex items-center whitespace-nowrap">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <!-- 1. Tab 2D PDF (Signature: Royal Blue) -->
+            <button type="button" id="tab-btn-2d" onclick="switchDocumentTab('2d')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all border shadow-xs flex items-center whitespace-nowrap cursor-pointer doc-tab-active-2d">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
                 </svg>
                 <span>Gambar 2D</span>
             </button>
 
-            <!-- 2. Tab 3D STP -->
-            <button type="button" id="tab-btn-3d" onclick="switchDocumentTab('3d')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <!-- 2. Tab 3D STP (Signature: Cyan / Sky Blue) -->
+            <button type="button" id="tab-btn-3d" onclick="switchDocumentTab('3d')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer doc-tab-hover-3d">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-3d" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
                 </svg>
                 <span>Tampilan 3D</span>
             </button>
 
-            <span class="text-slate-300 mx-0.5">|</span>
+            <span class="text-slate-300 mx-0.5 select-none">|</span>
 
-            <!-- 3. Tab PI -->
-            <button type="button" id="tab-btn-pi" onclick="switchDocumentTab('pi')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap relative">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+            <!-- 3. Tab PI (Signature: Indigo) -->
+            <button type="button" id="tab-btn-pi" onclick="switchDocumentTab('pi')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer relative doc-tab-hover-pi">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-pi" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                 <span>PI</span>
-                <span id="tab-dot-pi" class="w-1.5 h-1.5 rounded-full bg-emerald-500 ml-1.5 hidden" title="File tersedia"></span>
+                <span id="tab-dot-pi" class="w-2 h-2 rounded-full ml-1.5 hidden shadow-2xs" style="background-color: #4f46e5;" title="File tersedia"></span>
             </button>
 
-            <!-- 4. Tab Q-Point -->
-            <button type="button" id="tab-btn-qpoint" onclick="switchDocumentTab('qpoint')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap relative">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            <!-- 4. Tab Q-Point (Signature: Amber / Gold QC Warning) -->
+            <button type="button" id="tab-btn-qpoint" onclick="switchDocumentTab('qpoint')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer relative doc-tab-hover-qpoint">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-qpoint" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
                 <span>Q-Point</span>
-                <span id="tab-dot-qpoint" class="w-1.5 h-1.5 rounded-full bg-emerald-500 ml-1.5 hidden" title="File tersedia"></span>
+                <span id="tab-dot-qpoint" class="w-2 h-2 rounded-full ml-1.5 hidden shadow-2xs" style="background-color: #d97706;" title="File tersedia"></span>
             </button>
 
-            <!-- 5. Tab PAC -->
-            <button type="button" id="tab-btn-pac" onclick="switchDocumentTab('pac')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap relative">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+            <!-- 5. Tab PAC (Signature: Emerald Green Approval) -->
+            <button type="button" id="tab-btn-pac" onclick="switchDocumentTab('pac')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer relative doc-tab-hover-pac">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-pac" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
                 <span>PAC</span>
-                <span id="tab-dot-pac" class="w-1.5 h-1.5 rounded-full bg-emerald-500 ml-1.5 hidden" title="File tersedia"></span>
+                <span id="tab-dot-pac" class="w-2 h-2 rounded-full ml-1.5 hidden shadow-2xs" style="background-color: #059669;" title="File tersedia"></span>
             </button>
 
-            <!-- 6. Tab Standar Packing -->
-            <button type="button" id="tab-btn-standar_packing" onclick="switchDocumentTab('standar_packing')" class="px-2.5 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center whitespace-nowrap relative">
-                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
+            <!-- 6. Tab Standar Packing (Signature: Warm Orange / Bronze Packaging) -->
+            <button type="button" id="tab-btn-standar_packing" onclick="switchDocumentTab('standar_packing')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer relative doc-tab-hover-standar_packing">
+                <svg class="w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-standar_packing" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
                 <span>Standar Packing</span>
-                <span id="tab-dot-standar_packing" class="w-1.5 h-1.5 rounded-full bg-emerald-500 ml-1.5 hidden" title="File tersedia"></span>
+                <span id="tab-dot-standar_packing" class="w-2 h-2 rounded-full ml-1.5 hidden shadow-2xs" style="background-color: #c2410c;" title="File tersedia"></span>
             </button>
 
         </div>

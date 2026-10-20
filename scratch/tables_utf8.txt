@@ -1,0 +1,15 @@
+﻿aql_standards
+daily_inspection_data
+defect_types
+inspection_ng_records
+inspection_samples
+inspection_session_lots
+inspection_sessions
+kanban_batches
+kanban_items
+leftover
+lot_substitution_log
+master_models
+master_parts
+roles
+users

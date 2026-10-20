@@ -260,10 +260,10 @@ if (!function_exists('renderLotStatusBadge')) {
 
         // 3. Reinspection Passed check
         if ($isReinspect) {
-            if ($res === 'passed' || ($lot['status_code'] ?? '') === 'passed' || $st === 'passed' || $st === 'reinspected') {
+            if ($res === 'passed' || ($lot['status_code'] ?? '') === 'passed' || $st === 'passed') {
                 return '<span style="background-color: #16a34a; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(22, 163, 74, 0.3); text-transform: uppercase; white-space: nowrap;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="stroke: #ffffff; flex-shrink: 0;"><polyline points="20 6 9 17 4 12"/></svg> PASSED (RE-INSPEKSI)</span>';
             }
-            return '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(217, 119, 6, 0.3); text-transform: uppercase; white-space: nowrap;">BERJALAN</span>';
+            return '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px; box-shadow: 0 1px 2px rgba(217, 119, 6, 0.3); text-transform: uppercase; white-space: nowrap;">BERJALAN (RE-INSPEKSI)</span>';
         }
 
         // 4. Safety Stock Passed check
@@ -465,11 +465,14 @@ if ($pdo) {
             ");
             if ($stmtSubst) {
                 while ($sub = $stmtSubst->fetch(PDO::FETCH_ASSOC)) {
-                    if (!empty($sub['ng_session_lot_id'])) {
-                        $substByLot[(int)$sub['ng_session_lot_id']][] = $sub;
+                    $ngLotId = !empty($sub['ng_session_lot_id']) ? (int)$sub['ng_session_lot_id'] : 0;
+                    $repLotId = !empty($sub['replacement_session_lot_id']) ? (int)$sub['replacement_session_lot_id'] : 0;
+
+                    if ($ngLotId > 0) {
+                        $substByLot[$ngLotId][] = $sub;
                     }
-                    if (!empty($sub['replacement_session_lot_id'])) {
-                        $substByLot[(int)$sub['replacement_session_lot_id']][] = $sub;
+                    if ($repLotId > 0 && $repLotId !== $ngLotId) {
+                        $substByLot[$repLotId][] = $sub;
                     }
                 }
             }
@@ -546,8 +549,14 @@ if ($pdo) {
 
                     if ($hasSubst) {
                         $sortLogs = [];
+                        $seenLogIds = [];
                         foreach ($substByLot[$lotId] as $log) {
+                            $logId = (int)($log['id'] ?? 0);
                             if (($log['action_type'] ?? '') === 'sort_reinspect') {
+                                if ($logId > 0 && isset($seenLogIds[$logId])) {
+                                    continue;
+                                }
+                                if ($logId > 0) $seenLogIds[$logId] = true;
                                 $sortLogs[] = $log;
                             }
                         }
@@ -648,8 +657,8 @@ if ($pdo) {
                                     } else {
                                         $att['lot_result'] = 'in_progress';
                                         $att['status_badge'] = 'IN PROGRESS (Re-inspeksi)';
-                                        $att['status_label'] = 'IN PROGRESS (RE-INSPEKSI)';
-                                        $att['action_notes'] = $log['notes'] ?: 'Dalam proses re-inspeksi fisik.';
+                                        $att['status_label'] = 'BERJALAN (RE-INSPEKSI)';
+                                        $att['action_notes'] = $log['notes'] ?: 'Part NG disortir dan ditukar -> Sedang dalam proses re-inspeksi fisik.';
                                     }
                                 } else {
                                     // Earlier re-inspection attempt that failed

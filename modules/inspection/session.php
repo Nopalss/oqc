@@ -104,12 +104,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
         $stmtPy->execute([':py_date' => $todayDate]);
         $pendingYesterdayCount = (int)$stmtPy->fetchColumn();
 
-        // 2.A Hitung 5 KPI Utama Status (Disesuaikan dengan Scope / Batch yang Sedang Dipilih)
+        // 2.A Hitung KPI Utama Status (Disesuaikan dengan Scope / Batch yang Sedang Dipilih)
         $kpiStats = [
             'total'       => 0,
+            'uncompleted' => 0,
             'uninspected' => 0,
+            'partial'     => 0,
+            'active'      => 0,
             'in_progress' => 0,
             'completed'   => 0,
+            'remain'      => (int)$pendingYesterdayCount,
             'rejected'    => 0
         ];
         try {
@@ -120,17 +124,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
             ];
             $kpiParams = [];
 
-            if ($scopeFilter === 'pending_yesterday') {
-                $kpiWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :kpi_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
-                $kpiParams[':kpi_py_date'] = $todayDate;
-            } elseif ($scopeFilter === 'today') {
-                $kpiWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kpi_today";
-                $kpiParams[':kpi_today'] = $todayDate;
-                if ($batchFilter !== 'all' && is_numeric($batchFilter)) {
-                    $kpiWhere[] = "k.batch_id = :kpi_batch_id";
-                    $kpiParams[':kpi_batch_id'] = (int)$batchFilter;
-                }
-            } elseif ($batchFilter !== 'all' && is_numeric($batchFilter)) {
+            // KPI stats selalu berpatokan pada jadwal hari ini (Fixed Base) agar tidak ter-reset saat filter REMAIN aktif
+            $kpiWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kpi_today";
+            $kpiParams[':kpi_today'] = $todayDate;
+            if ($scopeFilter !== 'pending_yesterday' && $batchFilter !== 'all' && is_numeric($batchFilter)) {
                 $kpiWhere[] = "k.batch_id = :kpi_batch_id";
                 $kpiParams[':kpi_batch_id'] = (int)$batchFilter;
             }
@@ -140,8 +137,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
             $stmtKpi = $pdo->prepare("
                 SELECT 
                     COUNT(DISTINCT k.id) as total_count,
-                    SUM(CASE WHEN k.status IN ('uninspected', 'pending') OR (k.status IS NULL) THEN 1 ELSE 0 END) as uninspected_count,
-                    SUM(CASE WHEN k.status IN ('in_progress', 'partial') THEN 1 ELSE 0 END) as in_progress_count,
+                    SUM(CASE WHEN (k.status IN ('uninspected', 'pending') OR k.status IS NULL) AND NOT EXISTS (
+                        SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                    ) THEN 1 ELSE 0 END) as uninspected_count,
+                    SUM(CASE WHEN k.status = 'partial' THEN 1 ELSE 0 END) as partial_count,
+                    SUM(CASE WHEN EXISTS (
+                        SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                    ) THEN 1 ELSE 0 END) as active_count,
+                    SUM(CASE WHEN k.status IN ('in_progress', 'partial') OR EXISTS (
+                        SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                    ) THEN 1 ELSE 0 END) as in_progress_count,
                     SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
                     SUM(CASE WHEN k.status = 'rejected' OR EXISTS (
                         SELECT 1 FROM inspection_sessions s_ng 
@@ -157,8 +162,12 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
             if ($kRow) {
                 $kpiStats['total']       = (int)($kRow['total_count'] ?? 0);
                 $kpiStats['uninspected'] = (int)($kRow['uninspected_count'] ?? 0);
+                $kpiStats['partial']     = (int)($kRow['partial_count'] ?? 0);
+                $kpiStats['uncompleted'] = $kpiStats['uninspected'] + $kpiStats['partial'];
+                $kpiStats['active']      = (int)($kRow['active_count'] ?? 0);
                 $kpiStats['in_progress'] = (int)($kRow['in_progress_count'] ?? 0);
                 $kpiStats['completed']   = (int)($kRow['completed_count'] ?? 0);
+                $kpiStats['remain']      = (int)$pendingYesterdayCount;
                 $kpiStats['rejected']    = (int)($kRow['rejected_count'] ?? 0);
             }
         } catch (Exception $eKpi) {}
@@ -1271,6 +1280,8 @@ require_once __DIR__ . '/../../layouts/header.php';
         <!-- Hidden Inputs -->
         <input type="hidden" id="modal-reinsp-lot-id" value="">
         <input type="hidden" id="modal-reinsp-part-code" value="">
+        <input type="hidden" id="modal-reinsp-target-lot" value="">
+        <input type="hidden" id="modal-reinsp-target-ref" value="">
 
         <!-- Tab Selector: Opsi 1 (Ganti Box) vs Opsi 2 (Sortir) -->
         <div style="display: flex; border-bottom: 1px solid #e2e8f0; background-color: #f8fafc;">
@@ -1660,44 +1671,47 @@ require_once __DIR__ . '/../../layouts/header.php';
                     </div>
                 </div>
 
-                <!-- Stat 2: Belum Mulai (Khas: Slate Gradient) -->
-                <div id="kpi-btn-uninspected" onclick="filterModalByStatus('uninspected')" 
+                <!-- Stat 2: Belum Selesai (Khas: Slate Gradient) -->
+                <div id="kpi-btn-uncompleted" onclick="filterModalByStatus('uncompleted')" 
                      class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
                      style="background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%); border: 1px solid #cbd5e1; border-left: 4.5px solid #64748b;" 
-                     title="Klik untuk filter Kanban Belum Mulai">
+                     title="Klik untuk filter Belum Selesai (Total Belum Mulai + Parsial)">
                     <div class="flex items-center justify-between gap-1">
-                        <span class="text-[8.5px] font-black text-slate-700 uppercase tracking-wider truncate">BELUM MULAI</span>
+                        <span class="text-[8.5px] font-black text-slate-700 uppercase tracking-wider truncate">BELUM SELESAI</span>
                         <span class="w-4 h-4 rounded bg-slate-200/90 text-slate-600 flex items-center justify-center flex-shrink-0">
                             <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                         </span>
                     </div>
                     <div class="mt-0.5 flex items-baseline gap-1">
-                        <span id="kpi-val-uninspected" class="text-sm font-black text-slate-800 font-mono">0</span>
+                        <span id="kpi-val-uncompleted" class="text-sm font-black text-slate-800 font-mono">0</span>
                         <span class="text-[9.5px] font-bold text-slate-500">Kanban</span>
+                    </div>
+                    <div id="kpi-sub-uncompleted" class="text-[8px] text-slate-500 font-semibold mt-0.5 leading-tight truncate">
+                        0 Belum Mulai • 0 Parsial
                     </div>
                 </div>
 
-                <!-- Stat 3: Sedang Berjalan (Khas: Amber Gradient) -->
-                <div id="kpi-btn-in_progress" onclick="filterModalByStatus('in_progress')" 
-                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                <!-- Stat 3: Sedang Dikerjakan (Khas: Amber Gradient) -->
+                <div id="kpi-btn-active" onclick="filterModalByStatus('active')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[115px]"
                      style="background: linear-gradient(135deg, #fef3c7 0%, #ffedd5 100%); border: 1px solid #fcd34d; border-left: 4.5px solid #f59e0b;" 
-                     title="Klik untuk filter Kanban Sedang Berjalan">
+                     title="Klik untuk filter Kanban yang sedang aktif dikerjakan oleh operator">
                     <div class="flex items-center justify-between gap-1">
-                        <span class="text-[8.5px] font-black text-amber-900 uppercase tracking-wider truncate">BERJALAN</span>
+                        <span class="text-[8.5px] font-black text-amber-900 uppercase tracking-wider truncate">SEDANG DIKERJAKAN</span>
                         <span class="w-4 h-4 rounded bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0 relative">
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping absolute"></span>
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
                         </span>
                     </div>
                     <div class="mt-0.5 flex items-baseline gap-1">
-                        <span id="kpi-val-in_progress" class="text-sm font-black text-amber-950 font-mono">0</span>
+                        <span id="kpi-val-active" class="text-sm font-black text-amber-950 font-mono">0</span>
                         <span class="text-[9.5px] font-bold text-amber-700">Kanban</span>
                     </div>
                 </div>
 
                 <!-- Stat 4: Selesai (Khas: Emerald Gradient) -->
                 <div id="kpi-btn-completed" onclick="filterModalByStatus('completed')" 
-                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[110px]"
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[100px]"
                      style="background: linear-gradient(135deg, #dcfce7 0%, #d1fae5 100%); border: 1px solid #86efac; border-left: 4.5px solid #10b981;" 
                      title="Klik untuk filter Kanban Selesai">
                     <div class="flex items-center justify-between gap-1">
@@ -1712,9 +1726,26 @@ require_once __DIR__ . '/../../layouts/header.php';
                     </div>
                 </div>
 
-                <!-- Stat 5: Lot NG / Tindakan (Khas: Rose Gradient) -->
+                <!-- Stat 5: Remain (Tunggakan / Sisa Kemarin) (Khas: Indigo Gradient) -->
+                <div id="kpi-btn-remain" onclick="filterModalByStatus('remain')" 
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[105px]"
+                     style="background: linear-gradient(135deg, #ede9fe 0%, #e0e7ff 100%); border: 1px solid #c7d2fe; border-left: 4.5px solid #6366f1;" 
+                     title="Klik untuk melihat Kanban jadwal kemarin yang belum selesai / parsial">
+                    <div class="flex items-center justify-between gap-1">
+                        <span class="text-[8.5px] font-black text-indigo-900 uppercase tracking-wider truncate">REMAIN</span>
+                        <span class="w-4 h-4 rounded bg-indigo-200/80 text-indigo-800 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-0.5 flex items-baseline gap-1">
+                        <span id="kpi-val-remain" class="text-sm font-black text-indigo-950 font-mono">0</span>
+                        <span class="text-[9.5px] font-bold text-indigo-700">Kanban</span>
+                    </div>
+                </div>
+
+                <!-- Stat 6: Lot NG / Tindakan (Khas: Rose Gradient) -->
                 <div id="kpi-btn-rejected" onclick="filterModalByStatus('rejected')" 
-                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[125px]"
+                     class="kpi-interactive-card rounded-lg p-2 shadow-2xs flex-1 min-w-[115px]"
                      style="background: linear-gradient(135deg, #ffe4e6 0%, #fecdd3 100%); border: 1px solid #fda4af; border-left: 4.5px solid #e11d48;" 
                      title="Klik untuk filter Kanban dengan Lot NG / Tindakan">
                     <div class="flex items-center justify-between gap-1">
@@ -1916,15 +1947,12 @@ require_once __DIR__ . '/../../layouts/header.php';
                                 <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path></svg>
                                 <span>SCAN BARCODE / QR LABEL</span>
                             </label>
-                            <button type="button" id="btn-toggle-manual-form" onclick="toggleManualFormVisibility()" style="font-size: 10px; font-weight: 700; color: #475569; background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 5px; padding: 2px 7px; cursor: pointer;" title="Klik jika scanner barcode rusak untuk input manual">
-                                ⌨️ Input Manual
-                            </button>
                         </div>
                         <input type="text" id="scan-qr-raw" autofocus oninput="parseBarcodeQRInput(this.value, false)" onkeydown="handleScanInputKeydown(event)" placeholder="Tempel / Scan Barcode Label di sini..." style="width: 100%; padding: 8px 12px; font-family: monospace; font-size: 13px; font-weight: 800; border: 1.5px solid #93c5fd; border-radius: 7px; outline: none; background-color: #f8fafc; color: #0f172a; box-sizing: border-box;" class="focus:bg-white focus:border-blue-600" autocomplete="off">
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px; font-size: 10px; color: #64748b;">
                             <span>Sistem membaca Ref No, Lot No, Qty otomatis</span>
-                            <button type="button" id="btn-toggle-autostart" onclick="toggleAutoStartMode()" style="color: #2563eb; font-weight: 800; background: none; border: none; cursor: pointer;">
-                                ⚡ Mode Auto-Start
+                            <button type="button" id="btn-toggle-manual-form" onclick="toggleManualFormVisibility()" style="font-size: 10px; font-weight: 700; color: #475569; background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 5px; padding: 2px 7px; cursor: pointer;" title="Klik jika scanner barcode rusak untuk input manual">
+                                ⌨️ Input Manual
                             </button>
                         </div>
                     </div>
@@ -5079,17 +5107,25 @@ function refreshPlanningItemsAjax(autoSelectId, isForce, onComplete) {
 var currentModalStatusFilter = 'all';
 
 function renderModalKpiSummary(kpi, userStats) {
-    // 1. Update 5 Kartu KPI
+    // 1. Update 6 Kartu KPI
     var valTotal = document.getElementById('kpi-val-total');
-    var valUninsp = document.getElementById('kpi-val-uninspected');
-    var valInProg = document.getElementById('kpi-val-in_progress');
+    var valUncompleted = document.getElementById('kpi-val-uncompleted');
+    var subUncompleted = document.getElementById('kpi-sub-uncompleted');
+    var valActive = document.getElementById('kpi-val-active');
     var valDone = document.getElementById('kpi-val-completed');
+    var valRemain = document.getElementById('kpi-val-remain');
     var valRej = document.getElementById('kpi-val-rejected');
 
+    var uninsp = parseInt(kpi.uninspected) || 0;
+    var partial = parseInt(kpi.partial) || 0;
+    var uncompleted = (typeof kpi.uncompleted !== 'undefined') ? (parseInt(kpi.uncompleted) || 0) : (uninsp + partial);
+
     if (valTotal) valTotal.textContent = (parseInt(kpi.total) || 0).toLocaleString();
-    if (valUninsp) valUninsp.textContent = (parseInt(kpi.uninspected) || 0).toLocaleString();
-    if (valInProg) valInProg.textContent = (parseInt(kpi.in_progress) || 0).toLocaleString();
+    if (valUncompleted) valUncompleted.textContent = uncompleted.toLocaleString();
+    if (subUncompleted) subUncompleted.textContent = uninsp.toLocaleString() + ' Belum Mulai • ' + partial.toLocaleString() + ' Parsial';
+    if (valActive) valActive.textContent = (parseInt(kpi.active) || 0).toLocaleString();
     if (valDone) valDone.textContent = (parseInt(kpi.completed) || 0).toLocaleString();
+    if (valRemain) valRemain.textContent = (parseInt(kpi.remain) || 0).toLocaleString();
     if (valRej) valRej.textContent = (parseInt(kpi.rejected) || 0).toLocaleString();
 
     // 2. Update Personal Work Tracker (Pencapaian Saya Hari Ini)
@@ -5107,6 +5143,22 @@ function renderModalKpiSummary(kpi, userStats) {
 }
 
 function filterModalByStatus(status) {
+    if (status === 'remain') {
+        // Klik REMAIN langsung switch batch scope ke pending_yesterday (sisa kemarin)
+        setModalBatchScope('pending_yesterday', 'all');
+        return;
+    }
+
+    // Jika sebelumnya sedang di scope pending_yesterday lalu klik status lain, kembalikan scope ke today
+    if (currentModalScope === 'pending_yesterday') {
+        currentModalScope = 'today';
+        currentModalBatchId = 'all';
+        currentModalStatusFilter = status || 'all';
+        updateKpiActiveCardStyles();
+        refreshPlanningItemsAjax();
+        return;
+    }
+
     // Jika status yang sama diklik lagi, toggle kembali ke 'all'
     if (currentModalStatusFilter === status && status !== 'all') {
         currentModalStatusFilter = 'all';
@@ -5118,13 +5170,20 @@ function filterModalByStatus(status) {
 }
 
 function updateKpiActiveCardStyles() {
-    var kpiTypes = ['all', 'uninspected', 'in_progress', 'completed', 'rejected', 'my_kanban'];
+    var kpiTypes = ['all', 'uncompleted', 'active', 'completed', 'remain', 'rejected', 'my_kanban'];
     kpiTypes.forEach(function(t) {
         var card = document.getElementById('kpi-btn-' + t);
         if (!card) return;
-        if (t === currentModalStatusFilter) {
+        var isActive = false;
+        if (t === 'remain') {
+            isActive = (currentModalScope === 'pending_yesterday');
+        } else {
+            isActive = (t === currentModalStatusFilter);
+        }
+
+        if (isActive) {
             card.classList.add('kpi-active-selected');
-            card.style.outline = (t === 'my_kanban') ? '2.5px solid #6366f1' : '2.5px solid #2563eb';
+            card.style.outline = (t === 'my_kanban' || t === 'remain') ? '2.5px solid #6366f1' : '2.5px solid #2563eb';
             card.style.outlineOffset = '2px';
         } else {
             card.classList.remove('kpi-active-selected');
@@ -5357,11 +5416,17 @@ function renderPlanningTableRows(items) {
         var availSsQty = parseInt(k.avail_ss_qty) || 0;
 
         var isMyKb = (parseInt(k.is_my_kanban) === 1 || (k.active_inspector_name && k.active_inspector_name.toLowerCase() === '<?= strtolower(addslashes($currentUser['name'] ?? '')) ?>')) ? '1' : '0';
+        var hasActiveSess = !!k.active_session_id;
+        var isPartial = (progressPct > 0 && progressPct < 100);
+        var isUncompleted = (!isCompleted);
 
         html += '<tr class="kanban-table-row transition-colors" ' +
                     'style="' + rowStyle + '" ' +
                     'data-kanban-id="' + kid + '" ' +
                     'data-status-group="' + statusGroup + '" ' +
+                    'data-is-active="' + (hasActiveSess ? '1' : '0') + '" ' +
+                    'data-is-partial="' + (isPartial ? '1' : '0') + '" ' +
+                    'data-is-uncompleted="' + (isUncompleted ? '1' : '0') + '" ' +
                     'data-is-my-kanban="' + isMyKb + '" ' +
                     'data-part-code="' + pCode.toLowerCase() + '" ' +
                     'data-part-name="' + pDesc.toLowerCase() + '" ' +
@@ -5632,25 +5697,8 @@ function closeSubstitutionLogModal() {
 var is3dViewerInitialized = false;
 
 function switchDrawingTab(tab) {
-    var btn2d = document.getElementById('tab-btn-2d');
-    var btn3d = document.getElementById('tab-btn-3d');
-    var box2d = document.getElementById('viewport-2d');
-    var box3d = document.getElementById('viewport-3d');
-
-    if (tab === '2d') {
-        btn2d.className = 'px-3 py-1 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs flex items-center';
-        btn3d.className = 'px-3 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center';
-        box2d.classList.remove('hidden');
-        box3d.classList.add('hidden');
-    } else {
-        btn3d.className = 'px-3 py-1 rounded-lg text-xs font-bold transition-all bg-blue-600 text-white shadow-xs flex items-center';
-        btn2d.className = 'px-3 py-1 rounded-lg text-xs font-bold transition-all text-slate-700 hover:text-slate-900 hover:bg-slate-300/50 flex items-center';
-        box3d.classList.remove('hidden');
-        box2d.classList.add('hidden');
-
-        if (!is3dViewerInitialized) {
-            init3dViewer();
-        }
+    if (typeof switchDocumentTab === 'function') {
+        switchDocumentTab(tab);
     }
 }
 
@@ -6534,13 +6582,19 @@ function filterPlanningItems() {
             matchesSearch = (query === '' || text.indexOf(query) !== -1 || rowCode.indexOf(query) !== -1 || rowKbNo.indexOf(query) !== -1 || rowCust.indexOf(query) !== -1);
         }
 
-        // Filter status berdasarkan KPI card / Work Tracker yang aktif (all, uninspected, in_progress, completed, rejected, my_kanban)
+        // Filter status berdasarkan KPI card / Work Tracker yang aktif (all, uncompleted, active, completed, rejected, my_kanban)
         var rowStatusGroup = row.getAttribute('data-status-group') || 'uninspected';
         var isRowMyKanban = (row.getAttribute('data-is-my-kanban') === '1');
+        var isRowUncompleted = (row.getAttribute('data-is-uncompleted') === '1');
+        var isRowActive = (row.getAttribute('data-is-active') === '1');
         var matchesStatus = false;
 
         if (currentModalStatusFilter === 'all') {
             matchesStatus = true;
+        } else if (currentModalStatusFilter === 'uncompleted') {
+            matchesStatus = isRowUncompleted;
+        } else if (currentModalStatusFilter === 'active') {
+            matchesStatus = isRowActive;
         } else if (currentModalStatusFilter === 'my_kanban') {
             matchesStatus = isRowMyKanban;
         } else {
@@ -6866,7 +6920,11 @@ function loadWorkbenchSessionData(sessionId, onLoadedCallback) {
             if (data.session) {
                 currentSessionObj = data.session;
                 if (data.session.part_code) {
-                    currentSessionPartCode = data.session.part_code;
+                    currentSessionPartCode = String(data.session.part_code).trim();
+                    // Auto-load & refresh documents (PI, Q-Point, PAC, Standar Packing) on workbench load
+                    if (typeof fetchPartDocuments === 'function') {
+                        fetchPartDocuments(currentSessionPartCode);
+                    }
                 }
             }
 
@@ -9027,9 +9085,13 @@ function navigateLotDefectDropdown(e, inputEl) {
     if (!wrapEl) return;
     var listEl = wrapEl.querySelector('.lot-defect-dropdown-list');
     if (!listEl || listEl.style.display !== 'block') {
-        if (e.key === 'ArrowDown' || e.key === 'Enter') {
+        if (e.key === 'ArrowDown') {
             openLotDefectDropdown(inputEl);
             e.preventDefault();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            // Dropdown tertutup -> User menekan Enter untuk mengirimkan form temuan NG
+            submitLotDefectForm();
         }
         return;
     }
@@ -10087,6 +10149,11 @@ function openLotReinspectionModal(lotId, lotNumber, refNumber, qty) {
     var partCodeInput = document.getElementById('reinsp-part-code');
     if (partCodeInput) partCodeInput.value = effectivePartCode;
 
+    var targetLotEl = document.getElementById('modal-reinsp-target-lot');
+    if (targetLotEl) targetLotEl.value = (lotNumber || '').trim();
+    var targetRefEl = document.getElementById('modal-reinsp-target-ref');
+    if (targetRefEl) targetRefEl.value = (refNumber || '').trim();
+
     var subtitle = document.getElementById('modal-reinsp-lot-subtitle');
     if (subtitle) {
         var subText = 'Lot #' + (lotNumber || '-');
@@ -10223,6 +10290,50 @@ function handleLotReinspQrInput(inputEl, force) {
     var hasNewline = (val.includes('\n') || val.includes('\r'));
     if (force || hasNewline) {
         inputEl.value = '';
+
+        // ══════════════════════════════════════════════════════════════════════
+        // SMART DETEKSI: KASUS LABEL SAMA PERSIS DENGAN LOT YANG SEDANG DIREINSPEKSI
+        // Jika Lot No dan Ref No yang discan sama dengan lot yang sedang NG:
+        // Ini adalah alur SORTIR / GANTI PART NG SAJA (Box fisiknya sama)!
+        // ══════════════════════════════════════════════════════════════════════
+        var targetLot = (document.getElementById('modal-reinsp-target-lot') ? document.getElementById('modal-reinsp-target-lot').value.trim() : '').toUpperCase();
+        var targetRef = (document.getElementById('modal-reinsp-target-ref') ? document.getElementById('modal-reinsp-target-ref').value.trim() : '').toUpperCase();
+        var scannedLot = (parsed.Z2 || '').trim().toUpperCase();
+        var scannedRef = (parsed.Z5 || '').trim().toUpperCase();
+
+        var isSameLotBox = (scannedLot && scannedLot === targetLot) && (!targetRef || scannedRef === targetRef);
+
+        if (isSameLotBox) {
+            // Otomatis beralih ke tab Sortir (Ganti Part NG Saja)
+            switchLotReinspTab('sort');
+
+            Swal.fire({
+                title: 'BOX HASIL SORTIR TERDETEKSI',
+                html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
+                      '<p style="margin-bottom: 8px; color: #047857; font-weight: 700;">✅ Label yang Anda scan sama dengan box yang sedang di-reinspeksi (Lot #' + escapeHtml(parsed.Z2) + (parsed.Z5 ? ' | Ref #' + escapeHtml(parsed.Z5) : '') + ').</p>' +
+                      '<div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px; font-size: 11.5px; color: #166534; line-height: 1.5;">' +
+                      'Sistem mengarahkan ke alur <b>Ganti Part NG Saja (Sortir)</b>.<br>' +
+                      'Temuan NG pada box ini akan direset ke arsip sortir dan status box dikembalikan ke <b>Sedang Diinspeksi</b> untuk diuji ulang sampelnya.' +
+                      '</div>' +
+                      '</div>',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#059669',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: '✅ Ya, Mulai Uji Ulang Box Ini',
+                cancelButtonText: 'Batal'
+            }).then(function(res) {
+                if (res.isConfirmed) {
+                    executeLotReinspectionSubmit(true); // skip redundant confirm dialog
+                } else {
+                    switchLotReinspTab('replace');
+                    if (inputEl) inputEl.focus();
+                }
+            });
+            return;
+        }
+
+        // Jika label berbeda (Box Pengganti Baru): Lanjutkan ke validasi check_did_only & API replace_session_lot
         if (parsed.Z1 && parsed.Z2) {
             var reinspCheckUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only' +
                 '&part_code=' + encodeURIComponent(parsed.Z1) +
@@ -10390,7 +10501,7 @@ function handleLotReinspQrInput(inputEl, force) {
     }
 }
 
-function executeLotReinspectionSubmit() {
+function executeLotReinspectionSubmit(skipConfirm) {
     var lotId = parseInt(document.getElementById('modal-reinsp-lot-id').value) || 0;
     if (!lotId) {
         Swal.fire({ icon: 'error', title: 'Data Tidak Valid', text: 'ID Lot tidak ditemukan.' });
@@ -10464,21 +10575,7 @@ function executeLotReinspectionSubmit() {
     } else if (currentLotReinspTab === 'sort') {
         var sortNotes = (document.getElementById('reinsp-sort-notes').value || '').trim();
 
-        Swal.fire({
-            title: 'Mulai Uji Ulang Box?',
-            html: '<div style="font-size: 12px; text-align: left; line-height: 1.5; color: #334155;">' +
-                  'Pastikan semua part cacat/NG dalam box ini sudah disortir dan ditukar dengan part bagus.<br><br>' +
-                  'Temuan NG box ini akan direset ke 0 dan sampel fisik wajib diperiksa kembali.' +
-                  '</div>',
-            icon: 'question',
-            showCancelButton: true,
-            confirmButtonColor: '#d97706',
-            cancelButtonColor: '#64748b',
-            confirmButtonText: 'Ya, Mulai Uji Ulang',
-            cancelButtonText: 'Batal'
-        }).then(function(res) {
-            if (!res.isConfirmed) return;
-
+        var doSubmitSort = function() {
             Swal.fire({
                 title: 'Memproses...',
                 allowOutsideClick: false,
@@ -10514,7 +10611,29 @@ function executeLotReinspectionSubmit() {
                 console.error('Recheck sorted error:', err);
                 Swal.fire({ icon: 'error', title: 'Koneksi Error', text: 'Gagal menghubungi server.' });
             });
-        });
+        };
+
+        if (skipConfirm) {
+            doSubmitSort();
+        } else {
+            Swal.fire({
+                title: 'Mulai Uji Ulang Box?',
+                html: '<div style="font-size: 12px; text-align: left; line-height: 1.5; color: #334155;">' +
+                      'Pastikan semua part cacat/NG dalam box ini sudah disortir dan ditukar dengan part bagus.<br><br>' +
+                      'Temuan NG box ini akan direset ke 0 dan sampel fisik wajib diperiksa kembali.' +
+                      '</div>',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#d97706',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Ya, Mulai Uji Ulang',
+                cancelButtonText: 'Batal'
+            }).then(function(res) {
+                if (res.isConfirmed) {
+                    doSubmitSort();
+                }
+            });
+        }
     }
 }
 
@@ -11651,6 +11770,31 @@ function workbenchChiefUnapprove() {
             return;
         }
 
+        // ── KONDISI KHUSUS: MODAL CATAT NG PER LOT SEDANG TERBUKA ──
+        var defectModal = document.getElementById('modal-lot-defect');
+        var isDefectModalOpen = defectModal && (defectModal.style.display === 'flex' || defectModal.style.display === 'block');
+        if (isDefectModalOpen) {
+            // Jika dropdown list combobox sedang terbuka, biarkan navigateLotDefectDropdown menanganinya
+            var openDropdown = defectModal.querySelector('.lot-defect-dropdown-list[style*="display: block"]');
+            
+            // Enter -> Kirim / Submit Temuan NG (REJECTED)
+            if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+                if (!openDropdown) {
+                    e.preventDefault();
+                    submitLotDefectForm();
+                    return;
+                }
+            }
+            // Escape -> Batal / Tutup Modal NG
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeLotNgModal();
+                return;
+            }
+            // Jangan izinkan shortcut workbench lain (seperti Enter PASSED) tembus saat modal NG terbuka!
+            return;
+        }
+
         var scanInput = getActiveScanInput();
 
         // ── KONDISI A: TIDAK ADA MODAL SCAN / REINSPEKSI AKTIF (USER ADA DI WORKBENCH) ──
@@ -11842,6 +11986,6 @@ document.addEventListener('DOMContentLoaded', function() {
 <script src="<?= base_url('assets/js/vendor/OrbitControls.js') ?>"></script>
 <script src="<?= base_url('assets/js/vendor/occt-import-js.js') ?>"></script>
 <script src="<?= base_url('assets/js/cad_viewer.js') ?>"></script>
-<script src="<?= base_url('assets/js/modules/inspection_doc_viewer.js') ?>"></script>
+<script src="<?= base_url('assets/js/modules/inspection_doc_viewer.js?v=' . filemtime(__DIR__ . '/../../assets/js/modules/inspection_doc_viewer.js')) ?>"></script>
 </body>
 </html>

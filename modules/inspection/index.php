@@ -703,97 +703,84 @@ if ($pdo) {
         $ssBaseWhere[] = "(k.plan_type = 'safety_stock' OR k.check_type = 'Safety Stock' OR k.kanban_no LIKE 'SS-%' OR k.str_loc IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT') OR EXISTS (SELECT 1 FROM inspection_sessions s_ss WHERE s_ss.kanban_item_id = k.id AND s_ss.inspection_type = 'safety_stock'))";
 
         if ($period === 'today') {
-            $ssBaseWhere[] = "(
-                EXISTS (
-                    SELECT 1 FROM inspection_sessions s_today 
-                    WHERE s_today.kanban_item_id = k.id 
-                      AND (s_today.started_at BETWEEN :ss_t_start1 AND :ss_t_end1 OR s_today.status = 'in_progress')
-                )
-                OR (
-                    k.created_at BETWEEN :ss_t_start2 AND :ss_t_end2
-                )
+            $ssBaseWhere[] = "EXISTS (
+                SELECT 1 FROM inspection_sessions s_today 
+                JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_today.id
+                WHERE s_today.kanban_item_id = k.id 
+                  AND s_today.inspector_id = :ss_t_uid
+                  AND (s_today.started_at BETWEEN :ss_t_start1 AND :ss_t_end1 OR s_today.status = 'in_progress')
             )";
+            $ssBaseParams[':ss_t_uid']    = $currentUserId;
             $ssBaseParams[':ss_t_start1'] = $todayStart;
             $ssBaseParams[':ss_t_end1']   = $todayEnd;
-            $ssBaseParams[':ss_t_start2'] = $todayStart;
-            $ssBaseParams[':ss_t_end2']   = $todayEnd;
         } elseif ($period === 'this_week') {
-            $ssBaseWhere[] = "(
-                EXISTS (
-                    SELECT 1 FROM inspection_sessions s_week 
-                    WHERE s_week.kanban_item_id = k.id 
-                      AND (s_week.started_at BETWEEN :ss_w_start1 AND :ss_w_end1 OR s_week.status = 'in_progress')
-                )
-                OR (
-                    k.created_at BETWEEN :ss_w_start2 AND :ss_w_end2
-                )
+            $ssBaseWhere[] = "EXISTS (
+                SELECT 1 FROM inspection_sessions s_week 
+                JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_week.id
+                WHERE s_week.kanban_item_id = k.id 
+                  AND s_week.inspector_id = :ss_w_uid
+                  AND (s_week.started_at BETWEEN :ss_w_start1 AND :ss_w_end1 OR s_week.status = 'in_progress')
             )";
+            $ssBaseParams[':ss_w_uid']    = $currentUserId;
             $ssBaseParams[':ss_w_start1'] = $wStart;
             $ssBaseParams[':ss_w_end1']   = $wEnd;
-            $ssBaseParams[':ss_w_start2'] = $wStart;
-            $ssBaseParams[':ss_w_end2']   = $wEnd;
         } elseif ($period === 'this_month') {
-            $ssBaseWhere[] = "(
-                EXISTS (
-                    SELECT 1 FROM inspection_sessions s_month 
-                    WHERE s_month.kanban_item_id = k.id 
-                      AND (s_month.started_at BETWEEN :ss_m_start1 AND :ss_m_end1 OR s_month.status = 'in_progress')
-                )
-                OR (
-                    k.created_at BETWEEN :ss_m_start2 AND :ss_m_end2
-                )
+            $ssBaseWhere[] = "EXISTS (
+                SELECT 1 FROM inspection_sessions s_month 
+                JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_month.id
+                WHERE s_month.kanban_item_id = k.id 
+                  AND s_month.inspector_id = :ss_m_uid
+                  AND (s_month.started_at BETWEEN :ss_m_start1 AND :ss_m_end1 OR s_month.status = 'in_progress')
             )";
+            $ssBaseParams[':ss_m_uid']    = $currentUserId;
             $ssBaseParams[':ss_m_start1'] = $mStart;
             $ssBaseParams[':ss_m_end1']   = $mEnd;
-            $ssBaseParams[':ss_m_start2'] = $mStart;
-            $ssBaseParams[':ss_m_end2']   = $mEnd;
         } elseif ($period === 'custom') {
             if (!empty($startDate) && !empty($endDate)) {
-                $ssBaseWhere[] = "(
-                    EXISTS (
-                        SELECT 1 FROM inspection_sessions s_custom 
-                        WHERE s_custom.kanban_item_id = k.id 
-                          AND (s_custom.started_at BETWEEN :ss_c_start1 AND :ss_c_end1 OR s_custom.status = 'in_progress')
-                    )
-                    OR (
-                        k.created_at BETWEEN :ss_c_start2 AND :ss_c_end2
-                    )
+                $ssBaseWhere[] = "EXISTS (
+                    SELECT 1 FROM inspection_sessions s_custom 
+                    JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
+                    WHERE s_custom.kanban_item_id = k.id 
+                      AND s_custom.inspector_id = :ss_c_uid
+                      AND (s_custom.started_at BETWEEN :ss_c_start1 AND :ss_c_end1 OR s_custom.status = 'in_progress')
                 )";
                 $cStart = $startDate . ' 00:00:00';
                 $cEnd   = $endDate . ' 23:59:59';
+                $ssBaseParams[':ss_c_uid']    = $currentUserId;
                 $ssBaseParams[':ss_c_start1'] = $cStart;
                 $ssBaseParams[':ss_c_end1']   = $cEnd;
-                $ssBaseParams[':ss_c_start2'] = $cStart;
-                $ssBaseParams[':ss_c_end2']   = $cEnd;
             } elseif (!empty($startDate)) {
-                $ssBaseWhere[] = "(
-                    EXISTS (
-                        SELECT 1 FROM inspection_sessions s_custom 
-                        WHERE s_custom.kanban_item_id = k.id 
-                          AND (s_custom.started_at >= :ss_c_start1 OR s_custom.status = 'in_progress')
-                    )
-                    OR (
-                        k.created_at >= :ss_c_start2
-                    )
+                $ssBaseWhere[] = "EXISTS (
+                    SELECT 1 FROM inspection_sessions s_custom 
+                    JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
+                    WHERE s_custom.kanban_item_id = k.id 
+                      AND s_custom.inspector_id = :ss_c_uid
+                      AND (s_custom.started_at >= :ss_c_start1 OR s_custom.status = 'in_progress')
                 )";
                 $cStart = $startDate . ' 00:00:00';
+                $ssBaseParams[':ss_c_uid']    = $currentUserId;
                 $ssBaseParams[':ss_c_start1'] = $cStart;
-                $ssBaseParams[':ss_c_start2'] = $cStart;
             } elseif (!empty($endDate)) {
-                $ssBaseWhere[] = "(
-                    EXISTS (
-                        SELECT 1 FROM inspection_sessions s_custom 
-                        WHERE s_custom.kanban_item_id = k.id 
-                          AND (s_custom.started_at <= :ss_c_end1 OR s_custom.status = 'in_progress')
-                    )
-                    OR (
-                        k.created_at <= :ss_c_end2
-                    )
+                $ssBaseWhere[] = "EXISTS (
+                    SELECT 1 FROM inspection_sessions s_custom 
+                    JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
+                    WHERE s_custom.kanban_item_id = k.id 
+                      AND s_custom.inspector_id = :ss_c_uid
+                      AND (s_custom.started_at <= :ss_c_end1 OR s_custom.status = 'in_progress')
                 )";
                 $cEnd = $endDate . ' 23:59:59';
+                $ssBaseParams[':ss_c_uid']  = $currentUserId;
                 $ssBaseParams[':ss_c_end1'] = $cEnd;
-                $ssBaseParams[':ss_c_end2'] = $cEnd;
             }
+        } else {
+            // Period 'all' atau periode lainnya: wajib ada lot yang diinspeksi oleh user login
+            $ssBaseWhere[] = "EXISTS (
+                SELECT 1 FROM inspection_sessions s_all 
+                JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_all.id
+                WHERE s_all.kanban_item_id = k.id 
+                  AND s_all.inspector_id = :ss_all_uid
+            )";
+            $ssBaseParams[':ss_all_uid'] = $currentUserId;
         }
 
         // =====================================================================
@@ -1331,21 +1318,21 @@ if ($pdo) {
                 $ssBaseParams[':ss_s6'] = '%' . $search . '%';
             }
 
-            // Build Session Period Filter for Safety Stock
-            $sessWherePeriod = "";
+            // Build Session Period Filter for Safety Stock (khusus user yang sedang login)
+            $sessWherePeriod = " AND s.inspector_id = " . (int)$currentUserId;
             if ($period === 'today') {
-                $sessWherePeriod = " AND (s.started_at BETWEEN " . $pdo->quote($todayStart) . " AND " . $pdo->quote($todayEnd) . " OR s.status = 'in_progress')";
+                $sessWherePeriod .= " AND (s.started_at BETWEEN " . $pdo->quote($todayStart) . " AND " . $pdo->quote($todayEnd) . " OR s.status = 'in_progress')";
             } elseif ($period === 'this_week') {
-                $sessWherePeriod = " AND (s.started_at BETWEEN " . $pdo->quote($wStart) . " AND " . $pdo->quote($wEnd) . " OR s.status = 'in_progress')";
+                $sessWherePeriod .= " AND (s.started_at BETWEEN " . $pdo->quote($wStart) . " AND " . $pdo->quote($wEnd) . " OR s.status = 'in_progress')";
             } elseif ($period === 'this_month') {
-                $sessWherePeriod = " AND (s.started_at BETWEEN " . $pdo->quote($mStart) . " AND " . $pdo->quote($mEnd) . " OR s.status = 'in_progress')";
+                $sessWherePeriod .= " AND (s.started_at BETWEEN " . $pdo->quote($mStart) . " AND " . $pdo->quote($mEnd) . " OR s.status = 'in_progress')";
             } elseif ($period === 'custom') {
                 if (!empty($startDate) && !empty($endDate)) {
-                    $sessWherePeriod = " AND (s.started_at BETWEEN " . $pdo->quote($startDate . ' 00:00:00') . " AND " . $pdo->quote($endDate . ' 23:59:59') . " OR s.status = 'in_progress')";
+                    $sessWherePeriod .= " AND (s.started_at BETWEEN " . $pdo->quote($startDate . ' 00:00:00') . " AND " . $pdo->quote($endDate . ' 23:59:59') . " OR s.status = 'in_progress')";
                 } elseif (!empty($startDate)) {
-                    $sessWherePeriod = " AND (s.started_at >= " . $pdo->quote($startDate . ' 00:00:00') . " OR s.status = 'in_progress')";
+                    $sessWherePeriod .= " AND (s.started_at >= " . $pdo->quote($startDate . ' 00:00:00') . " OR s.status = 'in_progress')";
                 } elseif (!empty($endDate)) {
-                    $sessWherePeriod = " AND (s.started_at <= " . $pdo->quote($endDate . ' 23:59:59') . " OR s.status = 'in_progress')";
+                    $sessWherePeriod .= " AND (s.started_at <= " . $pdo->quote($endDate . ' 23:59:59') . " OR s.status = 'in_progress')";
                 }
             }
 
@@ -1570,6 +1557,7 @@ if ($pdo) {
                     LEFT JOIN master_models mm ON mm.id = mp.model_id
                     LEFT JOIN users u ON u.id = s.inspector_id
                     WHERE s.kanban_item_id IN ($inKanbanIds)
+                      AND s.inspector_id = {$currentUserId}
                       {$sessWherePeriod}
                     ORDER BY isl.id DESC
                 ";
@@ -1637,6 +1625,75 @@ if ($pdo) {
                     $ssPartLots[$pCode][] = $lRow;
                 }
             }
+
+            // Ambil data Part Safety Stock yang KELUAR / DIPAKAI oleh Kanban (untuk Tabel 2)
+            $ssUsedWhere = [
+                "s.inspector_id = :ss_u_uid",
+                "(
+                    isl.remarks LIKE '%Alokasi Safety Stock%' 
+                    OR isl.lot_status = 'safety_stock_alloc'
+                    OR s.use_safety_stock_qty > 0
+                )"
+            ];
+            $ssUsedParams = [
+                ':ss_u_uid' => (int)$currentUserId
+            ];
+
+            if ($period === 'today') {
+                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_t_start AND :ss_u_t_end";
+                $ssUsedParams[':ss_u_t_start'] = $todayStart;
+                $ssUsedParams[':ss_u_t_end']   = $todayEnd;
+            } elseif ($period === 'this_week') {
+                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_w_start AND :ss_u_w_end";
+                $ssUsedParams[':ss_u_w_start'] = $wStart;
+                $ssUsedParams[':ss_u_w_end']   = $wEnd;
+            } elseif ($period === 'this_month') {
+                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_m_start AND :ss_u_m_end";
+                $ssUsedParams[':ss_u_m_start'] = $mStart;
+                $ssUsedParams[':ss_u_m_end']   = $mEnd;
+            } elseif ($period === 'custom') {
+                if (!empty($startDate) && !empty($endDate)) {
+                    $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_c_start AND :ss_u_c_end";
+                    $ssUsedParams[':ss_u_c_start'] = $startDate . ' 00:00:00';
+                    $ssUsedParams[':ss_u_c_end']   = $endDate . ' 23:59:59';
+                }
+            }
+
+            $ssUsedWhereSql = implode(" AND ", $ssUsedWhere);
+            $ssUsedSql = "
+                SELECT 
+                    isl.id AS lot_id,
+                    isl.lot_number,
+                    isl.ref_number,
+                    isl.qty AS qty_used,
+                    isl.remarks,
+                    isl.lot_result,
+                    isl.lot_status,
+                    isl.created_at AS allocated_at,
+                    s.id AS session_id,
+                    s.status AS kanban_session_status,
+                    s.started_at AS session_started_at,
+                    k.id AS kanban_item_id,
+                    k.kanban_no,
+                    COALESCE(k.customer, 'PT. Indonesia Epson Industry') AS customer,
+                    COALESCE(k.item_code, mp.part_code, '-') AS part_code,
+                    COALESCE(k.item_description, mp.part_name, '-') AS part_name,
+                    COALESCE(mm.name, mp.model, '-') AS model_name,
+                    COALESCE(u.name, 'Operator') AS operator_name
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
+                LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(k.item_code))
+                LEFT JOIN master_models mm ON mm.id = mp.model_id
+                LEFT JOIN users u ON u.id = s.inspector_id
+                WHERE {$ssUsedWhereSql}
+                ORDER BY isl.id DESC
+            ";
+            $stmtSsUsed = $pdo->prepare($ssUsedSql);
+            $stmtSsUsed->execute($ssUsedParams);
+            $ssUsedLots = $stmtSsUsed->fetchAll(PDO::FETCH_ASSOC);
+            $stats['total_used_qty']   = array_sum(array_column($ssUsedLots, 'qty_used'));
+            $stats['total_used_count'] = count($ssUsedLots);
 
         // =====================================================================
         // TAB 3: RIWAYAT SAYA (INSPEKSI OLEH USER LOGIN)
@@ -2726,6 +2783,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             margin-top: 2px !important;
             margin-bottom: 2px !important;
         }
+        .kpi-grid-3cols {
+            display: grid !important;
+            grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+            margin-top: 2px !important;
+            margin-bottom: 2px !important;
+        }
         .kpi-grid-5cols {
             display: grid !important;
             grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
@@ -3650,7 +3714,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <?php if ($activeTab === 'safety_stock'): ?>
             <!-- KPI SAFETY STOCK (CEK FISIK) -->
-            <div class="kpi-grid-container">
+            <div class="kpi-grid-3cols" style="display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 8px !important; margin-bottom: 8px !important;">
                 <!-- Stat 1: Total Sesi Cek Fisik -->
                 <a href="?tab=safety_stock&status=all&period=<?= urlencode($period) ?>" 
                    class="kpi-card kpi-card-ss"
@@ -3668,25 +3732,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </a>
 
-                <!-- Stat 2: Berjalan -->
-                <a href="?tab=safety_stock&status=in_progress&period=<?= urlencode($period) ?>" 
-                   class="kpi-card kpi-card-progress"
-                   title="Klik untuk filter Sedang Berjalan">
-                    <div class="flex items-center justify-between gap-1">
-                        <div class="text-[9px] font-extrabold text-amber-900 uppercase tracking-wider">BERJALAN</div>
-                        <span class="w-5 h-5 rounded bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0 relative">
-                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping absolute"></span>
-                            <span class="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
-                        </span>
-                    </div>
-                    <div class="mt-1 flex items-baseline flex-wrap gap-1">
-                        <span class="kpi-stat-value text-amber-950"><?= number_format($stats['in_progress_count']) ?></span>
-                        <span class="kpi-stat-unit text-amber-700">Item</span>
-                        <span class="text-[9.5px] text-amber-900 font-extrabold bg-amber-200/70 border border-amber-300/80 px-1.5 py-0.5 rounded ml-1"><?= number_format($stats['in_progress_lots'] ?? 0) ?> Lot (<?= number_format($stats['in_progress_qty_pcs'] ?? 0) ?> pcs)</span>
-                    </div>
-                </a>
-
-                <!-- Stat 3: Passed (Selesai) -->
+                <!-- Stat 2: Passed (Selesai) -->
                 <a href="?tab=safety_stock&status=completed&period=<?= urlencode($period) ?>" 
                    class="kpi-card kpi-card-completed"
                    title="Klik untuk filter Selesai">
@@ -3703,7 +3749,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </a>
 
-                <!-- Stat 4: Reject -->
+                <!-- Stat 3: Reject -->
                 <a href="?tab=safety_stock&status=rejected&period=<?= urlencode($period) ?>" 
                    class="kpi-card kpi-card-rejected"
                    title="Klik untuk filter Rejected">
@@ -4989,18 +5035,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 <!-- ═══════════════════════════════════════════════════════════════ -->
                 <!-- TABEL WORKBOARD SAFETY STOCK (GROUPING PER PART & CHILD LOT TABLE) -->
                 <!-- ═══════════════════════════════════════════════════════════════ -->
-                <div class="w-full" style="min-width: 0; max-width: 100%;">
+                <div class="w-full mb-8" style="min-width: 0; max-width: 100%; margin-bottom: 32px;">
                     <div id="ss-table-wrapper" class="overflow-x-auto w-full custom-scrollbar" style="width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
-                        <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; min-width: 1300px; border-collapse: collapse;">
-                            <thead class="bg-purple-900 text-white font-bold text-[11px] uppercase tracking-wider select-none">
+                        <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; border-collapse: collapse;">
+                            <thead class="text-white font-bold text-[11px] uppercase tracking-wider select-none" style="background-color: #581c87; color: #ffffff;">
                                 <tr>
-                                    <th style="padding: 10px 12px; width: 45px; text-align: center;">#</th>
-                                    <th style="padding: 10px 12px; min-width: 200px;">Part Code & Name</th>
-                                    <th style="padding: 10px 12px; width: 150px; text-align: center;">Model & Str Loc</th>
-                                    <th style="padding: 10px 12px; width: 120px; text-align: center;">Total Lot</th>
-                                    <th style="padding: 10px 12px; width: 120px; text-align: right;">Total Qty</th>
-                                    <th style="padding: 10px 12px; width: 140px; text-align: center;">Status Akumulasi</th>
-                                    <th style="padding: 10px 12px; width: 220px; text-align: right;">Aksi</th>
+                                    <th style="padding: 10px 10px; width: 40px; text-align: center; color: #ffffff; background-color: #581c87;">#</th>
+                                    <th style="padding: 10px 12px; width: 30%;">Part Code & Name</th>
+                                    <th style="padding: 10px 12px; width: 140px; text-align: center;">Model & Str Loc</th>
+                                    <th style="padding: 10px 12px; width: 110px; text-align: center;">Total Lot</th>
+                                    <th style="padding: 10px 12px; width: 110px; text-align: right;">Total Qty</th>
+                                    <th style="padding: 10px 12px; width: 130px; text-align: center;">Status Akumulasi</th>
+                                    <th style="padding: 10px 12px; width: 180px; text-align: right;">Aksi</th>
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-slate-200">
@@ -5270,6 +5316,176 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <?php endif; ?>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- ───────────────────────────────────────────────────────────── -->
+                <!-- TABEL 2: PART SAFETY STOCK YANG KELUAR / DIPAKAI OLEH KANBAN  -->
+                <!-- ───────────────────────────────────────────────────────────── -->
+                <div class="w-full mt-6" style="min-width: 0; max-width: 100%;">
+                    <div class="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
+                        <!-- Header Bar Tabel 2 -->
+                        <div class="px-4 py-3 flex flex-wrap items-center justify-between gap-3 border-b border-indigo-200" style="background-color: #1e1b4b; color: #ffffff;">
+                            <div class="flex items-center gap-2.5">
+                                <div class="w-8 h-8 rounded-lg flex items-center justify-center shadow-inner" style="background-color: rgba(255,255,255,0.15); color: #ffffff; border: 1px solid rgba(255,255,255,0.25);">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h3 class="font-black text-sm tracking-wide text-white flex items-center gap-2">
+                                        <span>PART SAFETY STOCK YANG KELUAR / DIPAKAI KANBAN</span>
+                                        <span class="text-[10px] font-extrabold px-2 py-0.5 rounded-full" style="background-color: #2563eb; color: #ffffff; border: 1px solid #60a5fa;">
+                                            Stock Keluar
+                                        </span>
+                                    </h3>
+                                    <p class="text-[11px] font-medium mt-0.5" style="color: #c7d2fe;">
+                                        Riwayat pemakaian / alokasi part Safety Stock untuk pemenuhan Kanban Delivery pelanggan
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <!-- Navigasi Cepat Scroll Horizontal Kiri & Kanan -->
+                                <div class="inline-flex items-center rounded-lg p-0.5 shadow-2xs" style="background-color: #0f172a; border: 1px solid #3b82f6;">
+                                    <button type="button" 
+                                            onclick="scrollSsUsedTable(-350)" 
+                                            class="px-2.5 py-1 text-[11px] font-extrabold rounded transition-all inline-flex items-center gap-1 cursor-pointer select-none" 
+                                            style="color: #e0e7ff;"
+                                            title="Geser tabel ke kiri">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+                                        <span>Scroll Kiri</span>
+                                    </button>
+                                    <div class="h-3.5 w-px" style="background-color: #312e81;"></div>
+                                    <button type="button" 
+                                            onclick="scrollSsUsedTable(350)" 
+                                            class="px-2.5 py-1 text-[11px] font-extrabold rounded transition-all inline-flex items-center gap-1 cursor-pointer select-none" 
+                                            style="color: #e0e7ff;"
+                                            title="Geser tabel ke kanan">
+                                        <span>Scroll Kanan</span>
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+                                    </button>
+                                </div>
+
+                                <span class="text-[11px] font-extrabold px-2.5 py-1 rounded-full whitespace-nowrap shadow-xs" style="background-color: #312e81; color: #ffffff; border: 1px solid #4f46e5;">
+                                    Total Terpakai: <b class="text-white"><?= number_format($stats['total_used_qty'] ?? 0) ?> pcs</b> (<?= count($ssUsedLots ?? []) ?> Alokasi)
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Table Wrapper 2 -->
+                        <div id="ss-used-table-wrapper" class="overflow-x-auto w-full custom-scrollbar" style="width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
+                            <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; border-collapse: collapse;">
+                                <thead class="bg-slate-900 text-white font-bold text-[11px] uppercase tracking-wider select-none border-b border-indigo-900" style="background-color: #0f172a; color: #ffffff;">
+                                    <tr>
+                                        <th style="padding: 10px 8px; width: 35px; text-align: center;">#</th>
+                                        <th style="padding: 10px 10px; width: 110px; text-align: center;">Waktu Alokasi</th>
+                                        <th style="padding: 10px 10px; width: 180px;">Kanban & Customer</th>
+                                        <th style="padding: 10px 10px; min-width: 190px;">Part Code & Part Name</th>
+                                        <th style="padding: 10px 10px; width: 90px; text-align: center;">Model</th>
+                                        <th style="padding: 10px 10px; width: 150px;">Lot No & Ref No</th>
+                                        <th style="padding: 10px 10px; width: 100px; text-align: right;">QTY Terpakai</th>
+                                        <th style="padding: 10px 10px; width: 100px; text-align: center;">Status Kanban</th>
+                                        <th style="padding: 10px 10px; width: 130px;">Inspektur</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-[11px]">
+                                    <?php if (empty($ssUsedLots)): ?>
+                                        <tr>
+                                            <td colspan="9" class="py-14 text-center text-slate-400 bg-white">
+                                                <div class="flex flex-col items-center justify-center gap-2">
+                                                    <svg class="w-12 h-12 text-indigo-200 stroke-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                                                    </svg>
+                                                    <span class="font-bold text-slate-700 text-sm">Belum ada Safety Stock yang dipakai untuk Kanban</span>
+                                                    <span class="text-xs text-slate-400 max-w-sm">Ketika lot Safety Stock dialokasikan atau dipakai untuk menutup kekurangan Kanban, rincian pengeluaran akan otomatis tercatat di sini.</span>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php 
+                                        foreach ($ssUsedLots as $uIdx => $uLot): 
+                                            $allocTs = !empty($uLot['allocated_at']) ? strtotime($uLot['allocated_at']) : (!empty($uLot['session_started_at']) ? strtotime($uLot['session_started_at']) : 0);
+                                            $allocDate = $allocTs ? date('d/m/Y', $allocTs) : '-';
+                                            $allocTime = $allocTs ? date('H:i', $allocTs) . ' WIB' : '-';
+                                        ?>
+                                            <tr class="hover:bg-indigo-50/40 transition-colors bg-white">
+                                                <td style="padding: 8px 8px; text-align: center; font-weight: 700; color: #64748b;"><?= $uIdx + 1 ?></td>
+                                                <td style="padding: 8px 10px; text-align: center; font-family: monospace; color: #334155; white-space: nowrap;">
+                                                    <div style="font-weight: 800; color: #0f172a;"><?= $allocDate ?></div>
+                                                    <div style="font-size: 9.5px; color: #64748b; font-weight: 600; font-family: sans-serif; margin-top: 1px;"><?= $allocTime ?></div>
+                                                </td>
+                                                <td style="padding: 8px 10px;">
+                                                    <?php if (!empty($uLot['kanban_no'])): ?>
+                                                        <span class="font-mono font-extrabold text-blue-700 block text-xs">
+                                                            #<?= htmlspecialchars($uLot['kanban_no']) ?>
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <span class="font-mono font-bold text-slate-400 block text-xs">-</span>
+                                                    <?php endif; ?>
+                                                    <span class="text-[10px] text-slate-500 font-medium block truncate max-w-[170px]" title="<?= htmlspecialchars($uLot['customer'] ?? 'PT. Indonesia Epson Industry') ?>">
+                                                        <?= htmlspecialchars($uLot['customer'] ?? 'PT. Indonesia Epson Industry') ?>
+                                                    </span>
+                                                </td>
+                                                <td style="padding: 8px 10px;">
+                                                    <span class="font-mono font-extrabold text-sky-700 block text-xs">
+                                                        <?= htmlspecialchars($uLot['part_code']) ?>
+                                                    </span>
+                                                    <span class="text-[11px] font-bold text-slate-800 block truncate max-w-[220px]" title="<?= htmlspecialchars($uLot['part_name']) ?>">
+                                                        <?= htmlspecialchars($uLot['part_name']) ?>
+                                                    </span>
+                                                </td>
+                                                <td style="padding: 8px 10px; text-align: center; font-weight: 700; color: #64748b;">
+                                                    <?= htmlspecialchars($uLot['model_name']) ?>
+                                                </td>
+                                                <td style="padding: 8px 10px; white-space: nowrap;">
+                                                    <div class="flex items-center gap-1 flex-wrap">
+                                                        <span class="px-1.5 py-0.5 rounded bg-purple-50 text-purple-800 border border-purple-200 font-mono font-bold text-[10.5px]">
+                                                            <?= htmlspecialchars($uLot['lot_number'] ?: '-') ?>
+                                                        </span>
+                                                        <?php if (!empty($uLot['ref_number'])): ?>
+                                                            <span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 font-mono font-bold text-[10px]" title="Ref No">
+                                                                Ref: <?= htmlspecialchars($uLot['ref_number']) ?>
+                                                            </span>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                </td>
+                                                <td style="padding: 8px 10px; text-align: right; font-family: monospace; font-weight: 900; color: #1e1b4b; white-space: nowrap;">
+                                                    <span class="px-2 py-0.5 rounded bg-indigo-50 text-indigo-900 border border-indigo-200">
+                                                        <?= number_format((int)$uLot['qty_used']) ?> pcs
+                                                    </span>
+                                                </td>
+                                                <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
+                                                    <?php 
+                                                    $kStat = strtolower($uLot['kanban_session_status'] ?? '');
+                                                    if ($kStat === 'completed' || $kStat === 'passed'): ?>
+                                                        <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800 border border-emerald-200 inline-flex items-center gap-1">
+                                                            ✓ Selesai
+                                                        </span>
+                                                    <?php elseif ($kStat === 'in_progress'): ?>
+                                                        <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-800 border border-amber-200 inline-flex items-center gap-1">
+                                                            ⏳ Aktif
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                                                            <?= strtoupper($kStat ?: 'OK') ?>
+                                                        </span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td style="padding: 8px 10px; font-weight: 700; color: #334155; white-space: nowrap;">
+                                                    <div class="flex items-center gap-1.5" title="User: <?= htmlspecialchars($uLot['operator_name'] ?? 'Operator') ?>">
+                                                        <div class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 font-extrabold flex items-center justify-center text-[10px] border border-indigo-200 uppercase">
+                                                            <?= mb_substr($uLot['operator_name'] ?? 'O', 0, 1) ?>
+                                                        </div>
+                                                        <span class="truncate max-w-[100px]"><?= htmlspecialchars($uLot['operator_name'] ?? 'Operator') ?></span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
 
@@ -7316,6 +7532,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
     function scrollMyLotsTable(amount) {
         var wrapper = document.getElementById('my-lots-table-wrapper') || document.getElementById('ss-table-wrapper');
+        if (wrapper) {
+            wrapper.scrollBy({ left: amount, behavior: 'smooth' });
+        }
+    }
+
+    function scrollSsUsedTable(amount) {
+        var wrapper = document.getElementById('ss-used-table-wrapper');
         if (wrapper) {
             wrapper.scrollBy({ left: amount, behavior: 'smooth' });
         }

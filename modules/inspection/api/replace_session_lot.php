@@ -235,36 +235,26 @@ try {
     }
 
     // 4.B Validasi apakah Box Pengganti berasal dari Safety Stock Gudang
+    // CATATAN: Pengecekan kehabisan stok (safety_stock_exhausted) HANYA berlaku jika box ini
+    // tercatat di sesi safety_stock yang berstatus PASSED. Jika berupa box bekas reject atau box produksi baru,
+    // jangan tolak dengan dalih safety stock habis!
     if (!empty($newZ5)) {
-        $stmtEverSS = $pdo->prepare("
-            SELECT 1 FROM inspection_session_lots isl
+        $stmtChkSS = $pdo->prepare("
+            SELECT isl.id as lot_id, isl.qty, isl.lot_number, isl.ref_number, s.id as session_id, s.status as session_status, isl.lot_result
+            FROM inspection_session_lots isl
             JOIN inspection_sessions s ON s.id = isl.inspection_session_id
             WHERE s.inspection_type = 'safety_stock'
               AND UPPER(isl.ref_number) = UPPER(:ref)
+              AND UPPER(isl.lot_number) = UPPER(:lot)
+            ORDER BY isl.id DESC
             LIMIT 1
         ");
-        $stmtEverSS->execute([':ref' => $newZ5]);
-        $isEverSS = (bool)$stmtEverSS->fetchColumn();
+        $stmtChkSS->execute([':ref' => $newZ5, ':lot' => $newZ2]);
+        $ssLot = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
 
-        if ($isEverSS) {
-            $stmtChkSS = $pdo->prepare("
-                SELECT isl.id as lot_id, isl.qty, isl.lot_number, isl.ref_number, s.id as session_id
-                FROM inspection_session_lots isl
-                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                WHERE s.inspection_type = 'safety_stock'
-                  AND s.status = 'passed'
-                  AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
-                  AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                  AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
-                  AND isl.qty > 0
-                  AND UPPER(isl.ref_number) = UPPER(:ref)
-                ORDER BY isl.id DESC
-                LIMIT 1
-            ");
-            $stmtChkSS->execute([':ref' => $newZ5]);
-            $ssLot = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
-
-            if (!$ssLot || (int)$ssLot['qty'] <= 0) {
+        // Jika box ini tercatat di safety stock dan berstatus PASSED
+        if ($ssLot && ($ssLot['session_status'] === 'passed' || in_array($ssLot['lot_result'], ['passed', 'skipped']))) {
+            if ((int)$ssLot['qty'] <= 0) {
                 $pdo->rollBack();
                 echo json_encode([
                     'success'    => false,
