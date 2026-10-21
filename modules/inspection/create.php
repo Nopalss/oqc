@@ -262,6 +262,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     foreach ($scannedLabels as $chkLbl) {
                         $cRef = strtoupper(trim(sanitize($chkLbl['Z5'] ?? ($chkLbl['ref_number'] ?? ''))));
                         if (!empty($cRef)) {
+                            // 0. Cek apakah label ini pernah di-ABOLISH (Scrap / Dimusnahkan)
+                            $stmtChkAb = $pdo->prepare("
+                                SELECT isl.id, isl.lot_number, isl.ref_number, isl.lot_status, lqc.closure_type, lqc.notes, lqc.closed_at 
+                                FROM inspection_session_lots isl
+                                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                                LEFT JOIN lot_quarantine_closures lqc ON lqc.session_lot_id = isl.id
+                                LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+                                LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                                LEFT JOIN master_parts mp ON mp.id = s.part_id
+                                WHERE UPPER(isl.ref_number) = :ref
+                                  AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
+                                  AND (isl.lot_status = 'abolished' OR lqc.closure_type = 'abolish')
+                                ORDER BY isl.id DESC LIMIT 1
+                            ");
+                            $stmtChkAb->execute([':ref' => $cRef, ':p1' => $partCode, ':p2' => $partCode, ':p3' => $partCode]);
+                            $abRow = $stmtChkAb->fetch(PDO::FETCH_ASSOC);
+                            if ($abRow) {
+                                if ($pdo->inTransaction()) {
+                                    $pdo->rollBack();
+                                }
+                                if (ob_get_length()) ob_clean();
+                                echo json_encode([
+                                    'success' => false,
+                                    'error_type' => 'lot_abolished',
+                                    'message' => "⛔ LABEL DI-ABOLISH: Label Box Ref '{$cRef}' telah dinyatakan ABOLISH (Scrap / Dimusnahkan) dan dilarang untuk diinspeksi kembali!"
+                                ]);
+                                exit;
+                            }
+
                             // 1. Cek in_progress di sesi lain
                             $stmtChkActive = $pdo->prepare("
                                 SELECT s.id, s.line_name, s.inspection_type, ki.kanban_no 

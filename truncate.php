@@ -17,14 +17,16 @@ $targetTables = [
     'inspection_session_lots'   => 'Rincian Multi-Lot Sesi',
     'inspection_samples'        => 'Data Sampel Uji (OK/NG)',
     'inspection_ng_records'     => 'Temuan Cacat Mutu (Defect)',
-    'kanban_items'              => 'Daftar Item Kanban',
-    'kanban_batches'            => 'Batch Dokumen Kanban',
+    'lot_quarantine_closures'   => 'Penutupan/Disposisi Karantina Lot NG',
     'lot_substitution_log'      => 'Log Substitusi Lot',
+    'kanban_batches'            => 'Batch Dokumen Kanban',
+    'kanban_items'              => 'Daftar Item Kanban',
+    'did_batches'               => 'Batch Impor DID',
+    'daily_inspection_data'     => 'Data DID Harian',
+    'did_approval_requests'     => 'Pengajuan Approval Koreksi DID',
     'oqc_daily_summary'         => 'Ringkasan Harian OQC',
     'oqc_daily_defect_summary'  => 'Ringkasan Cacat Harian',
     'rejection_sheet_prints'    => 'Log Cetak Lembar Penolakan',
-    'daily_inspection_data'     => 'Data DID Harian',
-    'did_batches'               => 'Batch Impor DID',
     'defect_types'              => 'Master Jenis Cacat (Defect Types)'
 ];
 
@@ -103,14 +105,18 @@ foreach ($targetTables as $tbl => $label) {
     }
 }
 
-// Master Data counts (hanya untuk informasi bahwa data master aman)
+// Master Data counts (hanya untuk informasi bahwa data master & konfigurasi sistem aman)
 $masterCounts = [
-    'users'            => (int)$pdo->query("SELECT COUNT(*) FROM `users`")->fetchColumn(),
-    'master_parts'     => (int)$pdo->query("SELECT COUNT(*) FROM `master_parts`")->fetchColumn(),
-    'master_models'    => (int)$pdo->query("SELECT COUNT(*) FROM `master_models`")->fetchColumn(),
-    'master_customers' => (int)$pdo->query("SELECT COUNT(*) FROM `master_customers`")->fetchColumn(),
-    'master_drawings'  => (int)$pdo->query("SELECT COUNT(*) FROM `master_drawings`")->fetchColumn(),
-    'aql_standards'    => (int)$pdo->query("SELECT COUNT(*) FROM `aql_standards`")->fetchColumn()
+    'users'            => (int)($pdo->query("SELECT COUNT(*) FROM `users`")->fetchColumn() ?? 0),
+    'master_parts'     => (int)($pdo->query("SELECT COUNT(*) FROM `master_parts`")->fetchColumn() ?? 0),
+    'master_models'    => (int)($pdo->query("SELECT COUNT(*) FROM `master_models`")->fetchColumn() ?? 0),
+    'master_customers' => (int)($pdo->query("SELECT COUNT(*) FROM `master_customers`")->fetchColumn() ?? 0),
+    'master_drawings'  => (int)($pdo->query("SELECT COUNT(*) FROM `master_drawings`")->fetchColumn() ?? 0),
+    'aql_standards'    => (int)($pdo->query("SELECT COUNT(*) FROM `aql_standards`")->fetchColumn() ?? 0),
+    'lines'            => (int)($pdo->query("SELECT COUNT(*) FROM `lines`")->fetchColumn() ?? 0),
+    'roles'            => (int)($pdo->query("SELECT COUNT(*) FROM `roles`")->fetchColumn() ?? 0),
+    'role_permissions' => (int)($pdo->query("SELECT COUNT(*) FROM `role_permissions`")->fetchColumn() ?? 0),
+    'system_settings'  => (int)($pdo->query("SELECT COUNT(*) FROM `system_settings`")->fetchColumn() ?? 0)
 ];
 
 $totalOperationalRows = array_sum($tableCounts);
@@ -229,7 +235,7 @@ $totalOperationalRows = array_sum($tableCounts);
             <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700 border-b border-slate-200 pb-2 mb-3">
                 Status Master Data &amp; Konfigurasi (Tetap Aman &amp; Tidak Dihapus)
             </h3>
-            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-center">
+            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 text-center">
                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                     <div class="text-[10px] text-slate-500 font-bold uppercase">Master Parts</div>
                     <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['master_parts']) ?></div>
@@ -253,6 +259,22 @@ $totalOperationalRows = array_sum($tableCounts);
                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
                     <div class="text-[10px] text-slate-500 font-bold uppercase">Users / Akun</div>
                     <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['users']) ?></div>
+                </div>
+                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <div class="text-[10px] text-slate-500 font-bold uppercase">Line Produksi</div>
+                    <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['lines']) ?></div>
+                </div>
+                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <div class="text-[10px] text-slate-500 font-bold uppercase">Roles</div>
+                    <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['roles']) ?></div>
+                </div>
+                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <div class="text-[10px] text-slate-500 font-bold uppercase">Hak Akses Role</div>
+                    <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['role_permissions']) ?></div>
+                </div>
+                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <div class="text-[10px] text-slate-500 font-bold uppercase">Pengaturan Sistem</div>
+                    <div class="text-sm font-mono font-extrabold text-slate-900 mt-0.5"><?= number_format($masterCounts['system_settings']) ?></div>
                 </div>
             </div>
             <?php if (($tableCounts['defect_types'] ?? 0) === 0): ?>

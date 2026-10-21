@@ -137,6 +137,62 @@ try {
         $refParam = strtoupper(trim(sanitize($_REQUEST['ref_number'] ?? '')));
         $currSessionId = (int)($_REQUEST['current_session_id'] ?? 0);
 
+        // 0. Cek apakah Lot/Label ini pernah di-ABOLISH (Scrap / Dimusnahkan permanen)
+        $refAbolishSql = !empty($refParam) ? "AND UPPER(isl.ref_number) = UPPER(:ref_ab)" : "";
+        $stmtAbolish = $pdo->prepare("
+            SELECT isl.id, isl.lot_number, isl.ref_number, isl.lot_status, lqc.closure_type, lqc.notes, lqc.closed_at, u.name AS closed_by_name
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN lot_quarantine_closures lqc ON lqc.session_lot_id = isl.id
+            LEFT JOIN users u ON u.id = lqc.closed_by
+            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+            LEFT JOIN master_parts mp ON mp.id = s.part_id
+            WHERE UPPER(isl.lot_number) = UPPER(:lot_ab)
+              AND (UPPER(did.part_code) = UPPER(:pc1) OR UPPER(ki.item_code) = UPPER(:pc2) OR UPPER(mp.part_code) = UPPER(:pc3))
+              AND (
+                  isl.lot_status = 'abolished'
+                  OR lqc.closure_type = 'abolish'
+              )
+              {$refAbolishSql}
+            ORDER BY isl.id DESC
+            LIMIT 1
+        ");
+        $abParams = [
+            ':lot_ab' => $lotNumber,
+            ':pc1'    => $partCode,
+            ':pc2'    => $partCode,
+            ':pc3'    => $partCode
+        ];
+        if (!empty($refParam)) {
+            $abParams[':ref_ab'] = $refParam;
+        }
+        $stmtAbolish->execute($abParams);
+        $abolishRow = $stmtAbolish->fetch(PDO::FETCH_ASSOC);
+
+        if ($abolishRow) {
+            $abDate = !empty($abolishRow['closed_at']) ? date('d M Y, H:i', strtotime($abolishRow['closed_at'])) . ' WIB' : '-';
+            $abNotes = !empty($abolishRow['notes']) ? $abolishRow['notes'] : 'Karantina Dimusnahkan (Scrap)';
+            $abUser = !empty($abolishRow['closed_by_name']) ? $abolishRow['closed_by_name'] : 'Admin/Supervisor';
+            $abRef = !empty($abolishRow['ref_number']) ? " (Ref #{$abolishRow['ref_number']})" : (!empty($refParam) ? " (Ref #{$refParam})" : "");
+            
+            if (ob_get_length()) ob_clean();
+            echo json_encode([
+                'success' => false,
+                'error_type' => 'lot_abolished',
+                'message' => "⛔ LABEL / LOT TELAH DI-ABOLISH!\nPart \"{$partCode}\" Lot \"{$lotNumber}\"{$abRef} telah diputuskan ABOLISH (Scrap / Dimusnahkan) oleh {$abUser} pada {$abDate} dengan catatan: \"{$abNotes}\". Label ini TIDAK DAPAT digunakan atau diinspeksi kembali!",
+                'details' => [
+                    'part_code' => $partCode,
+                    'lot_number' => $lotNumber,
+                    'ref_number' => $abolishRow['ref_number'] ?: $refParam,
+                    'closed_at' => $abDate,
+                    'closed_by' => $abUser,
+                    'notes' => $abNotes
+                ]
+            ]);
+            exit;
+        }
+
         // 1. Cek apakah Ref Number ini sedang aktif diinspeksi pada Sesi Lain (in_progress lock)
         if (empty($reqInspectionType) && $currSessionId > 0) {
             $stmtSessType = $pdo->prepare("SELECT inspection_type FROM inspection_sessions WHERE id = :sid LIMIT 1");
@@ -387,19 +443,145 @@ try {
                 $ssAvailRow = $stmtSSAvail->fetch(PDO::FETCH_ASSOC);
 
                 if ($ssAvailRow && (int)$ssAvailRow['available_qty'] > 0) {
-                    if (ob_get_length()) ob_clean();
-                    echo json_encode([
-                        'success'         => true,
-                        'is_safety_stock' => true,
-                        'message'         => "Label terdeteksi sebagai Safety Stock Gudang (Sisa stok: {$ssAvailRow['available_qty']} pcs).",
-                        'ss_lot'          => [
+                    // Cek juga apakah box Safety Stock ini memiliki riwayat cacat/NG lampau (Eks-NG / Rework)
+                    $ssHistRejectedInfo = null;
+                    try {
+                        $whereSsHist = [
+                            "s.id != :curr_sid",
+                            "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced', 'rejected') OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))",
+                            "UPPER(isl.lot_number) = UPPER(:lot)",
+                            "UPPER(isl.ref_number) = UPPER(:ref)",
+                            "(UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))"
+                        ];
+                        $sqlSsHist = "
+                            SELECT isl.id AS session_lot_id, isl.lot_number, isl.ref_number, isl.qty, isl.remarks,
+                                   s.id AS session_id, s.inspection_type, s.closed_at, s.started_at,
+                                   ki.kanban_no, u.name AS inspector_name
+                            FROM inspection_session_lots isl
+                            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                            LEFT JOIN users u ON u.id = s.inspector_id
+                            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+                            LEFT JOIN master_parts mp ON mp.id = s.part_id
+                            WHERE " . implode(' AND ', $whereSsHist) . "
+                            ORDER BY isl.id DESC, s.id DESC
+                            LIMIT 1
+                        ";
+                        $stmtSsH = $pdo->prepare($sqlSsHist);
+                        $stmtSsH->execute([
+                            ':curr_sid' => $currSessionId,
+                            ':lot'      => $lotNumber,
+                            ':ref'      => $refParam,
+                            ':p1'       => $partCode,
+                            ':p2'       => $partCode,
+                            ':p3'       => $partCode
+                        ]);
+                        $ssHLot = $stmtSsH->fetch(PDO::FETCH_ASSOC);
+
+                        if ($ssHLot) {
+                            $ssSlotId = (int)$ssHLot['session_lot_id'];
+                            $ssDefects = [];
+                            if ($ssSlotId > 0) {
+                                $stmtSsNg = $pdo->prepare("
+                                    SELECT r.qty_ng, r.remark, COALESCE(dt.name, r.remark, 'Defect Lainnya') AS defect_name, dt.code AS defect_code
+                                    FROM inspection_ng_records r
+                                    LEFT JOIN defect_types dt ON dt.id = r.defect_type_id
+                                    WHERE r.session_lot_id = :slot_id AND (r.is_cancelled IS NULL OR r.is_cancelled = 0)
+                                    ORDER BY r.id ASC
+                                ");
+                                $stmtSsNg->execute([':slot_id' => $ssSlotId]);
+                                $ssDefects = $stmtSsNg->fetchAll(PDO::FETCH_ASSOC);
+                            }
+
+                            $ssDisp = null;
+                            $stmtSsCl = $pdo->prepare("
+                                SELECT lqc.*, u.name AS closed_by_name
+                                FROM lot_quarantine_closures lqc
+                                LEFT JOIN users u ON u.id = lqc.closed_by
+                                WHERE lqc.session_lot_id = :slot_id
+                                ORDER BY lqc.id DESC LIMIT 1
+                            ");
+                            $stmtSsCl->execute([':slot_id' => $ssSlotId]);
+                            $ssClRow = $stmtSsCl->fetch(PDO::FETCH_ASSOC);
+                            if ($ssClRow) {
+                                $ssDisp = [
+                                    'has_disposition' => true,
+                                    'notes'           => $ssClRow['notes'],
+                                    'closed_by'       => $ssClRow['closed_by_name'] ?: 'Admin / Supervisor',
+                                    'closed_at'       => !empty($ssClRow['closed_at']) ? date('d M Y, H:i', strtotime($ssClRow['closed_at'])) . ' WIB' : '-'
+                                ];
+                            }
+
+                            $ssHistRejectedInfo = [
+                                'session_id'      => (int)$ssHLot['session_id'],
+                                'session_lot_id'  => $ssSlotId,
+                                'inspection_type' => $ssHLot['inspection_type'],
+                                'kanban_no'       => $ssHLot['kanban_no'] ?: '-',
+                                'inspector_name'  => $ssHLot['inspector_name'] ?: 'Inspector QC',
+                                'closed_at'       => !empty($ssHLot['closed_at']) ? date('d M Y, H:i', strtotime($ssHLot['closed_at'])) : '-',
+                                'ref_number'      => $ssHLot['ref_number'],
+                                'lot_number'      => $ssHLot['lot_number'],
+                                'qty'             => (int)($ssHLot['qty'] ?? 0),
+                                'remarks'         => $ssHLot['remarks'] ?: '-',
+                                'ng_defects'      => $ssDefects,
+                                'disposition'     => $ssDisp
+                            ];
+                        }
+                    } catch (Exception $eSsHist) {}
+
+                    // Deteksi Replenished Box (Box eks-potong yang sudah digenapi kembali oleh Gudang ke Qty aslinya)
+                    $scannedBarcodeQty = (int)($_REQUEST['barcode_qty'] ?? 0);
+                    $availQty = (int)$ssAvailRow['available_qty'];
+                    $isReplenished = false;
+                    $replenishInfo = null;
+
+                    if ($scannedBarcodeQty > $availQty) {
+                        // Terdeteksi: Barcode fisik memiliki Qty lebih besar dari sisa pecahan di database (misal Barcode 200 pcs vs sisa di DB 100 pcs)
+                        // Artinya box telah di-refill / digenapi kembali oleh Gudang!
+                        $isReplenished = true;
+                        $prevCutQty = $scannedBarcodeQty - $availQty;
+
+                        // Cari info sesi pemotong terdahulu
+                        $prevCutKanban = $ssAvailRow['parent_kanban_no'] ?? ($ssAvailRow['kanban_no'] ?? '-');
+                        $prevCutRem = $ssAvailRow['remarks'] ?? '';
+
+                        $replenishInfo = [
+                            'original_barcode_qty' => $scannedBarcodeQty,
+                            'available_in_db'      => $availQty,
+                            'previously_taken_qty' => $prevCutQty,
+                            'parent_session_id'    => (int)$ssAvailRow['session_id'],
+                            'parent_kanban_no'     => $prevCutKanban,
+                            'remarks'              => $prevCutRem
+                        ];
+                    }
+
+                    $ssResponse = [
+                        'success'            => true,
+                        'is_safety_stock'    => true,
+                        'is_replenished_box' => $isReplenished,
+                        'message'            => $isReplenished 
+                            ? "Box Eks-Potong Terdeteksi: Pernah diambil {$replenishInfo['previously_taken_qty']} pcs, kini telah digenapi kembali ke {$scannedBarcodeQty} pcs oleh Gudang."
+                            : "Label terdeteksi sebagai Safety Stock Gudang (Sisa stok: {$availQty} pcs).",
+                        'ss_lot'             => [
                             'lot_id'        => (int)$ssAvailRow['lot_id'],
                             'session_id'    => (int)$ssAvailRow['session_id'],
                             'lot_number'    => $ssAvailRow['lot_number'],
                             'ref_number'    => $ssAvailRow['ref_number'],
-                            'available_qty' => (int)$ssAvailRow['available_qty']
+                            'available_qty' => $isReplenished ? $scannedBarcodeQty : $availQty
                         ]
-                    ]);
+                    ];
+
+                    if ($isReplenished) {
+                        $ssResponse['replenish_info'] = $replenishInfo;
+                    }
+
+                    if ($ssHistRejectedInfo !== null) {
+                        $ssResponse['was_rejected_before'] = true;
+                        $ssResponse['rejected_info']       = $ssHistRejectedInfo;
+                    }
+
+                    if (ob_get_length()) ob_clean();
+                    echo json_encode($ssResponse);
                     exit;
                 } else {
                     // Safety stock terdaftar tapi stoknya sudah habis (0 pcs) -> TOLAK!
@@ -413,6 +595,99 @@ try {
                 }
             }
         }
+
+        // 4.B Cek apakah label ini PERNAH memiliki riwayat NG / Rejected di masa lalu
+        // (Berlaku untuk box Fresh, Safety Stock, maupun Re-inspeksi agar user selalu berhati-hati)
+        $historicalRejectedInfo = null;
+        try {
+            $whereHist = [
+                "s.id != :curr_sid",
+                "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced', 'rejected') OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))"
+            ];
+            $paramsHist = [
+                ':curr_sid' => $currSessionId,
+                ':lot'      => $lotNumber,
+                ':p1'       => $partCode,
+                ':p2'       => $partCode,
+                ':p3'       => $partCode
+            ];
+            $whereHist[] = "UPPER(isl.lot_number) = UPPER(:lot)";
+            $whereHist[] = "(UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))";
+            
+            if (!empty($refParam)) {
+                $whereHist[] = "UPPER(isl.ref_number) = UPPER(:ref)";
+                $paramsHist[':ref'] = $refParam;
+            }
+
+            $sqlHist = "
+                SELECT isl.id AS session_lot_id, isl.lot_number, isl.ref_number, isl.qty, isl.remarks,
+                       s.id AS session_id, s.inspection_type, s.closed_at, s.started_at,
+                       ki.kanban_no, u.name AS inspector_name
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                LEFT JOIN users u ON u.id = s.inspector_id
+                LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+                LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+                LEFT JOIN master_parts mp ON mp.id = s.part_id
+                WHERE " . implode(' AND ', $whereHist) . "
+                ORDER BY isl.id DESC, s.id DESC
+                LIMIT 1
+            ";
+            $stmtHist = $pdo->prepare($sqlHist);
+            $stmtHist->execute($paramsHist);
+            $histLot = $stmtHist->fetch(PDO::FETCH_ASSOC);
+
+            if ($histLot) {
+                $hSlotId = (int)$histLot['session_lot_id'];
+                $hDefects = [];
+                if ($hSlotId > 0) {
+                    $stmtHNg = $pdo->prepare("
+                        SELECT r.qty_ng, r.remark, COALESCE(dt.name, r.remark, 'Defect Lainnya') AS defect_name, dt.code AS defect_code
+                        FROM inspection_ng_records r
+                        LEFT JOIN defect_types dt ON dt.id = r.defect_type_id
+                        WHERE r.session_lot_id = :slot_id AND (r.is_cancelled IS NULL OR r.is_cancelled = 0)
+                        ORDER BY r.id ASC
+                    ");
+                    $stmtHNg->execute([':slot_id' => $hSlotId]);
+                    $hDefects = $stmtHNg->fetchAll(PDO::FETCH_ASSOC);
+                }
+
+                // Ambil catatan disposisi
+                $hDisp = null;
+                $stmtHCl = $pdo->prepare("
+                    SELECT lqc.*, u.name AS closed_by_name
+                    FROM lot_quarantine_closures lqc
+                    LEFT JOIN users u ON u.id = lqc.closed_by
+                    WHERE lqc.session_lot_id = :slot_id
+                    ORDER BY lqc.id DESC LIMIT 1
+                ");
+                $stmtHCl->execute([':slot_id' => $hSlotId]);
+                $hClRow = $stmtHCl->fetch(PDO::FETCH_ASSOC);
+                if ($hClRow) {
+                    $hDisp = [
+                        'has_disposition' => true,
+                        'notes'           => $hClRow['notes'],
+                        'closed_by'       => $hClRow['closed_by_name'] ?: 'Admin / Supervisor',
+                        'closed_at'       => !empty($hClRow['closed_at']) ? date('d M Y, H:i', strtotime($hClRow['closed_at'])) . ' WIB' : '-'
+                    ];
+                }
+
+                $historicalRejectedInfo = [
+                    'session_id'      => (int)$histLot['session_id'],
+                    'session_lot_id'  => $hSlotId,
+                    'inspection_type' => $histLot['inspection_type'],
+                    'kanban_no'       => $histLot['kanban_no'] ?: '-',
+                    'inspector_name'  => $histLot['inspector_name'] ?: 'Inspector QC',
+                    'closed_at'       => !empty($histLot['closed_at']) ? date('d M Y, H:i', strtotime($histLot['closed_at'])) : '-',
+                    'ref_number'      => $histLot['ref_number'],
+                    'lot_number'      => $histLot['lot_number'],
+                    'qty'             => (int)($histLot['qty'] ?? 0),
+                    'remarks'         => $histLot['remarks'] ?: '-',
+                    'ng_defects'      => $hDefects,
+                    'disposition'     => $hDisp
+                ];
+            }
+        } catch (Exception $eHist) {}
 
         // 4. Evaluasi Status Terakhir REJECTED -> Tampilkan Modal Peringatan!
         if ($isLatestRejected) {
@@ -533,8 +808,8 @@ try {
             exit;
         }
 
-        if (ob_get_length()) ob_clean();
-        echo json_encode([
+        // Jika tidak berstatus latest rejected, namun PERNAH memiliki riwayat NG di masa lalu (misal eks-NG yang sudah PASSED di Safety Stock)
+        $respPayload = [
             'success' => true,
             'message' => "Lot Number \"{$lotNumber}\" terverifikasi lolos cek dimensi (DID).",
             'did' => [
@@ -544,7 +819,15 @@ try {
                 'pic' => $didRow['pic'],
                 'status' => $didRow['status_inspect']
             ]
-        ]);
+        ];
+
+        if ($historicalRejectedInfo !== null) {
+            $respPayload['was_rejected_before'] = true;
+            $respPayload['rejected_info'] = $historicalRejectedInfo;
+        }
+
+        if (ob_get_length()) ob_clean();
+        echo json_encode($respPayload);
         exit;
     }
 
@@ -565,6 +848,41 @@ try {
               AND (UPPER(did.part_code) = ? OR UPPER(ki.item_code) = ? OR UPPER(mp.part_code) = ?)
         ";
         $partLotParams = [$lotNumber, $partCode, $partCode, $partCode];
+
+        // Cek apakah ada label yang berstatus ABOLISHED
+        $sqlChkAbolish = "
+            SELECT isl.ref_number, isl.lot_number, isl.lot_status, lqc.closure_type, lqc.notes, lqc.closed_at, u.name AS closed_by_name
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN lot_quarantine_closures lqc ON lqc.session_lot_id = isl.id
+            LEFT JOIN users u ON u.id = lqc.closed_by
+            LEFT JOIN daily_inspection_data did ON did.id = s.did_id
+            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+            LEFT JOIN master_parts mp ON mp.id = s.part_id
+            WHERE UPPER(isl.ref_number) IN ($inRefPlaceholders)
+              $partLotCond
+              AND (
+                  isl.lot_status = 'abolished'
+                  OR lqc.closure_type = 'abolish'
+              )
+            ORDER BY isl.id DESC
+            LIMIT 1
+        ";
+        $stmtChkAbolish = $pdo->prepare($sqlChkAbolish);
+        $stmtChkAbolish->execute(array_merge($scannedRefs, $partLotParams));
+        $abMultiRow = $stmtChkAbolish->fetch(PDO::FETCH_ASSOC);
+        if ($abMultiRow) {
+            $abDate = !empty($abMultiRow['closed_at']) ? date('d M Y, H:i', strtotime($abMultiRow['closed_at'])) . ' WIB' : '-';
+            $abNotes = !empty($abMultiRow['notes']) ? $abMultiRow['notes'] : 'Karantina Dimusnahkan (Scrap)';
+            $abUser = !empty($abMultiRow['closed_by_name']) ? $abMultiRow['closed_by_name'] : 'Admin/Supervisor';
+            if (ob_get_length()) ob_clean();
+            echo json_encode([
+                'success' => false,
+                'error_type' => 'lot_abolished',
+                'message' => "⛔ LABEL / LOT TELAH DI-ABOLISH!\nPart \"{$partCode}\" Lot \"{$lotNumber}\" (Ref #{$abMultiRow['ref_number']}) telah diputuskan ABOLISH (Scrap / Dimusnahkan) oleh {$abUser} pada {$abDate} dengan catatan: \"{$abNotes}\". Label ini TIDAK DAPAT digunakan atau diinspeksi kembali!"
+            ]);
+            exit;
+        }
 
         // Cek apakah ada label yang sedang in_progress di sesi lain
         $sqlChkActive = "

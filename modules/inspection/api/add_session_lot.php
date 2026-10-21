@@ -222,6 +222,36 @@ try {
             }
         }
 
+        // 3b. Validasi Lot ABOLISHED (Scrap / Dibuang) — Blokir Permanen
+        $stmtChkDoneAbolish = $pdo->prepare("
+            SELECT isl.id, isl.lot_number, isl.ref_number, lqc.notes, lqc.closed_at
+            FROM inspection_session_lots isl
+            LEFT JOIN lot_quarantine_closures lqc ON lqc.session_lot_id = isl.id
+            WHERE UPPER(isl.lot_number) = UPPER(:ln)
+              AND (
+                  isl.lot_status = 'abolished'
+                  OR lqc.closure_type = 'abolish'
+              )
+              " . (!empty($refNumber) ? "AND UPPER(isl.ref_number) = UPPER(:rn)" : "") . "
+            LIMIT 1
+        ");
+        $abolishParams = [':ln' => $lotNumber];
+        if (!empty($refNumber)) {
+            $abolishParams[':rn'] = $refNumber;
+        }
+        $stmtChkDoneAbolish->execute($abolishParams);
+        $abolishedLot = $stmtChkDoneAbolish->fetch(PDO::FETCH_ASSOC);
+
+        if ($abolishedLot) {
+            $pdo->rollBack();
+            $abNotes = !empty($abolishedLot['notes']) ? " Alasan: \"{$abolishedLot['notes']}\"." : "";
+            echo json_encode([
+                'success' => false,
+                'message' => "PERINGATAN: Lot #{$lotNumber}" . (!empty($refNumber) ? " (Ref #{$refNumber})" : "") . " telah di-ABOLISH (Scrap / Dibuang) dan ditutup secara permanen!{$abNotes} Lot ini tidak dapat diinspeksi kembali."
+            ]);
+            exit;
+        }
+
         // 4. Validasi Ref Number + Lot Number Duplikat (3-way match)
         if (!empty($refNumber)) {
             // A. Cek di sesi saat ini (ref + lot harus sama baru dianggap duplikat)

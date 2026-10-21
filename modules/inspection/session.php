@@ -1825,11 +1825,16 @@ require_once __DIR__ . '/../../layouts/header.php';
                 </div>
             </div>
 
-            <!-- SEARCH BAR + FILTER STATS -->
+            <!-- SEARCH BAR + FILTER STATS & TOGGLE SELESAI -->
             <div class="flex items-center gap-3 flex-shrink-0">
                 <div class="relative flex-1">
                     <input type="text" id="planning-search-input" autofocus autocomplete="off" onkeydown="handlePlanningSearchKeydown(event)" oninput="handlePlanningSearchInput()" placeholder="Cari Part Code, Item Description, Customer, atau No. Kanban... (Scan Barcode / Ketik)" class="form-input py-2 px-4 text-xs w-full font-semibold focus:ring-2 focus:ring-blue-500 focus:outline-none rounded-lg border border-slate-300 bg-white">
                 </div>
+                <!-- Tombol Toggle Tampilkan / Sembunyikan Kanban Selesai -->
+                <button type="button" id="btn-toggle-completed-kanban" onclick="toggleCompletedKanbanVisibility()" class="px-3 py-2 text-xs font-bold rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition-all flex items-center gap-1.5 flex-shrink-0 shadow-xs cursor-pointer" title="Tampilkan atau sembunyikan Kanban yang sudah 100% selesai diinspeksi">
+                    <svg class="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                    <span id="btn-toggle-completed-label">Lihat Selesai (<span id="btn-toggle-completed-count">0</span>)</span>
+                </button>
                 <div id="planning-table-counter" class="text-xs font-bold text-slate-500 bg-slate-200/60 px-3 py-1.5 rounded-lg flex-shrink-0">
                     Total: <span id="planning-visible-count" class="text-blue-700 font-extrabold">0</span> Part
                 </div>
@@ -3748,7 +3753,20 @@ function showLiveScanAlert(type, title, message, extraData) {
             panel.style.borderColor = '#22c55e';
 
             var historyTagHtml = '';
-            if (extraData.is_safety_stock) {
+            var replenishBannerHtml = '';
+
+            if (extraData.is_replenished && extraData.replenish_info) {
+                var rep = extraData.replenish_info;
+                historyTagHtml = '<span style="background-color: #f0fdf4; color: #15803d; border: 1.5px solid #86efac; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">🔄 Box Refill ' + (rep.original_barcode_qty || 200) + ' pcs</span>';
+                
+                replenishBannerHtml = 
+                    '<div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 7px; padding: 6px 9px; margin-top: 6px; display: flex; align-items: flex-start; gap: 6px;">' +
+                        '<span style="font-size: 13px; line-height: 1;">ℹ️</span>' +
+                        '<div style="font-size: 10px; color: #1e40af; line-height: 1.35;">' +
+                            '<b>INFO REFILL GUDANG:</b> Box ini sebelumnya pernah diambil <b>' + (rep.previously_taken_qty || 0) + ' pcs</b> pada Kanban sebelumnya (' + (rep.parent_kanban_no || 'Sesi #' + rep.parent_session_id) + ') dan telah <b>digenapi kembali menjadi ' + (rep.original_barcode_qty || 200) + ' pcs</b> oleh Gudang.' +
+                        '</div>' +
+                    '</div>';
+            } else if (extraData.is_safety_stock) {
                 historyTagHtml = '<span style="background-color: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">📦 Safety Stock</span>';
             } else {
                 historyTagHtml = '<span style="background-color: #ecfdf5; color: #166534; border: 1px solid #bbf7d0; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">✓ Lot Baru Fresh</span>';
@@ -3779,7 +3797,8 @@ function showLiveScanAlert(type, title, message, extraData) {
                         '<span style="font-size: 8.5px; font-weight: 800; color: #15803d; text-transform: uppercase; letter-spacing: 0.04em; display: block;">QTY BOX MASUK</span>' +
                         '<span style="font-family: monospace; font-size: 15px; font-weight: 900; color: #15803d; display: block; line-height: 1.2;">+' + (extraData.qty || 0).toLocaleString() + ' <span style="font-size: 10px; font-weight: 700; color: #16a34a;">pcs</span></span>' +
                     '</div>' +
-                '</div>';
+                '</div>' +
+                replenishBannerHtml;
         }
         successEl.classList.remove('hidden');
     } else {
@@ -3836,6 +3855,7 @@ function addScannedLabelFromObj(lbl) {
     var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only&part_code=' + encodeURIComponent(lbl.Z1) + 
                    '&lot_number=' + encodeURIComponent(lbl.Z2) + 
                    '&ref_number=' + encodeURIComponent(lbl.Z5 || '') + 
+                   '&barcode_qty=' + encodeURIComponent(lbl.Z3 || 0) +
                    '&inspection_type=' + encodeURIComponent(selectedPlanningType);
 
     fetch(checkUrl)
@@ -3843,6 +3863,44 @@ function addScannedLabelFromObj(lbl) {
         .then(function(data) {
             closeSwalSafely();
             if (!data.success) {
+                // Skenario 0: Label / Lot Telah DI-ABOLISH (Scrap / Dimusnahkan Permanen)
+                if (data.error_type === 'lot_abolished') {
+                    var det = data.details || {};
+                    var abNotes = det.notes || 'Karantina Dimusnahkan';
+                    var abUser = det.closed_by || 'Admin/Supervisor';
+                    var abDate = det.closed_at || '-';
+
+                    Swal.fire({
+                        icon: 'error',
+                        title: '⛔ LABEL TELAH DI-ABOLISH!',
+                        html: '<div style="font-size: 12px; text-align: left; line-height: 1.6; color: #334155;">' +
+                              '<div style="background-color: #fee2e2; border-left: 4px solid #ef4444; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px;">' +
+                              '  <span style="font-size: 13px; font-weight: 900; color: #991b1b; display: block;">STATUS: PERMANENT SCRAP (ABOLISH)</span>' +
+                              '  <span style="font-size: 11px; color: #b91c1c;">Label box ini telah dinyatakan scrap/dimusnahkan dan dilarang keras untuk diinspeksi atau dimasukkan ke jalur produksi!</span>' +
+                              '</div>' +
+                              '<div style="background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px;">' +
+                              '  <div><span style="font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase;">LOT NUMBER</span><span style="font-family: monospace; font-size: 13px; font-weight: 900; color: #0f172a; display: block;">#' + escapeHtml(lbl.Z2 || det.lot_number || '-') + '</span></div>' +
+                              '  <div><span style="font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase;">REF NUMBER</span><span style="font-family: monospace; font-size: 13px; font-weight: 900; color: #b91c1c; display: block;">' + escapeHtml(lbl.Z5 || det.ref_number || '-') + '</span></div>' +
+                              '  <div><span style="font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase;">CLOSED BY</span><span style="font-size: 11px; font-weight: 800; color: #1e293b; display: block;">' + escapeHtml(abUser) + '</span></div>' +
+                              '  <div><span style="font-size: 9px; font-weight: 800; color: #64748b; text-transform: uppercase;">TANGGAL PENUTUPAN</span><span style="font-size: 11px; font-weight: 800; color: #1e293b; display: block;">' + escapeHtml(abDate) + '</span></div>' +
+                              '</div>' +
+                              '<div style="background-color: #f1f5f9; padding: 8px 10px; border-radius: 6px; font-size: 11px; color: #334155; margin-bottom: 10px;">' +
+                              '  <b>Alasan / Catatan Penutupan:</b><br><i style="color: #64748b;">"' + escapeHtml(abNotes) + '"</i>' +
+                              '</div>' +
+                              '<p style="font-size: 11px; font-weight: 700; color: #be123c; margin: 0;">Silakan amankan label fisik ini dan pisahkan dari area kerja OQC.</p>' +
+                              '</div>',
+                        confirmButtonColor: '#ef4444',
+                        confirmButtonText: 'Tutup & Singkirkan Box',
+                        allowOutsideClick: false,
+                        willClose: function() {
+                            clearScanFormInputs();
+                        }
+                    });
+                    showLiveScanAlert('rejected', 'LABEL TELAH DI-ABOLISH', 'Box Ref <b>' + escapeHtml(lbl.Z5 || '') + '</b> telah dinyatakan <b>ABOLISH / SCRAP</b> permanen.');
+                    clearScanFormInputs();
+                    return;
+                }
+
                 // Skenario: Safety Stock Habis (0 pcs)
                 if (data.error_type === 'safety_stock_exhausted') {
                     Swal.fire({
@@ -4009,7 +4067,26 @@ function addScannedLabelFromObj(lbl) {
             // Flag jika label berasal dari Safety Stock Gudang (tetap di-scan fisik ulang)
             if (data.is_safety_stock) {
                 lbl.is_safety_stock_alloc = true;
-                if (data.ss_lot && parseInt(data.ss_lot.available_qty, 10) > 0) {
+
+                if (data.is_replenished_box && data.replenish_info) {
+                    // Skenario: Box Eks-Potong Kanban yang telah digenapi kembali oleh Gudang ke Qty aslinya (misal 200 pcs)
+                    lbl.is_replenished_box = true;
+                    lbl.replenish_info = data.replenish_info;
+                    lbl.Z3 = data.replenish_info.original_barcode_qty || lbl.Z3;
+
+                    var repQtyInp = document.getElementById('scan-label-qty');
+                    if (repQtyInp) repQtyInp.value = lbl.Z3;
+
+                    Swal.fire({
+                        toast: true,
+                        position: 'top-end',
+                        icon: 'info',
+                        title: 'Box Eks-Potong (Refill)',
+                        text: 'Pernah diambil ' + data.replenish_info.previously_taken_qty + ' pcs. Digenapi kembali ke ' + lbl.Z3 + ' pcs oleh Gudang.',
+                        timer: 4500,
+                        showConfirmButton: false
+                    });
+                } else if (data.ss_lot && parseInt(data.ss_lot.available_qty, 10) > 0) {
                     var prevBarcodeQty = parseInt(lbl.Z3, 10) || 0;
                     var realAvailableQty = parseInt(data.ss_lot.available_qty, 10);
                     if (prevBarcodeQty !== realAvailableQty) {
@@ -4157,6 +4234,8 @@ function proceedAddLabelToList(lbl) {
         lot: lotDisp,
         qty: parseInt(lbl.Z3) || 0,
         is_safety_stock: lbl.is_safety_stock_alloc,
+        is_replenished: lbl.is_replenished_box,
+        replenish_info: lbl.replenish_info,
         is_reinspect: lbl.was_rejected_before,
         rejected_info: lbl.rejected_info
     });
@@ -4363,7 +4442,10 @@ function renderScannedLabelsTable() {
                                   (lbl.reinspection_notes && (lbl.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
             
             var historyBadgeHtml = '';
-            if (lbl.is_safety_stock_alloc) {
+            if (lbl.is_replenished_box) {
+                var prevTaken = (lbl.replenish_info && lbl.replenish_info.previously_taken_qty) ? lbl.replenish_info.previously_taken_qty : '100';
+                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #15803d; background-color: #f0fdf4; border: 1px solid #86efac; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;" title="Box ini sebelumnya pernah diambil ' + prevTaken + ' pcs dan telah digenapi kembali oleh Gudang">🔄 Refill (Eks-Potong ' + prevTaken + ' pcs)</span>';
+            } else if (lbl.is_safety_stock_alloc) {
                 historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">📦 Asal: Safety Stock</span>';
             } else if (isLabelReinspect) {
                 historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">⚠️ Riwayat: Eks-NG</span>';
@@ -5105,6 +5187,41 @@ function refreshPlanningItemsAjax(autoSelectId, isForce, onComplete) {
 }
 
 var currentModalStatusFilter = 'all';
+var showCompletedKanban = false; // Default: Sembunyikan Kanban yang sudah selesai 100%
+
+function toggleCompletedKanbanVisibility() {
+    showCompletedKanban = !showCompletedKanban;
+    updateCompletedToggleButton();
+    filterPlanningItems();
+}
+
+function updateCompletedToggleButton() {
+    var btn = document.getElementById('btn-toggle-completed-kanban');
+    var lbl = document.getElementById('btn-toggle-completed-label');
+    var cntEl = document.getElementById('btn-toggle-completed-count');
+    
+    // Hitung berapa kanban selesai dari cachedPlanningItems
+    var completedCount = 0;
+    if (Array.isArray(cachedPlanningItems)) {
+        completedCount = cachedPlanningItems.filter(function(k) {
+            var targetQty = parseInt(k.qty) || 0;
+            var passedQty = parseInt(k.total_passed_qty) || 0;
+            var pct = (targetQty > 0) ? Math.round((passedQty / targetQty) * 100) : 0;
+            return (pct >= 100 || k.status === 'completed');
+        }).length;
+    }
+    if (cntEl) cntEl.textContent = completedCount;
+
+    if (!btn || !lbl) return;
+
+    if (showCompletedKanban) {
+        btn.className = 'px-3 py-2 text-xs font-bold rounded-lg border border-emerald-500 bg-emerald-600 text-white hover:bg-emerald-700 transition-all flex items-center gap-1.5 flex-shrink-0 shadow-xs cursor-pointer';
+        lbl.innerHTML = 'Sembunyikan Selesai (<span id="btn-toggle-completed-count">' + completedCount + '</span>)';
+    } else {
+        btn.className = 'px-3 py-2 text-xs font-bold rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition-all flex items-center gap-1.5 flex-shrink-0 shadow-xs cursor-pointer';
+        lbl.innerHTML = 'Lihat Selesai (<span id="btn-toggle-completed-count">' + completedCount + '</span>)';
+    }
+}
 
 function renderModalKpiSummary(kpi, userStats) {
     // 1. Update 6 Kartu KPI
@@ -5139,6 +5256,7 @@ function renderModalKpiSummary(kpi, userStats) {
     if (uPass) uPass.textContent = (parseInt(userStats.passed_lots) || 0).toLocaleString();
     if (uNg) uNg.textContent = (parseInt(userStats.ng_lots) || 0).toLocaleString();
 
+    updateCompletedToggleButton();
     updateKpiActiveCardStyles();
 }
 
@@ -5154,9 +5272,16 @@ function filterModalByStatus(status) {
         currentModalScope = 'today';
         currentModalBatchId = 'all';
         currentModalStatusFilter = status || 'all';
+        if (status === 'completed') showCompletedKanban = true;
         updateKpiActiveCardStyles();
         refreshPlanningItemsAjax();
         return;
+    }
+
+    // Jika user mengklik filter 'completed', otomatis aktifkan showCompletedKanban
+    if (status === 'completed') {
+        showCompletedKanban = true;
+        updateCompletedToggleButton();
     }
 
     // Jika status yang sama diklik lagi, toggle kembali ke 'all'
@@ -6419,12 +6544,16 @@ function processPlanningSearchSubmit() {
     // 1. Cek apakah ada exact match di tabel yang sedang tampil
     var targetRow = res.exactMatchRow;
     if (targetRow) {
-        var actionBtn = targetRow.querySelector('button');
-        if (actionBtn) {
-            inputEl.value = '';
-            filterPlanningItems();
-            actionBtn.click();
-            return;
+        var isTargetCompleted = (targetRow.getAttribute('data-status-group') === 'completed' || targetRow.getAttribute('data-is-uncompleted') === '0');
+        // Jika target row adalah completed dan user tidak sedang dalam mode lihat selesai, jangan auto-click
+        if (!isTargetCompleted || showCompletedKanban || currentModalStatusFilter === 'completed') {
+            var actionBtn = targetRow.querySelector('button');
+            if (actionBtn) {
+                inputEl.value = '';
+                filterPlanningItems();
+                actionBtn.click();
+                return;
+            }
         }
     }
 
@@ -6458,10 +6587,67 @@ function processPlanningSearchSubmit() {
                 });
 
                 if (matchedPlan) {
-                    inputEl.value = '';
                     var targetTotalQty = parseInt(matchedPlan.qty) || 0;
                     var totalPassedQty = parseInt(matchedPlan.total_passed_qty) || 0;
                     var remainingQty = Math.max(0, targetTotalQty - totalPassedQty);
+                    var isCompletedPlan = (matchedPlan.status === 'completed' || (targetTotalQty > 0 && totalPassedQty >= targetTotalQty));
+
+                    // Jika Kanban yang dicari/discan sudah 100% selesai
+                    if (isCompletedPlan) {
+                        inputEl.value = '';
+                        filterPlanningItems();
+
+                        if (typeof Swal !== 'undefined') {
+                            Swal.fire({
+                                icon: 'info',
+                                title: '<span class="text-emerald-800 font-extrabold text-base">Kanban Telah Selesai</span>',
+                                html: '<div class="text-center text-xs text-slate-700 space-y-2">' +
+                                    '<div class="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg">' +
+                                        '<div class="font-bold text-emerald-950 font-mono">#' + escapeHtml(matchedPlan.kanban_no || '-') + ' — ' + escapeHtml(matchedPlan.item_code) + '</div>' +
+                                        '<div class="text-[11px] text-emerald-800 font-medium">' + escapeHtml(matchedPlan.display_part_name || matchedPlan.item_description || '') + '</div>' +
+                                        '<div class="text-[11px] font-bold text-emerald-700 mt-0.5">Progres: 100% Selesai (' + totalPassedQty + ' / ' + targetTotalQty + ' pcs)</div>' +
+                                    '</div>' +
+                                    '<p class="text-[11.5px] text-slate-600 font-medium">' +
+                                        'Kanban ini telah selesai diinspeksi. Silakan periksa <b>Safety Stock</b> atau buka riwayat Kanban ini.' +
+                                    '</p>' +
+                                '</div>',
+                                showCancelButton: true,
+                                confirmButtonColor: '#7c3aed',
+                                cancelButtonColor: '#059669',
+                                confirmButtonText: '<span class="flex items-center gap-1.5 font-bold text-xs"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg> Periksa Safety Stock</span>',
+                                cancelButtonText: '<span class="font-bold text-xs">Lihat Kanban Ini</span>',
+                                reverseButtons: true
+                            }).then(function(result) {
+                                if (result.isConfirmed) {
+                                    startDirectSafetyStockScan(matchedPlan.item_code);
+                                } else if (result.dismiss === Swal.DismissReason.cancel) {
+                                    // Buka Kanban yang sudah selesai
+                                    showCompletedKanban = true;
+                                    updateCompletedToggleButton();
+                                    filterPlanningItems();
+                                    selectPlanningItem(
+                                        parseInt(matchedPlan.id),
+                                        matchedPlan.item_code,
+                                        matchedPlan.display_part_name || matchedPlan.item_description,
+                                        matchedPlan.customer || 'PT. Indonesia Epson Industry',
+                                        remainingQty,
+                                        matchedPlan.check_type || '',
+                                        'kanban',
+                                        parseInt(matchedPlan.avail_ss_qty) || 0,
+                                        totalPassedQty,
+                                        targetTotalQty,
+                                        matchedPlan.kanban_no || '',
+                                        matchedPlan.eta || matchedPlan.req_date || ''
+                                    );
+                                }
+                            });
+                        } else {
+                            alert('Kanban ' + (matchedPlan.kanban_no || matchedPlan.item_code) + ' sudah selesai 100%. Silakan periksa Safety Stock.');
+                        }
+                        return;
+                    }
+
+                    inputEl.value = '';
                     var isSafetyStock = (matchedPlan.plan_type === 'safety_stock' || (matchedPlan.batch_plan_type || '') === 'safety_stock' || (matchedPlan.kanban_no || '').toUpperCase().indexOf('SS') === 0);
                     var planTypeAttr = isSafetyStock ? 'safety_stock' : 'kanban';
 
@@ -6601,12 +6787,76 @@ function filterPlanningItems() {
             matchesStatus = (currentModalStatusFilter === rowStatusGroup);
         }
 
+        // Cek apakah item ini completed
+        var isCompleted = (row.getAttribute('data-status-group') === 'completed' || row.getAttribute('data-is-uncompleted') === '0');
+
+        // Aturan Sembunyikan Kanban Selesai:
+        // Jika status filter adalah 'completed', tampilkan.
+        // Jika showCompletedKanban bernilai false dan status filter bukan 'completed', Kanban selesai disembunyikan.
+        var allowsCompleted = showCompletedKanban || (currentModalStatusFilter === 'completed');
+        if (isCompleted && !allowsCompleted) {
+            matchesStatus = false;
+        }
+
         if (matchesSearch && matchesStatus) {
             row.style.display = '';
             visibleCount++;
             lastVisibleRow = row;
         } else {
             row.style.display = 'none';
+        }
+    }
+
+    // Periksa apakah tabel kosong karena seluruh Kanban telah selesai diinspeksi
+    var bannerRow = document.getElementById('row-all-kanban-completed-banner');
+    if (bannerRow) {
+        bannerRow.remove();
+    }
+
+    if (visibleCount === 0 && rows.length > 0) {
+        // Cek apakah sebenarnya semua row yang ada di batch ini berstatus completed
+        var totalRows = rows.length;
+        var completedRowsCount = 0;
+        for (var j = 0; j < rows.length; j++) {
+            if (rows[j].getAttribute('data-status-group') === 'completed' || rows[j].getAttribute('data-is-uncompleted') === '0') {
+                completedRowsCount++;
+            }
+        }
+
+        if (completedRowsCount === totalRows && !showCompletedKanban && query === '') {
+            // Semua Kanban pada batch/hari ini sudah selesai diinspeksi! Tampilkan banner ringkas Opsi 1 persis di tengah
+            var bannerTr = document.createElement('tr');
+            bannerTr.id = 'row-all-kanban-completed-banner';
+            bannerTr.innerHTML = '<td colspan="7" style="padding: 40px 16px; text-align: center; vertical-align: middle;">' +
+                '<div style="background: linear-gradient(135deg, #f0fdf4 0%, #ffffff 100%); border: 1.5px solid #86efac; border-radius: 16px; padding: 22px 28px; box-shadow: 0 4px 16px rgba(16, 185, 129, 0.08); display: inline-block; max-width: 540px; width: 100%; margin: 0 auto; text-align: center;">' +
+                    '<div style="width: 44px; height: 44px; border-radius: 9999px; background-color: #10b981; color: #ffffff; display: flex; align-items: center; justify-content: center; margin: 0 auto 10px auto; box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);">' +
+                        '<svg style="width: 24px; height: 24px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>' +
+                    '</div>' +
+                    '<h3 style="color: #064e3b; font-weight: 900; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 6px;">SELURUH KANBAN HARI INI TELAH SELESAI</h3>' +
+                    '<p style="color: #475569; font-size: 11.5px; font-weight: 500; line-height: 1.5; margin-bottom: 16px;">' +
+                        'Semua lot Kanban telah tuntas diinspeksi. Silakan lanjutkan pemeriksaan <b style="color: #7c3aed; font-weight: 800;">Safety Stock</b> gudang.' +
+                    '</p>' +
+                    '<div style="display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;">' +
+                        '<button type="button" onclick="startDirectSafetyStockScan()" style="background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%); color: #ffffff; font-weight: 800; font-size: 12px; padding: 8px 16px; border-radius: 8px; border: none; box-shadow: 0 2px 6px rgba(124, 58, 237, 0.3); display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">' +
+                            '<svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>' +
+                            '<span>+ Periksa Safety Stock</span>' +
+                        '</button>' +
+                        '<button type="button" onclick="toggleCompletedKanbanVisibility()" style="background-color: #ffffff; color: #334155; border: 1px solid #cbd5e1; font-weight: 700; font-size: 12px; padding: 8px 14px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">' +
+                            '<svg style="width: 14px; height: 14px; color: #059669;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>' +
+                            '<span>Lihat Kanban Selesai (' + totalRows + ')</span>' +
+                        '</button>' +
+                    '</div>' +
+                '</div>' +
+            '</td>';
+            tbody.appendChild(bannerTr);
+        } else if (query !== '') {
+            // Pencarian tidak ada yang cocok
+            var noMatchTr = document.createElement('tr');
+            noMatchTr.id = 'row-all-kanban-completed-banner';
+            noMatchTr.innerHTML = '<td colspan="7" class="px-4 py-10 text-center text-slate-400 font-bold text-xs">' +
+                'Tidak ada data Kanban yang sesuai dengan kata kunci: <span class="text-blue-600 font-mono">"' + escapeHtml(query) + '"</span>' +
+            '</td>';
+            tbody.appendChild(noMatchTr);
         }
     }
 
@@ -11173,7 +11423,10 @@ function validateBatchLabelWithDid(item) {
         didOpen: function() { Swal.showLoading(); }
     });
 
-    var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only&part_code=' + encodeURIComponent(pCode) + '&lot_number=' + encodeURIComponent(lNum) + '&ref_number=' + encodeURIComponent(item.z5 || '');
+    var checkUrl = '<?= base_url("modules/inspection/scan_validate.php") ?>?mode=check_did_only&part_code=' + encodeURIComponent(pCode) + 
+                   '&lot_number=' + encodeURIComponent(lNum) + 
+                   '&ref_number=' + encodeURIComponent(item.z5 || '') +
+                   '&barcode_qty=' + encodeURIComponent(item.z3 || 0);
 
     fetch(checkUrl)
         .then(function(r) { return r.json(); })
@@ -11208,22 +11461,44 @@ function validateBatchLabelWithDid(item) {
                 return;
             }
 
-            // Jika terdeteksi Safety Stock: sesuaikan Qty ke sisa stok aktual di database
-            if (data.is_safety_stock && data.ss_lot && parseInt(data.ss_lot.available_qty, 10) > 0) {
-                var prevBatchQty = parseInt(item.z3, 10) || 0;
-                var realStockQty = parseInt(data.ss_lot.available_qty, 10);
-                if (prevBatchQty !== realStockQty) {
-                    item.z3 = realStockQty;
+            // Jika terdeteksi Safety Stock
+            if (data.is_safety_stock) {
+                if (data.is_replenished_box && data.replenish_info) {
+                    item.is_replenished_box = true;
+                    item.replenish_info = data.replenish_info;
+                    item.z3 = data.replenish_info.original_barcode_qty || item.z3;
+
                     Swal.fire({
                         toast: true,
                         position: 'top-end',
                         icon: 'info',
-                        title: 'Safety Stock Terdeteksi',
-                        text: 'Qty disesuaikan ke sisa stok: ' + realStockQty + ' pcs (Label: ' + prevBatchQty + ' pcs)',
-                        timer: 3500,
+                        title: 'Box Eks-Potong (Refill)',
+                        text: 'Pernah diambil ' + data.replenish_info.previously_taken_qty + ' pcs. Digenapi kembali ke ' + item.z3 + ' pcs oleh Gudang.',
+                        timer: 4500,
                         showConfirmButton: false
                     });
+                } else if (data.ss_lot && parseInt(data.ss_lot.available_qty, 10) > 0) {
+                    var prevBatchQty = parseInt(item.z3, 10) || 0;
+                    var realStockQty = parseInt(data.ss_lot.available_qty, 10);
+                    if (prevBatchQty !== realStockQty) {
+                        item.z3 = realStockQty;
+                        Swal.fire({
+                            toast: true,
+                            position: 'top-end',
+                            icon: 'info',
+                            title: 'Safety Stock Terdeteksi',
+                            text: 'Qty disesuaikan ke sisa stok: ' + realStockQty + ' pcs (Label: ' + prevBatchQty + ' pcs)',
+                            timer: 3500,
+                            showConfirmButton: false
+                        });
+                    }
                 }
+            }
+
+            // Cek apakah label ini pernah memiliki riwayat NG di masa lalu
+            if (data.was_rejected_before && data.rejected_info) {
+                item.was_rejected_before = true;
+                item.rejected_info = data.rejected_info;
             }
 
             // DID Passed! Push item to scanned labels

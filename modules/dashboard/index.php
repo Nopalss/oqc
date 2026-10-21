@@ -132,6 +132,15 @@ if ($filterType === 'all_years') {
 // ── Fetch Master Customers List for Filter Dropdown (dari session cache) ────
 $customerOptions = $_meta['customers'] ?? [];
 
+// ── Load Global Target Settings (Target PPM) ────────────────────────────────
+$dashboardTargetPpm = 0;
+if ($pdo) {
+    try {
+        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
+        $dashboardTargetPpm = (float)($stmtTgt->fetchColumn() ?: 0);
+    } catch (Exception $e) {}
+}
+
 // ── Init metric variables ──────────────────────────────────────────────────
 $kpi = [
     'total_inspected' => 0,
@@ -1232,6 +1241,42 @@ $initialDashboardVersion = md5(implode('|', [
                     </div>
                     
                     <div class="no-print" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <!-- Global Target PPM Control -->
+                        <div style="position:relative;">
+                            <button type="button" id="btnSetPpmTarget" onclick="toggleTargetPpmModal(event)" 
+                                    style="padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:6px;border:1px solid #fecaca;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:#fef2f2;color:#dc2626;"
+                                    title="Atur Target PPM Kualitas (Garis Merah)">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+                                <span>Target: <strong id="lblDisplayTargetPpm"><?= $dashboardTargetPpm > 0 ? number_format($dashboardTargetPpm) : 'Belum Diatur' ?></strong> PPM</span>
+                            </button>
+
+                            <!-- Target PPM Popover Modal -->
+                            <div id="popoverTargetPpm" style="display:none;position:absolute;left:0;top:calc(100% + 6px);width:260px;background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1);z-index:90;padding:12px;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                                    <div style="font-size:11.5px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:5px;">
+                                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;"></span>
+                                        Target Batas PPM
+                                    </div>
+                                    <button type="button" onclick="closeTargetPpmModal(event)" style="border:none;background:transparent;color:#94a3b8;cursor:pointer;padding:2px;font-size:14px;line-height:1;">&times;</button>
+                                </div>
+                                <div style="font-size:10px;color:#64748b;margin-bottom:8px;line-height:1.4;">
+                                    Masukkan nilai target maksimal defect rate (PPM). Nilai ini akan tampil sebagai garis batas merah di chart.
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+                                    <input type="number" id="inputTargetPpm" min="0" step="any" 
+                                           value="<?= $dashboardTargetPpm > 0 ? (float)$dashboardTargetPpm : '' ?>" 
+                                           placeholder="Contoh: 100" 
+                                           style="flex:1;padding:5px 8px;font-size:11px;border:1px solid #cbd5e1;border-radius:6px;font-weight:700;color:#0f172a;outline:none;" 
+                                           onkeydown="if(event.key==='Enter') saveTargetPpm(event);">
+                                    <span style="font-size:10.5px;font-weight:700;color:#64748b;">PPM</span>
+                                </div>
+                                <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;">
+                                    <button type="button" onclick="saveTargetPpm(event, 0)" style="padding:4px 8px;font-size:10px;font-weight:600;border:1px solid #e2e8f0;border-radius:5px;background:#f8fafc;color:#64748b;cursor:pointer;">Reset</button>
+                                    <button type="button" id="btnSaveTargetPpm" onclick="saveTargetPpm(event)" style="padding:4px 10px;font-size:10px;font-weight:700;border:none;border-radius:5px;background:#ef4444;color:#ffffff;cursor:pointer;box-shadow:0 1px 2px rgba(239,68,68,0.2);">Simpan</button>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Metric Scale Switcher (PPM vs %) -->
                         <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Skala Pengukuran Kualitas">
                             <button type="button" id="btnMetricPPM" onclick="switchTrendMetricScale('ppm')" style="padding:3px 9px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
@@ -1370,12 +1415,12 @@ $initialDashboardVersion = md5(implode('|', [
                                         <th style="padding:6px 10px;white-space:nowrap;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:4;">
                                             <?= $isPassedMode ? 'STATUS HASIL' : 'JENIS NG' ?>
                                         </th>
+                                        <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;">TOTAL</th>
                                         <?php foreach ($activeDefectPeriodKeys as $dk): ?>
                                             <th style="padding:6px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;">
                                                 <?= htmlspecialchars($stackedPeriodLabels[$dk] ?? $dk) ?>
                                             </th>
                                         <?php endforeach; ?>
-                                        <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;">TOTAL</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1387,29 +1432,33 @@ $initialDashboardVersion = md5(implode('|', [
                                         foreach ($rowsPassedMode as $rpm):
                                             $isPassRow = ($rpm['key'] === 'passed');
                                             $rowTotalPcs = 0;
+                                            $rowVals = [];
+                                            foreach ($activeDefectPeriodKeys as $dk) {
+                                                $s = (int)($trendMap[$dk]['sample'] ?? 0);
+                                                $n = (int)($trendMap[$dk]['ng'] ?? 0);
+                                                $val = $isPassRow ? max(0, $s - $n) : $n;
+                                                $rowTotalPcs += $val;
+                                                $ppmVal = ($s > 0) ? round(($val / $s) * 1000000, 1) : 0;
+                                                $rowVals[$dk] = ['val' => $val, 'ppm' => $ppmVal];
+                                            }
+                                            $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
                                     ?>
                                         <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;" class="hover:bg-blue-50">
                                             <td style="padding:5px 10px;font-weight:700;color:#1e293b;white-space:nowrap;position:sticky;left:0;background:#ffffff;z-index:2;">
                                                 <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $rpm['color'] ?>;margin-right:4px;vertical-align:middle;"></span>
                                                 <?= $rpm['label'] ?>
                                             </td>
+                                            <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:<?= $rpm['color'] ?>;background:<?= $isPassRow ? '#f0fdf4' : '#fff1f2' ?>;">
+                                                <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
+                                            </td>
                                             <?php foreach ($activeDefectPeriodKeys as $dk): 
-                                                $s = (int)($trendMap[$dk]['sample'] ?? 0);
-                                                $n = (int)($trendMap[$dk]['ng'] ?? 0);
-                                                $val = $isPassRow ? max(0, $s - $n) : $n;
-                                                $rowTotalPcs += $val;
-                                                $ppmVal = ($s > 0) ? round(($val / $s) * 1000000, 1) : 0;
+                                                $val = $rowVals[$dk]['val'] ?? 0;
+                                                $ppmVal = $rowVals[$dk]['ppm'] ?? 0;
                                             ?>
                                                 <td style="padding:5px 8px;text-align:right;font-family:monospace;font-weight:700;color:<?= $val > 0 ? $rpm['color'] : '#cbd5e1' ?>;">
                                                     <span class="defect-metric-val" data-pcs="<?= $val ?>" data-ppm="<?= $ppmVal ?>"><?= $val > 0 ? number_format($val) : '-' ?></span>
                                                 </td>
                                             <?php endforeach; ?>
-                                            <?php 
-                                            $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
-                                            ?>
-                                            <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:<?= $rpm['color'] ?>;background:<?= $isPassRow ? '#f0fdf4' : '#fff1f2' ?>;">
-                                                <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
-                                            </td>
                                         </tr>
                                     <?php endforeach; ?>
                                     <?php else: ?>
@@ -1423,6 +1472,9 @@ $initialDashboardVersion = md5(implode('|', [
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $thColor ?>;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= htmlspecialchars($dname) ?>
                                                 </td>
+                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">
+                                                    <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
+                                                </td>
                                                 <?php foreach ($activeDefectPeriodKeys as $dk): 
                                                     $valPcs = (int)($defectMatrix[$dk][$dname] ?? 0);
                                                     $sample = (int)($trendMap[$dk]['sample'] ?? 0);
@@ -1432,9 +1484,6 @@ $initialDashboardVersion = md5(implode('|', [
                                                         <span class="defect-metric-val" data-pcs="<?= $valPcs ?>" data-ppm="<?= $valPpm ?>"><?= $valPcs > 0 ? number_format($valPcs) : '-' ?></span>
                                                     </td>
                                                 <?php endforeach; ?>
-                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">
-                                                    <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
-                                                </td>
                                             </tr>
                                         <?php endforeach; ?>
                                         <?php if (!empty($otherNDefectTypes)): 
@@ -1450,6 +1499,9 @@ $initialDashboardVersion = md5(implode('|', [
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:#94a3b8;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= 'Others (' . count($otherNDefectTypes) . ' jenis lainnya)' ?>
                                                 </td>
+                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#64748b;background:#f1f5f9;">
+                                                    <span class="defect-metric-total-val" data-pcs="<?= $rowTotalOtherPcs ?>" data-ppm="<?= $rowTotalOtherPpm ?>"><?= number_format($rowTotalOtherPcs) ?></span>
+                                                </td>
                                                 <?php foreach ($activeDefectPeriodKeys as $dk): 
                                                     $valPcs = 0;
                                                     foreach ($otherNDefectTypes as $odn) {
@@ -1462,9 +1514,6 @@ $initialDashboardVersion = md5(implode('|', [
                                                         <span class="defect-metric-val" data-pcs="<?= $valPcs ?>" data-ppm="<?= $valPpm ?>"><?= $valPcs > 0 ? number_format($valPcs) : '-' ?></span>
                                                     </td>
                                                 <?php endforeach; ?>
-                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#64748b;background:#f1f5f9;">
-                                                    <span class="defect-metric-total-val" data-pcs="<?= $rowTotalOtherPcs ?>" data-ppm="<?= $rowTotalOtherPpm ?>"><?= number_format($rowTotalOtherPcs) ?></span>
-                                                </td>
                                             </tr>
                                         <?php endif; endif; ?>
                                     <?php endif; ?>
@@ -1474,7 +1523,8 @@ $initialDashboardVersion = md5(implode('|', [
                                         <td style="padding:6px 10px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;">TOTAL</td>
                                         <?php 
                                         $grandSumPcs = 0;
-                                        foreach ($activeDefectPeriodKeys as $dk): 
+                                        $colSums = [];
+                                        foreach ($activeDefectPeriodKeys as $dk) {
                                             if ($isPassedMode) {
                                                 $colPcs = (int)($trendMap[$dk]['sample'] ?? 0);
                                             } else {
@@ -1483,17 +1533,21 @@ $initialDashboardVersion = md5(implode('|', [
                                             $grandSumPcs += $colPcs;
                                             $colSample = (int)($trendMap[$dk]['sample'] ?? 0);
                                             $colPpm = ($colSample > 0) ? round(($colPcs / $colSample) * 1000000, 1) : 0;
-                                        ?>
-                                            <td style="padding:6px 8px;text-align:right;font-family:monospace;color:#0f172a;">
-                                                <span class="defect-metric-total-val" data-pcs="<?= $colPcs ?>" data-ppm="<?= $colPpm ?>"><?= number_format($colPcs) ?></span>
-                                            </td>
-                                        <?php endforeach; ?>
-                                        <?php 
+                                            $colSums[$dk] = ['pcs' => $colPcs, 'ppm' => $colPpm];
+                                        }
                                         $grandSumPpm = ($grandTotSample > 0) ? round(($grandSumPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
                                         <td style="padding:6px 10px;text-align:right;font-family:monospace;color:#dc2626;background:#fee2e2;">
                                             <span class="defect-metric-total-val" data-pcs="<?= $grandSumPcs ?>" data-ppm="<?= $grandSumPpm ?>"><?= number_format($grandSumPcs) ?></span>
                                         </td>
+                                        <?php foreach ($activeDefectPeriodKeys as $dk): 
+                                            $colPcs = $colSums[$dk]['pcs'] ?? 0;
+                                            $colPpm = $colSums[$dk]['ppm'] ?? 0;
+                                        ?>
+                                            <td style="padding:6px 8px;text-align:right;font-family:monospace;color:#0f172a;">
+                                                <span class="defect-metric-total-val" data-pcs="<?= $colPcs ?>" data-ppm="<?= $colPpm ?>"><?= number_format($colPcs) ?></span>
+                                            </td>
+                                        <?php endforeach; ?>
                                     </tr>
                                 </tfoot>
                             </table>
@@ -2043,6 +2097,7 @@ $initialDashboardVersion = md5(implode('|', [
     var trendLabelsData        = <?= $jsLabels ?>;
     var trendNGData            = <?= $jsTrendNG ?>;
     var trendSampleData        = <?= $jsTrendSample ?>;
+    var globalTargetPpm        = <?= (float)$dashboardTargetPpm ?>;
     var currentChartType       = localStorage.getItem('oqc_trend_chart_type') || 'line';
     var currentMetricScale     = localStorage.getItem('oqc_trend_metric_scale') || 'ppm';
     if (currentMetricScale === 'ppb') currentMetricScale = 'pct';
@@ -2091,14 +2146,34 @@ $initialDashboardVersion = md5(implode('|', [
             pointRadius: isBar ? 0 : 3.5,
             pointHoverRadius: 6,
             fill: !isBar,
-            tension: 0.35
+            tension: 0.35,
+            order: 2
         };
+
+        var allDatasets = [datasetConfig];
+
+        // Garis Merah Target PPM (Hanya tampil saat mode Defect Rate & Skala PPM, atau jika target diset > 0)
+        if (!isPassedMode && !isPct && globalTargetPpm > 0 && trendLabelsData.length > 0) {
+            allDatasets.push({
+                label: 'Batas Target (Maks ' + Number(globalTargetPpm).toLocaleString() + ' PPM)',
+                type: 'line',
+                data: trendLabelsData.map(function() { return globalTargetPpm; }),
+                borderColor: '#ef4444',
+                borderWidth: 2,
+                borderDash: [6, 4],
+                pointRadius: 0,
+                pointHoverRadius: 0,
+                fill: false,
+                tension: 0,
+                order: 1
+            });
+        }
 
         trendChartInstance = new Chart(ctx, {
             type: type,
             data: {
                 labels: trendLabelsData,
-                datasets: [datasetConfig]
+                datasets: allDatasets
             },
             options: {
                 responsive: true,
@@ -2115,10 +2190,16 @@ $initialDashboardVersion = md5(implode('|', [
                         cornerRadius: 8,
                         callbacks: {
                             label: function(context) {
+                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
+                                    return ' 🎯 Batas Target: ' + Number(context.raw || 0).toLocaleString() + ' PPM';
+                                }
                                 var val = Number(context.raw || 0).toLocaleString(undefined, {minimumFractionDigits: isPct ? 1 : 0, maximumFractionDigits: isPct ? 2 : 1});
                                 return (isPassedMode ? ' Yield Rate: ' : ' Defect Rate: ') + val + (isPct ? '%' : ' PPM');
                             },
                             afterLabel: function(context) {
+                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
+                                    return '';
+                                }
                                 var idx = context.dataIndex;
                                 var ng = Number(trendNGData[idx] || 0).toLocaleString();
                                 var sp = Number(trendSampleData[idx] || 0).toLocaleString();
@@ -2154,6 +2235,85 @@ $initialDashboardVersion = md5(implode('|', [
 
         updateChartSwitcherUI(type);
         updateMetricSwitcherUI(scale);
+    }
+
+    function toggleTargetPpmModal(e) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        var pop = document.getElementById('popoverTargetPpm');
+        if (!pop) return;
+        var isVisible = (pop.style.display === 'block');
+        pop.style.display = isVisible ? 'none' : 'block';
+        if (!isVisible) {
+            var inp = document.getElementById('inputTargetPpm');
+            if (inp) {
+                setTimeout(function() { inp.focus(); inp.select(); }, 50);
+            }
+        }
+    }
+
+    function closeTargetPpmModal(e) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        var pop = document.getElementById('popoverTargetPpm');
+        if (pop) pop.style.display = 'none';
+    }
+
+    document.addEventListener('click', function(e) {
+        var pop = document.getElementById('popoverTargetPpm');
+        var btn = document.getElementById('btnSetPpmTarget');
+        if (pop && pop.style.display === 'block') {
+            if (!pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
+                pop.style.display = 'none';
+            }
+        }
+    });
+
+    function saveTargetPpm(e, forcedVal) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        if (e && e.preventDefault) e.preventDefault();
+
+        var inp = document.getElementById('inputTargetPpm');
+        var val = (forcedVal !== undefined) ? forcedVal : (inp ? inp.value.trim() : '');
+        var numVal = (val === '' || isNaN(val)) ? 0 : Math.max(0, parseFloat(val));
+        var btn = document.getElementById('btnSaveTargetPpm');
+        var originalBtnText = btn ? btn.textContent : 'Simpan';
+        
+        if (btn) {
+            btn.textContent = '...';
+        }
+
+        var formData = new FormData();
+        formData.append('target_key', 'dashboard_target_ppm');
+        formData.append('target_val', numVal);
+
+        fetch('ajax_save_target.php', {
+            method: 'POST',
+            body: formData
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (btn) {
+                btn.textContent = originalBtnText;
+            }
+            if (data && data.success) {
+                globalTargetPpm = Number(data.target_val || 0);
+                if (inp) inp.value = (globalTargetPpm > 0) ? globalTargetPpm : '';
+                var lbl = document.getElementById('lblDisplayTargetPpm');
+                if (lbl) {
+                    lbl.textContent = (globalTargetPpm > 0) ? Number(globalTargetPpm).toLocaleString() : 'Belum Diatur';
+                }
+                closeTargetPpmModal();
+                initTrendChart(currentChartType, currentMetricScale);
+            } else {
+                alert((data && data.message) ? data.message : 'Gagal menyimpan target');
+            }
+        })
+        .catch(function(err) {
+            if (btn) {
+                btn.textContent = originalBtnText;
+            }
+            console.error('Error saving target ppm:', err);
+            alert('Terjadi kesalahan jaringan saat menyimpan target');
+        });
     }
 
     function switchTrendChartType(type) {
@@ -3719,6 +3879,15 @@ $initialDashboardVersion = md5(implode('|', [
             var elRate = document.getElementById('kpiMetricRateVal');
             if (elRate) {
                 elRate.textContent = Number(rateVal).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: isPct ? 2 : 1});
+            }
+        }
+
+        // Update target PPM if provided
+        if (d.target_ppm !== undefined) {
+            globalTargetPpm = Number(d.target_ppm || 0);
+            var lblTgt = document.getElementById('lblDisplayTargetPpm');
+            if (lblTgt) {
+                lblTgt.textContent = (globalTargetPpm > 0) ? Number(globalTargetPpm).toLocaleString() : 'Belum Diatur';
             }
         }
 

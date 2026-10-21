@@ -833,6 +833,145 @@ if (!function_exists('parseQrScanString')) {
     }
 }
 
+/**
+ * Get count of active OPEN lots in Quarantine (matching modules/ng_quarantine/index.php)
+ */
+if (!function_exists('getOpenQuarantineLotsCount')) {
+    function getOpenQuarantineLotsCount($pdo = null) {
+        if (!$pdo) {
+            if (!function_exists('getDB')) {
+                require_once __DIR__ . '/database.php';
+            }
+            $pdo = getDB();
+        }
+        if (!$pdo) return 0;
+
+        try {
+            // Fetch raw NG lots
+            $allNgLots = $pdo->query("
+                SELECT 
+                    isl.id AS lot_id,
+                    isl.lot_number,
+                    isl.ref_number,
+                    isl.lot_status,
+                    k.item_code AS part_code
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                JOIN kanban_items k ON k.id = s.kanban_item_id
+                WHERE (
+                    isl.lot_result = 'rejected' 
+                    OR isl.lot_status IN ('rejected', 'ng_quarantine')
+                    OR EXISTS (
+                        SELECT 1 FROM inspection_ng_records ngr 
+                        WHERE ngr.session_lot_id = isl.id 
+                          AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
+                    )
+                )
+                AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
+                ORDER BY isl.id DESC
+            ")->fetchAll(PDO::FETCH_ASSOC);
+
+            if (empty($allNgLots)) return 0;
+
+            $ngGroupKeys = [];
+            $refNumbers = [];
+            $unreferencedNgLots = [];
+
+            foreach ($allNgLots as $row) {
+                $pCode = strtoupper(trim($row['part_code'] ?? ''));
+                $lNum  = strtoupper(trim($row['lot_number'] ?? ''));
+                $rNum  = strtoupper(trim($row['ref_number'] ?? ''));
+                $groupKey = $pCode . '|' . $lNum . '|' . $rNum;
+                $ngGroupKeys[$groupKey] = true;
+
+                if (!empty($rNum)) {
+                    $refNumbers[] = $row['ref_number'];
+                } else {
+                    $unreferencedNgLots[] = ['part_code' => $row['part_code'], 'lot_number' => $row['lot_number']];
+                }
+            }
+
+            $refNumbers = array_filter(array_unique($refNumbers));
+            $allSessionsForLots = $allNgLots;
+
+            if (!empty($refNumbers) || !empty($unreferencedNgLots)) {
+                $whereParts = [];
+                $params = [];
+                if (!empty($refNumbers)) {
+                    $pRef = implode(',', array_fill(0, count($refNumbers), '?'));
+                    $whereParts[] = "isl.ref_number IN ($pRef)";
+                    foreach ($refNumbers as $r) $params[] = $r;
+                }
+                foreach ($unreferencedNgLots as $uLot) {
+                    $whereParts[] = "(k.item_code = ? AND isl.lot_number = ? AND (isl.ref_number IS NULL OR isl.ref_number = ''))";
+                    $params[] = $uLot['part_code'];
+                    $params[] = $uLot['lot_number'];
+                }
+                $whereRelStr = "(" . implode(" OR ", $whereParts) . ")";
+                $sqlAllRounds = "
+                    SELECT isl.id AS lot_id, isl.lot_number, isl.ref_number, isl.lot_status, k.item_code AS part_code
+                    FROM inspection_session_lots isl
+                    JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                    JOIN kanban_items k ON k.id = s.kanban_item_id
+                    WHERE {$whereRelStr}
+                      AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
+                      AND (s.approval_notes IS NULL OR s.approval_notes NOT LIKE '%Direct Close%')
+                    ORDER BY isl.id DESC
+                ";
+                $stmtRounds = $pdo->prepare($sqlAllRounds);
+                $stmtRounds->execute($params);
+                $fetched = $stmtRounds->fetchAll(PDO::FETCH_ASSOC);
+                if (!empty($fetched)) $allSessionsForLots = $fetched;
+            }
+
+            $allLotIds = array_column($allSessionsForLots, 'lot_id');
+            $closuresByLot = [];
+            if (!empty($allLotIds)) {
+                $inLotIds = implode(',', array_map('intval', array_unique($allLotIds)));
+                $closureSql = "SELECT session_lot_id, closure_type FROM lot_quarantine_closures WHERE session_lot_id IN ($inLotIds)";
+                $stmtClosure = $pdo->query($closureSql);
+                while ($cRow = $stmtClosure->fetch(PDO::FETCH_ASSOC)) {
+                    $closuresByLot[(int)$cRow['session_lot_id']] = $cRow;
+                }
+            }
+
+            $groupedNgLotsMap = [];
+            foreach ($allSessionsForLots as $row) {
+                $pCode = strtoupper(trim($row['part_code'] ?? ''));
+                $lNum  = strtoupper(trim($row['lot_number'] ?? ''));
+                $rNum  = strtoupper(trim($row['ref_number'] ?? ''));
+                $groupKey = $pCode . '|' . $lNum . '|' . $rNum;
+                if (!isset($ngGroupKeys[$groupKey])) continue;
+                $groupedNgLotsMap[$groupKey][] = $row;
+            }
+
+            $openCount = 0;
+            foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
+                $latestRow = $groupRows[0];
+                $groupClosure = null;
+                foreach ($groupRows as $gRow) {
+                    $gLotId = (int)$gRow['lot_id'];
+                    if (isset($closuresByLot[$gLotId])) {
+                        $groupClosure = $closuresByLot[$gLotId];
+                        break;
+                    }
+                }
+                $lotSt = strtolower($latestRow['lot_status'] ?? '');
+                $isClosed = ($groupClosure !== null || in_array($lotSt, ['abolished', 'action_closed'], true));
+                if (!$isClosed) {
+                    $openCount++;
+                }
+            }
+
+            return $openCount;
+        } catch (Exception $e) {
+            return 0;
+        }
+    }
+}
+
 // Include OQC Summary Aggregate Helper
 require_once __DIR__ . '/summary_helper.php';
+
 

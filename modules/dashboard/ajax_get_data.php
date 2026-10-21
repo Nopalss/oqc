@@ -736,6 +736,13 @@ try {
     ]);
     $currentVersion = md5($rawToken);
 
+    // Get target PPM setting
+    $targetPpm = 0;
+    try {
+        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
+        $targetPpm = (float)($stmtTgt->fetchColumn() ?: 0);
+    } catch (Exception $e) {}
+
     // Return complete payload
     echo json_encode([
         'status'         => 'success',
@@ -743,6 +750,7 @@ try {
         'server_time'    => date('H:i:s'),
         'unit'           => $selectedUnit,
         'unit_text'      => $unitText,
+        'target_ppm'     => $targetPpm,
         'sample_basis'   => $selectedSampleBasis,
         'is_passed'      => ($selectedResult === 'passed'),
         'kpi'            => $kpi,

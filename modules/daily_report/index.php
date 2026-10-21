@@ -19,7 +19,7 @@ require_menu_access('daily_report');
 
 $pdo = getDB();
 
-$presetFilter  = sanitize($_GET['preset']     ?? 'mingguan');
+$presetFilter  = sanitize($_GET['preset']     ?? 'hari_ini');
 $search        = sanitize($_GET['search']     ?? '');
 $startDate     = sanitize($_GET['start_date'] ?? '');
 $endDate       = sanitize($_GET['end_date']   ?? '');
@@ -69,9 +69,9 @@ if (empty($startDate) || empty($endDate)) {
         $startDate = '2000-01-01';
         $endDate   = '2099-12-31';
     } else {
-        $presetFilter = 'mingguan';
-        $startDate    = date('Y-m-d', strtotime('monday this week'));
-        $endDate      = date('Y-m-d', strtotime('sunday this week'));
+        $presetFilter = 'hari_ini';
+        $startDate    = date('Y-m-d');
+        $endDate      = date('Y-m-d');
     }
 }
 
@@ -243,9 +243,12 @@ if ($pdo) {
         $params = [];
 
         if ($presetFilter !== 'all_years' && !empty($startDate) && !empty($endDate)) {
-            $where[] = "DATE(ss.started_at) BETWEEN :sd AND :ed";
+            // Logika Cerdas: Tampilkan sesi pada rentang tanggal aktif
+            // ATAU sesi lampau yang MASIH BELUM DISETUJUI (Pending ACC tunggakan kemarin)
+            $where[] = "(DATE(ss.started_at) BETWEEN :sd AND :ed OR (ss.is_approved = 0 AND DATE(ss.started_at) < :sd_pending))";
             $params[':sd'] = $startDate;
             $params[':ed'] = $endDate;
+            $params[':sd_pending'] = $startDate;
         }
 
         if ($inspectorId > 0) {
@@ -579,6 +582,67 @@ if ($pdo) {
         }
 
         // ═══════════════════════════════════════════════════════════════════
+        // 1B. GROUPING TAB AKTIVITAS INSPEKTUR (RINCIAN LOT PER INSPEKTUR)
+        // ═══════════════════════════════════════════════════════════════════
+        $inspectorSummary = [];
+        foreach ($sessionTimeline as $sess) {
+            $inspName = trim($sess['inspector_name'] ?: 'System');
+            if (!isset($inspectorSummary[$inspName])) {
+                $inspectorSummary[$inspName] = [
+                    'name'           => $inspName,
+                    'is_live'        => false,
+                    'live_lines'     => [],
+                    'total_sessions' => 0,
+                    'passed_sessions'=> 0,
+                    'rejected_sessions' => 0,
+                    'in_prog_sessions'  => 0,
+                    'total_lots'     => 0,
+                    'total_qty'      => 0,
+                    'total_sample'   => 0,
+                    'total_ng'       => 0,
+                    'lots'           => []
+                ];
+            }
+
+            $isSessLive = ($sess['session_status'] === 'in_progress' || empty($sess['closed_at']));
+            if ($isSessLive) {
+                $inspectorSummary[$inspName]['is_live'] = true;
+                $lName = $sess['line_name'] ?: 'Line 1';
+                if (!in_array($lName, $inspectorSummary[$inspName]['live_lines'])) {
+                    $inspectorSummary[$inspName]['live_lines'][] = $lName;
+                }
+            }
+
+            $inspectorSummary[$inspName]['total_sessions']++;
+            if ($sess['session_status'] === 'passed') {
+                $inspectorSummary[$inspName]['passed_sessions']++;
+            } elseif ($sess['session_status'] === 'rejected') {
+                $inspectorSummary[$inspName]['rejected_sessions']++;
+            } else {
+                $inspectorSummary[$inspName]['in_prog_sessions']++;
+            }
+
+            $inspectorSummary[$inspName]['total_lots']   += (int)$sess['box_count'];
+            $inspectorSummary[$inspName]['total_qty']    += (int)$sess['computed_qty'];
+            $inspectorSummary[$inspName]['total_sample'] += (int)$sess['effective_sample_size'];
+            
+            $sessNg = 0;
+            foreach ($sess['ng_records'] as $sn) {
+                $sessNg += (int)($sn['qty_ng'] ?? 1);
+            }
+            if ($sessNg === 0) $sessNg = (int)$sess['ng_count'];
+            $inspectorSummary[$inspName]['total_ng'] += $sessNg;
+        }
+
+        // Urutkan inspektur: yang sedang LIVE selalu di paling atas, lalu nama abjad
+        uasort($inspectorSummary, function($a, $b) {
+            if ($a['is_live'] !== $b['is_live']) {
+                return $b['is_live'] ? 1 : -1;
+            }
+            return strcmp($a['name'], $b['name']);
+        });
+
+        // ═══════════════════════════════════════════════════════════════════
         // 2. QUERY TAB RINGKASAN PER HARI (REKAP HARIAN)
         // ═══════════════════════════════════════════════════════════════════
         $sqlDailyGroup = "SELECT
@@ -851,6 +915,84 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         .excel-btn-apply:active {
             transform: scale(0.97);
         }
+
+        /* ── Real-Time Active Recording (REC) CSS Animation ── */
+        @keyframes oqcRecPulse {
+            0% {
+                transform: scale(0.9);
+                opacity: 0.9;
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+            }
+            70% {
+                transform: scale(1.15);
+                opacity: 1;
+                box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+            }
+            100% {
+                transform: scale(0.9);
+                opacity: 0.9;
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+            }
+        }
+        @keyframes oqcGlowBorder {
+            0%, 100% {
+                border-color: #fca5a5;
+                background-color: #fff1f2;
+            }
+            50% {
+                border-color: #f87171;
+                background-color: #ffe4e6;
+            }
+        }
+        .oqc-rec-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 9999px;
+            background-color: #ef4444;
+            display: inline-block;
+            flex-shrink: 0;
+            animation: oqcRecPulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+            will-change: transform, box-shadow;
+        }
+        .oqc-rec-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 9px;
+            border-radius: 9999px;
+            font-size: 10.5px;
+            font-weight: 900;
+            color: #b91c1c;
+            border: 1.5px solid #fca5a5;
+            background-color: #fff1f2;
+            box-shadow: 0 1px 3px rgba(239, 68, 68, 0.15);
+            animation: oqcGlowBorder 2s ease-in-out infinite;
+            letter-spacing: 0.3px;
+            white-space: nowrap;
+        }
+        .oqc-live-time-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            background: #fee2e2;
+            color: #dc2626;
+            font-size: 9px;
+            font-weight: 900;
+            padding: 1px 5px;
+            border-radius: 4px;
+            letter-spacing: 0.4px;
+            border: 1px solid #fca5a5;
+            margin-left: 4px;
+        }
+
+        /* ── Highlight Baris Sesi "LIVE RECORDING" ── */
+        tr.session-data-row.session-row-live {
+            background-color: #fff8f8 !important;
+            box-shadow: inset 4px 0 0 0 #ef4444;
+        }
+        tr.session-data-row.session-row-live:hover {
+            background-color: #fee2e2 !important;
+        }
         </style>
 
         <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -896,36 +1038,37 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
             <!-- 5 KPI CARDS RIBBON GRID -->
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 14px;">
-                <!-- KPI 1: Total Sesi -->
+                <!-- KPI 1: Total Sesi Inspeksi (Digabung: Status Pass/Reject & Jenis Kanban/SS) -->
                 <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
                     <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL SESI INSPEKSI</div>
                     <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
                         <?= number_format($dailySummary['total_sesi']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">sesi</span>
                     </div>
-                    <div style="font-size: 10px; color: #38bdf8; font-weight: 700; margin-top: 2px;">
-                        <?= $dailySummary['passed_sesi'] ?> Pass &bull; <?= $dailySummary['rejected_sesi'] ?> Reject
+                    <div style="font-size: 9.5px; color: #38bdf8; font-weight: 700; margin-top: 3px; line-height: 1.3;">
+                        <span><?= $dailySummary['passed_sesi'] ?> Pass &bull; <?= $dailySummary['rejected_sesi'] ?> Reject</span>
+                        <span style="color: #cbd5e1; margin-left: 2px;">(<?= $dailySummary['total_kanban_sesi'] ?> KB &bull; <?= $dailySummary['total_ss_sesi'] ?> SS)</span>
                     </div>
                 </div>
 
-                <!-- KPI 2: Kanban / SS Sesi -->
+                <!-- KPI 2: Total Lot & Sampling (LOT DULU BARU SAMPLE) -->
                 <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">KANBAN / SS SESI</div>
+                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL LOT &amp; SAMPLING</div>
                     <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_sesi']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">sesi</span>
+                        <?= number_format($dailySummary['total_label']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">Lot</span>
                     </div>
-                    <div style="font-size: 10px; color: #c4b5fd; font-weight: 700; margin-top: 2px;">
-                        <?= $dailySummary['total_kanban_sesi'] ?> Kanban &bull; <?= $dailySummary['total_ss_sesi'] ?> Safety Stock
+                    <div style="font-size: 10px; color: #38bdf8; font-weight: 800; margin-top: 3px;">
+                        <?= number_format($dailySummary['total_sampling']) ?> pcs Sampling Fisik
                     </div>
                 </div>
 
-                <!-- KPI 3: Total Sampling -->
+                <!-- KPI 3: Total Kuantitas Barang (Qty Pcs) -->
                 <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL SAMPLING</div>
+                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL BARANG (QTY)</div>
                     <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_sampling']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">pcs</span>
+                        <?= number_format($dailySummary['total_qty']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">pcs</span>
                     </div>
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 600; margin-top: 2px;">
-                        Dari <?= number_format($dailySummary['total_label']) ?> box label
+                    <div style="font-size: 10px; color: #c4b5fd; font-weight: 700; margin-top: 3px;">
+                        <?= $dailySummary['total_items'] ?> Jenis Part Diperiksa
                     </div>
                 </div>
 
@@ -935,7 +1078,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <div style="font-size: 20px; font-weight: 900; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#fff' ?>; margin-top: 2px; font-family: monospace; line-height: 1.1;">
                         <?= number_format($dailySummary['total_ng']) ?> <span style="font-size: 11px; font-weight: 600;"><?= $dailySummary['total_ng'] === 0 ? 'All OK' : 'pcs NG' ?></span>
                     </div>
-                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fecdd3' : '#4ade80' ?>; font-weight: 700; margin-top: 2px;">
+                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fecdd3' : '#4ade80' ?>; font-weight: 700; margin-top: 3px;">
                         <?= $dailySummary['total_ng'] > 0 ? 'Cacat terdeteksi' : 'Kualitas produksi prima' ?>
                     </div>
                 </div>
@@ -946,7 +1089,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
                         <?= $dailySummary['total_approved_sessions'] ?> / <?= $dailySummary['total_sesi'] ?> <span style="font-size: 11px; font-weight: 600;">Sesi</span>
                     </div>
-                    <div style="font-size: 10px; color: <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#6ee7b7' : '#fcd34d' ?>; font-weight: 700; margin-top: 2px;">
+                    <div style="font-size: 10px; color: <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#6ee7b7' : '#fcd34d' ?>; font-weight: 700; margin-top: 3px;">
                         <?php if ($dailySummary['total_sesi'] === 0): ?>
                             Tidak ada aktivitas
                         <?php elseif ($dailySummary['is_all_approved']): ?>
@@ -1107,6 +1250,26 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <span style="background: <?= $activeTab === 'daily' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'daily' ? '#fff' : '#475569' ?>; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
                             <?= $totalItems ?> Hari
                         </span>
+                    </button>
+
+                    <!-- Tab 3: Aktivitas Inspektur (NEW) -->
+                    <button type="button" id="tab-btn-inspector" onclick="switchReportTab('inspector')"
+                            style="padding: 7px 16px; font-size: 12px; font-weight: 800; border-radius: 9px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; transition: all 0.2s;"
+                            class="<?= $activeTab === 'inspector' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70' ?>">
+                        <svg style="width: 15px; height: 15px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                        </svg>
+                        Aktivitas Inspektur
+                        <span style="background: <?= $activeTab === 'inspector' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'inspector' ? '#fff' : '#475569' ?>; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
+                            <?= count($inspectorSummary) ?> Inspektur
+                        </span>
+                        <?php 
+                        $hasLiveInsp = false;
+                        foreach ($inspectorSummary as $insChk) { if ($insChk['is_live']) { $hasLiveInsp = true; break; } }
+                        if ($hasLiveInsp):
+                        ?>
+                            <span class="oqc-rec-dot" style="width: 7px; height: 7px;" title="Ada inspektur yang sedang aktif merekam inspeksi"></span>
+                        <?php endif; ?>
                     </button>
                 </div>
 
@@ -1466,6 +1629,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     $isKb = ($sess['inspection_type'] === 'kanban');
                                     $isReins = ((int)$sess['is_reinspection'] === 1 || (int)$sess['parent_session_id'] > 0);
                                     $isApp = (!empty($sess['is_approved']) && (int)$sess['is_approved'] === 1);
+                                    $isInProgress = ($sess['session_status'] === 'in_progress' || empty($sess['closed_at']));
                                     $sDate = !empty($sess['started_at']) ? date('d M Y', strtotime($sess['started_at'])) : '-';
                                     $sTime = !empty($sess['started_at']) ? date('H:i', strtotime($sess['started_at'])) : '-';
                                     $eTime = !empty($sess['closed_at']) ? date('H:i', strtotime($sess['closed_at'])) : 'Sekarang';
@@ -1476,9 +1640,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     $fStatus = strtoupper($sess['session_status'] ?? 'IN PROG');
                                     $fApproval = $isApp ? 'DISETUJUI' : 'BELUM DI-ACC';
                                 ?>
-                                <tr class="review-row hover:bg-slate-50 transition-colors session-data-row <?= $isApp ? 'row-approved-session' : 'row-pending-session' ?>"
+                                <tr class="review-row hover:bg-slate-50 transition-colors session-data-row <?= $isApp ? 'row-approved-session' : 'row-pending-session' ?> <?= $isInProgress ? 'session-row-live' : '' ?>"
                                     data-approved="<?= $isApp ? '1' : '0' ?>"
                                     data-session-id="<?= $sess['session_id'] ?>"
+                                    data-is-live="<?= $isInProgress ? '1' : '0' ?>"
                                     data-filter-date="<?= htmlspecialchars($fDate) ?>"
                                     data-filter-jalur="<?= htmlspecialchars($fJalur) ?>"
                                     data-filter-item="<?= htmlspecialchars($fItemPart) ?>"
@@ -1509,8 +1674,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     </td>
 
                                     <td style="padding: 11px 14px;">
-                                        <div style="font-weight: 800; color: #0f172a; font-size: 11px; white-space: nowrap;">
-                                            <?= $sTime ?> - <?= $eTime ?> WIB
+                                        <div class="session-time-text-<?= $sess['session_id'] ?>" style="font-weight: 800; color: #0f172a; font-size: 11px; white-space: nowrap; display: flex; align-items: center; gap: 4px;">
+                                            <span><?= $sTime ?> - <?= $eTime ?> WIB</span>
+                                            <?php if ($isInProgress): ?>
+                                                <span class="oqc-live-time-tag live-tag-<?= $sess['session_id'] ?>">LIVE</span>
+                                            <?php endif; ?>
                                         </div>
                                         <div style="font-size: 10px; color: #64748b; font-weight: 600; margin-top: 1px;">
                                             <?= $sDate ?>
@@ -1579,12 +1747,12 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     <!-- KOLOM 2: SAMPLING (PEMERIKSAAN QC) -->
                                     <td style="padding: 11px 14px; text-align: center;">
-                                        <span style="font-family: monospace; font-weight: 800; font-size: 12px; color: #0284c7; background: #f0f9ff; border: 1px solid #e0f2fe; padding: 3px 8px; border-radius: 6px; display: inline-block;">
+                                        <span class="session-sample-size-<?= $sess['session_id'] ?>" style="font-family: monospace; font-weight: 800; font-size: 12px; color: #0284c7; background: #f0f9ff; border: 1px solid #e0f2fe; padding: 3px 8px; border-radius: 6px; display: inline-block;">
                                             <?= number_format((int)($sess['effective_sample_size'] ?? $sess['sample_size'])) ?> pcs
                                         </span>
                                     </td>
 
-                                    <td style="padding: 11px 14px; text-align: center;">
+                                    <td style="padding: 11px 14px; text-align: center;" class="session-status-cell-<?= $sess['session_id'] ?>">
                                         <?php if ($sess['session_status'] === 'passed'): ?>
                                             <span style="display: inline-flex; align-items: center; gap: 3px; background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">
                                                 PASS
@@ -1594,8 +1762,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 REJECT
                                             </span>
                                         <?php else: ?>
-                                            <span style="display: inline-flex; align-items: center; gap: 3px; background: #fef3c7; color: #92400e; border: 1px solid #fde68a; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">
-                                                IN PROG
+                                            <span class="oqc-rec-badge" title="Sesi sedang aktif merekam proses inspeksi di line">
+                                                <span class="oqc-rec-dot"></span>
+                                                <span>REC IN PROG</span>
                                             </span>
                                         <?php endif; ?>
                                     </td>
@@ -1947,6 +2116,151 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- TAB PANE 3: AKTIVITAS INSPEKTUR (RINCIAN LOT PER INSPEKTUR)         -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <div id="pane-tab-inspector" style="display: <?= $activeTab === 'inspector' ? 'block' : 'none' ?>;" class="space-y-4">
+            <?php if (empty($inspectorSummary)): ?>
+                <div style="background: #fff; border: 1px solid #cbd5e1; border-radius: 14px; padding: 40px 20px; text-align: center;">
+                    <div style="width: 48px; height: 48px; border-radius: 9999px; background: #f1f5f9; display: inline-flex; align-items: center; justify-content: center; color: #94a3b8; margin-bottom: 12px;">
+                        <svg style="width: 24px; height: 24px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: #0f172a;">Tidak Ada Data Inspektur</div>
+                    <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Tidak ditemukan aktivitas inspeksi pada rentang filter saat ini.</div>
+                </div>
+            <?php else: ?>
+                <div class="grid grid-cols-1 gap-4">
+                    <?php 
+                    $inspIdx = 0;
+                    foreach ($inspectorSummary as $inspName => $iData): 
+                        $inspIdx++;
+                        $inspIdSafe = 'insp-' . md5($inspName);
+                        $isLive = !empty($iData['is_live']);
+                    ?>
+                        <div class="card p-0 bg-white border <?= $isLive ? 'border-red-300 ring-1 ring-red-200' : 'border-slate-200/90' ?> rounded-xl overflow-hidden shadow-xs" style="transition: all 0.2s;">
+                            <!-- Header Inspektur Card -->
+                            <div style="padding: 14px 18px; background: <?= $isLive ? '#fff8f8' : '#fafafa' ?>; border-bottom: 1px solid <?= $isLive ? '#fecaca' : '#e2e8f0' ?>; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; cursor: pointer;"
+                                 onclick="toggleInspectorAccordion('<?= $inspIdSafe ?>', '<?= htmlspecialchars(addslashes($inspName)) ?>')">
+                                <div style="display: flex; align-items: center; gap: 12px;">
+                                    <div style="width: 40px; height: 40px; border-radius: 10px; background: <?= $isLive ? '#fee2e2' : '#e2e8f0' ?>; color: <?= $isLive ? '#dc2626' : '#1e293b' ?>; font-weight: 900; font-size: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1.5px solid <?= $isLive ? '#fca5a5' : '#cbd5e1' ?>;">
+                                        <?= strtoupper(substr($inspName, 0, 2)) ?>
+                                    </div>
+                                    <div>
+                                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                            <h3 style="font-size: 13.5px; font-weight: 900; color: #0f172a; margin: 0; letter-spacing: -0.2px;">
+                                                <?= htmlspecialchars($inspName) ?>
+                                            </h3>
+                                            <?php if ($isLive): ?>
+                                                <span class="oqc-rec-badge" title="Inspektur sedang aktif menginspeksi di line">
+                                                    <span class="oqc-rec-dot"></span>
+                                                    <span>LIVE INSPEKSI (<?= htmlspecialchars(implode(', ', $iData['live_lines']) ?: 'Line 1') ?>)</span>
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="font-size: 10px; font-weight: 800; background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; padding: 2px 7px; border-radius: 9999px;">
+                                                    STANDBY / SELESAI
+                                                </span>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div style="font-size: 11px; color: #64748b; margin-top: 3px; font-weight: 600;">
+                                            <?= $iData['total_sessions'] ?> Sesi Inspeksi &bull; <?= $iData['passed_sessions'] ?> Passed &bull; <?= $iData['rejected_sessions'] ?> Rejected &bull; <?= $iData['in_prog_sessions'] ?> In Progress
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                                    <!-- Stat Badges -->
+                                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                        <span style="font-size: 11px; font-weight: 800; background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 3px 9px; border-radius: 7px;">
+                                            <?= number_format($iData['total_lots']) ?> Lot
+                                        </span>
+                                        <span style="font-size: 11px; font-weight: 900; font-family: monospace; background: #f8fafc; color: #0f172a; border: 1px solid #cbd5e1; padding: 3px 9px; border-radius: 7px;">
+                                            <?= number_format($iData['total_qty']) ?> pcs
+                                        </span>
+                                        <span style="font-size: 11px; font-weight: 800; background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; padding: 3px 9px; border-radius: 7px;">
+                                            Sampling: <?= number_format($iData['total_sample']) ?> pcs
+                                        </span>
+                                        <span style="font-size: 11px; font-weight: 800; background: <?= $iData['total_ng'] > 0 ? '#ffe4e6; color: #be123c; border: 1px solid #fecdd3;' : '#f8fafc; color: #64748b; border: 1px solid #e2e8f0;' ?> padding: 3px 9px; border-radius: 7px;">
+                                            NG: <?= number_format($iData['total_ng']) ?> pcs
+                                        </span>
+                                    </div>
+
+                                    <!-- Tombol Accordion Rincian Lot -->
+                                    <button type="button" class="btn-insp-toggle-<?= $inspIdSafe ?>"
+                                            onclick="event.stopPropagation(); toggleInspectorAccordion('<?= $inspIdSafe ?>', '<?= htmlspecialchars(addslashes($inspName)) ?>')"
+                                            style="background: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 8px; padding: 6px 12px; font-size: 11px; font-weight: 800; color: #1e293b; display: inline-flex; align-items: center; gap: 5px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                                        <span>Rincian Lot (<?= number_format($iData['total_lots']) ?>)</span>
+                                        <svg class="caret-insp-<?= $inspIdSafe ?>" style="width: 13px; height: 13px; transition: transform 0.2s; color: #64748b;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Accordion Table Container (Lazy Loaded via AJAX - Anti Lag untuk 5.000+ lot) -->
+                            <div id="acc-insp-<?= $inspIdSafe ?>" class="hidden" style="border-top: 1px solid #e2e8f0; background: #ffffff;">
+                                <!-- Bar Alat Mini: Pencarian & Limit Halaman -->
+                                <div style="padding: 10px 16px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+                                    <div style="display: flex; align-items: center; gap: 8px; flex: 1 1 260px; max-width: 360px;">
+                                        <div style="position: relative; width: 100%;">
+                                            <svg style="position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: #94a3b8;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/></svg>
+                                            <input type="text" id="search-insp-<?= $inspIdSafe ?>" placeholder="Cari Part Code, Lot No, Ref No..."
+                                                   onkeydown="if(event.key==='Enter'){ searchInspectorLots('<?= $inspIdSafe ?>', '<?= htmlspecialchars(addslashes($inspName)) ?>'); }"
+                                                   style="width: 100%; padding: 5px 8px 5px 26px; font-size: 11px; border: 1px solid #cbd5e1; border-radius: 6px; outline: none; background: #fff;">
+                                        </div>
+                                        <button type="button" onclick="searchInspectorLots('<?= $inspIdSafe ?>', '<?= htmlspecialchars(addslashes($inspName)) ?>')"
+                                                style="padding: 5px 10px; font-size: 11px; font-weight: 700; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; flex-shrink: 0;">
+                                            Cari
+                                        </button>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span id="info-count-<?= $inspIdSafe ?>" style="font-size: 11px; color: #64748b; font-weight: 700;">
+                                            Total: <?= number_format($iData['total_lots']) ?> Lot
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div style="overflow-x: auto; width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
+                                    <table style="width: 100%; min-width: 1350px; border-collapse: collapse; font-size: 11px;">
+                                        <thead style="background: #0f172a; color: #ffffff; font-weight: 700;">
+                                            <tr>
+                                                <th style="padding: 9px 10px; width: 40px; text-align: center;">#</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 130px;">Waktu & Line</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 110px;">Jenis</th>
+                                                <th style="padding: 9px 10px; width: 120px;">Part Code</th>
+                                                <th style="padding: 9px 10px; min-width: 150px;">Part Name</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 90px;">Model</th>
+                                                <th style="padding: 9px 10px; width: 120px;">Lot No</th>
+                                                <th style="padding: 9px 10px; width: 110px;">Ref No</th>
+                                                <th style="padding: 9px 10px; text-align: right; width: 85px;">QTY Lot</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 90px;">Sampling</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 65px;">NG</th>
+                                                <th style="padding: 9px 10px; min-width: 140px;">Defect</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 140px;">Status Lot</th>
+                                                <th style="padding: 9px 10px; text-align: center; width: 75px;">Sesi #</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="tbody-insp-<?= $inspIdSafe ?>">
+                                            <tr>
+                                                <td colspan="14" style="padding: 24px; text-align: center; color: #94a3b8; font-weight: 600;">
+                                                    <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                                                        <svg style="width: 16px; height: 16px; animation: spin 1s linear infinite;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="3" stroke="currentColor" stroke-dasharray="31.4 31.4" fill="none"/></svg>
+                                                        <span>Klik tombol di atas untuk memuat rincian lot...</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <!-- Pagination Footer Bar (Anti-Lag) -->
+                                <div id="pagi-insp-<?= $inspIdSafe ?>" style="padding: 8px 16px; background: #f8fafc; border-top: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px;">
+                                    <!-- Disuntik via JS setelah load -->
+                                </div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+
         <!-- FLOATING BULK ACTION BOTTOM BAR (SOLID STYLING - CENTER BOTTOM) -->
         <div id="bulk-session-action-bar" 
              style="display: none; position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9998; background-color: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 14px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3); padding: 10px 18px;"
@@ -1980,31 +2294,43 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
     <script>
     // Tab Switcher Handler
     function switchReportTab(tabKey) {
-        const paneSession = document.getElementById('pane-tab-session');
-        const paneDaily   = document.getElementById('pane-tab-daily');
-        const btnSession  = document.getElementById('tab-btn-session');
-        const btnDaily    = document.getElementById('tab-btn-daily');
-        const inputTab    = document.getElementById('inputTab');
-        const descText    = document.getElementById('tab-desc-text');
+        const paneSession   = document.getElementById('pane-tab-session');
+        const paneDaily     = document.getElementById('pane-tab-daily');
+        const paneInspector = document.getElementById('pane-tab-inspector');
+
+        const btnSession    = document.getElementById('tab-btn-session');
+        const btnDaily      = document.getElementById('tab-btn-daily');
+        const btnInspector  = document.getElementById('tab-btn-inspector');
+
+        const inputTab      = document.getElementById('inputTab');
+        const descText      = document.getElementById('tab-desc-text');
 
         inputTab.value = tabKey;
 
+        // Reset all buttons style
+        const activeClass   = 'bg-blue-600 text-white shadow-xs';
+        const inactiveClass = 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
+
+        if (btnSession) btnSession.className = inactiveClass;
+        if (btnDaily) btnDaily.className = inactiveClass;
+        if (btnInspector) btnInspector.className = inactiveClass;
+
+        if (paneSession) paneSession.style.display = 'none';
+        if (paneDaily) paneDaily.style.display = 'none';
+        if (paneInspector) paneInspector.style.display = 'none';
+
         if (tabKey === 'session') {
-            paneSession.style.display = 'block';
-            paneDaily.style.display   = 'none';
-
-            btnSession.className = 'bg-blue-600 text-white shadow-xs';
-            btnDaily.className   = 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
-
-            descText.textContent = 'Menampilkan kronologi seluruh sesi inspeksi secara langsung';
-        } else {
-            paneSession.style.display = 'none';
-            paneDaily.style.display   = 'block';
-
-            btnDaily.className   = 'bg-blue-600 text-white shadow-xs';
-            btnSession.className = 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
-
-            descText.textContent = 'Menampilkan rekapitulasi performa inspeksi dikelompokkan per hari';
+            if (paneSession) paneSession.style.display = 'block';
+            if (btnSession) btnSession.className = activeClass;
+            if (descText) descText.textContent = 'Menampilkan kronologi seluruh sesi inspeksi secara langsung';
+        } else if (tabKey === 'daily') {
+            if (paneDaily) paneDaily.style.display = 'block';
+            if (btnDaily) btnDaily.className = activeClass;
+            if (descText) descText.textContent = 'Menampilkan rekapitulasi performa inspeksi dikelompokkan per hari';
+        } else if (tabKey === 'inspector') {
+            if (paneInspector) paneInspector.style.display = 'block';
+            if (btnInspector) btnInspector.className = activeClass;
+            if (descText) descText.textContent = 'Daftar aktivitas dan performa kerja per inspektur QC (klik untuk melihat rincian per lot)';
         }
 
         // Update URL state without full page reload
@@ -2013,6 +2339,103 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             url.searchParams.set('tab', tabKey);
             window.history.replaceState({}, '', url);
         } catch (e) {}
+    }
+
+    // Cache lokal data lot per inspektur agar tidak request berulang jika data belum berubah
+    var InspectorLotsCache = {};
+
+    function toggleInspectorAccordion(inspIdSafe, inspName) {
+        const acc = document.getElementById('acc-insp-' + inspIdSafe);
+        const caret = document.querySelector('.caret-insp-' + inspIdSafe);
+        if (!acc) return;
+
+        const isHidden = acc.classList.contains('hidden');
+        if (isHidden) {
+            acc.classList.remove('hidden');
+            if (caret) caret.style.transform = 'rotate(180deg)';
+            // Jika belum pernah dimuat, load data secara on-demand (Anti-Lag)
+            if (!InspectorLotsCache[inspIdSafe]) {
+                loadInspectorLots(inspIdSafe, inspName, 1, '');
+            }
+        } else {
+            acc.classList.add('hidden');
+            if (caret) caret.style.transform = 'rotate(0deg)';
+        }
+    }
+
+    function searchInspectorLots(inspIdSafe, inspName) {
+        const searchInput = document.getElementById('search-insp-' + inspIdSafe);
+        const query = searchInput ? searchInput.value.trim() : '';
+        loadInspectorLots(inspIdSafe, inspName, 1, query);
+    }
+
+    function loadInspectorLots(inspIdSafe, inspName, page, search) {
+        const tbody = document.getElementById('tbody-insp-' + inspIdSafe);
+        const pagi = document.getElementById('pagi-insp-' + inspIdSafe);
+        const countSpan = document.getElementById('info-count-' + inspIdSafe);
+        if (!tbody) return;
+
+        page = page || 1;
+        search = search || '';
+
+        // Tampilkan indikator loading halus
+        tbody.innerHTML = '<tr><td colspan="14" style="padding: 24px; text-align: center; color: #64748b; font-weight: 600;">' +
+            '<div style="display: flex; align-items: center; justify-content: center; gap: 8px;">' +
+            '<svg style="width: 16px; height: 16px; animation: spin 1s linear infinite; color: #2563eb;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="3" stroke="currentColor" stroke-dasharray="31.4 31.4" fill="none"/></svg>' +
+            '<span>Mengambil data rincian lot...</span>' +
+            '</div></td></tr>';
+
+        const sDate = '<?= htmlspecialchars($startDate) ?>';
+        const eDate = '<?= htmlspecialchars($endDate) ?>';
+
+        const url = '<?= base_url("modules/daily_report/api/get_inspector_lots.php") ?>' +
+            '?inspector_name=' + encodeURIComponent(inspName) +
+            '&start_date=' + encodeURIComponent(sDate) +
+            '&end_date=' + encodeURIComponent(eDate) +
+            '&page=' + encodeURIComponent(page) +
+            '&limit=50' +
+            '&search=' + encodeURIComponent(search);
+
+        fetch(url, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (!data || !data.success) {
+                tbody.innerHTML = '<tr><td colspan="14" style="padding: 20px; text-align: center; color: #dc2626; font-weight: 700;">Gagal memuat rincian lot.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = data.html;
+            InspectorLotsCache[inspIdSafe] = true;
+
+            if (countSpan && data.total_lots !== undefined) {
+                countSpan.textContent = 'Ditemukan: ' + Number(data.total_lots).toLocaleString('id-ID') + ' Lot';
+            }
+
+            // Render Pagination Footer Bar
+            if (pagi) {
+                if (data.total_pages <= 1) {
+                    pagi.innerHTML = '<span style="color: #64748b;">Menampilkan seluruh (' + data.total_lots + ') lot</span>' +
+                                     '<span style="color: #94a3b8; font-weight: 600;">Halaman 1 dari 1</span>';
+                } else {
+                    var safeNameStr = inspName.replace(/'/g, "\\'");
+                    var prevDisabled = (data.page <= 1) ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'onclick="loadInspectorLots(\'' + inspIdSafe + '\', \'' + safeNameStr + '\', ' + (data.page - 1) + ', \'' + search.replace(/'/g, "\\'") + '\')"';
+                    var nextDisabled = (data.page >= data.total_pages) ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'onclick="loadInspectorLots(\'' + inspIdSafe + '\', \'' + safeNameStr + '\', ' + (data.page + 1) + ', \'' + search.replace(/'/g, "\\'") + '\')"';
+
+                    pagi.innerHTML = '<div style="color: #475569; font-weight: 600;">' +
+                        'Halaman <b>' + data.page + '</b> dari <b>' + data.total_pages + '</b> (Total ' + Number(data.total_lots).toLocaleString('id-ID') + ' Lot)' +
+                        '</div>' +
+                        '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        '<button type="button" ' + prevDisabled + ' class="excel-quick-btn" style="padding: 4px 10px;">&larr; Sebelumnya</button>' +
+                        '<button type="button" ' + nextDisabled + ' class="excel-quick-btn" style="padding: 4px 10px;">Berikutnya &rarr;</button>' +
+                        '</div>';
+                }
+            }
+        })
+        .catch(function(err) {
+            tbody.innerHTML = '<tr><td colspan="14" style="padding: 20px; text-align: center; color: #dc2626; font-weight: 700;">Gangguan jaringan saat memuat data lot.</td></tr>';
+        });
     }
 
     // Filter Approved Sessions (Hide/Show Sesi yang Sudah di-ACC)
@@ -2804,6 +3227,150 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         if (e.key === 'Escape') {
             closeAllExcelFilters();
         }
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // REAL-TIME LIVE SESSION MONITOR (ZERO-OVERHEAD POLLING)
+    // ═══════════════════════════════════════════════════════════════════
+    var LiveSessionMonitor = (function() {
+        var pollTimer = null;
+        var isPollingActive = false;
+        var inFlight = false;
+        var pollInterval = 6500; // 6.5 detik: responsif tapi sangat ramah server
+
+        function getLiveSessionIds() {
+            var liveRows = document.querySelectorAll('tr.session-data-row.session-row-live');
+            var ids = [];
+            liveRows.forEach(function(row) {
+                var sid = row.getAttribute('data-session-id');
+                if (sid && ids.indexOf(sid) === -1) {
+                    ids.push(sid);
+                }
+            });
+            return ids;
+        }
+
+        function checkLiveStatus() {
+            var ids = getLiveSessionIds();
+            if (ids.length === 0) {
+                stop();
+                return;
+            }
+
+            if (inFlight) return; // Mencegah tumpukan request jika koneksi lambat
+            if (document.hidden) return; // Page Visibility: Jangan polling jika tab sedang di-minimize/background
+
+            inFlight = true;
+            var endpoint = '<?= base_url("modules/daily_report/api/check_live_status.php") ?>?ids=' + encodeURIComponent(ids.join(','));
+
+            fetch(endpoint, {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(function(res) {
+                return res.json();
+            })
+            .then(function(data) {
+                inFlight = false;
+                if (!data || !data.success || !data.sessions) return;
+
+                var sessions = data.sessions;
+                var anyStatusChanged = false;
+
+                for (var sid in sessions) {
+                    var sInfo = sessions[sid];
+                    var row = document.querySelector('tr.session-data-row[data-session-id="' + sid + '"]');
+                    if (!row) continue;
+
+                    // Update jumlah sampling bila bertambah di DB
+                    var sampleSpan = document.querySelector('.session-sample-size-' + sid);
+                    if (sampleSpan && sInfo.effective_sample) {
+                        sampleSpan.textContent = Number(sInfo.effective_sample).toLocaleString('id-ID') + ' pcs';
+                    }
+
+                    // Cek apakah status sudah bukan in_progress lagi (selesai di line)
+                    if (!sInfo.is_in_progress && sInfo.status !== 'in_progress') {
+                        anyStatusChanged = true;
+                        row.classList.remove('session-row-live');
+                        row.setAttribute('data-is-live', '0');
+                        row.setAttribute('data-filter-status', sInfo.status.toUpperCase());
+
+                        // 1. Update Badge Status
+                        var statusCell = document.querySelector('.session-status-cell-' + sid);
+                        if (statusCell) {
+                            if (sInfo.status === 'passed') {
+                                statusCell.innerHTML = '<span style="display: inline-flex; align-items: center; gap: 3px; background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">PASS</span>';
+                            } else if (sInfo.status === 'rejected') {
+                                statusCell.innerHTML = '<span style="display: inline-flex; align-items: center; gap: 3px; background: #ffe4e6; color: #be123c; border: 1px solid #fecdd3; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">REJECT</span>';
+                            }
+                        }
+
+                        // 2. Update Waktu Selesai & Hilangkan Tag LIVE
+                        var timeContainer = document.querySelector('.session-time-text-' + sid);
+                        if (timeContainer) {
+                            timeContainer.innerHTML = '<span>' + (sInfo.time_text || '') + '</span>';
+                        }
+                    }
+                }
+
+                // Jika ada status yang berubah, cek apakah masih ada sesi live tersisa
+                if (anyStatusChanged) {
+                    var remaining = getLiveSessionIds();
+                    if (remaining.length === 0) {
+                        stop();
+                    }
+                    if (typeof executeDailyReportFiltering === 'function') {
+                        executeDailyReportFiltering();
+                    }
+                }
+            })
+            .catch(function(err) {
+                inFlight = false;
+                // Silent fail agar tidak mengganggu UX pengguna saat ada fluktuasi jaringan
+            });
+        }
+
+        function start() {
+            var ids = getLiveSessionIds();
+            if (ids.length === 0) {
+                return;
+            }
+            if (!isPollingActive) {
+                isPollingActive = true;
+                pollTimer = setInterval(checkLiveStatus, pollInterval);
+            }
+        }
+
+        function stop() {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            isPollingActive = false;
+            inFlight = false;
+        }
+
+        return {
+            init: function() {
+                start();
+                // Page Visibility API: hemat baterai dan resource saat tab browser tidak aktif
+                document.addEventListener('visibilitychange', function() {
+                    if (document.hidden) {
+                        stop();
+                    } else {
+                        start();
+                    }
+                });
+            },
+            stop: stop
+        };
+    })();
+
+    // Inisialisasi Real-Time Live Monitor saat DOM siap
+    document.addEventListener('DOMContentLoaded', function() {
+        LiveSessionMonitor.init();
     });
     </script>
 
