@@ -461,83 +461,27 @@ if ($pdo) {
             <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid #f1f5f9;padding-top:10px;">
                 <!-- Left: Preset Date Pills & Dynamic Sub-Filters (Extremely Spacious) -->
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;min-width:0;">
-                    <div id="groupPresetPills" style="display:inline-flex;align-items:center;gap:2px;background:#f1f5f9;padding:3.5px;border-radius:9px;border:1px solid #e2e8f0;flex-shrink:0;">
-                        <button type="button" class="preset-pill-btn" data-preset="hari_ini" onclick="applyPreset('hari_ini')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Hari Ini
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="mingguan" onclick="applyPreset('mingguan')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Minggu Ini
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="bulanan" onclick="applyPreset('bulanan')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
+                    <!-- Shortcut Bulan Ini & Dropdown Langsung Bulan - Tahun -->
+                    <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <button type="button" id="btnFilterBulanIni" onclick="applyCurrentMonthFilter()"
+                                style="padding:5px 13px;border-radius:7px;font-size:11px;font-weight:700;border:1px solid #bfdbfe;cursor:pointer;transition:all 0.2s;background:#2563eb;color:#ffffff;box-shadow:0 1px 3px rgba(37,99,235,0.25);">
                             Bulan Ini
                         </button>
-                        <button type="button" class="preset-pill-btn" data-preset="tahunan" onclick="applyPreset('tahunan')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Tahun Ini
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="month_year" onclick="openSubFilter('month_year')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Pilih Bulan
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="specific_year" onclick="openSubFilter('specific_year')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Pilih Tahun
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="all_years" onclick="applyPreset('all_years')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;"
-                                title="Akumulasi data seluruh tahun di database">
-                            Semua Tahun
-                        </button>
-                        <button type="button" class="preset-pill-btn" data-preset="custom" onclick="openSubFilter('custom')"
-                                style="padding:5px 11px;border-radius:6px;font-size:11px;font-weight:700;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
-                            Rentang Custom
-                        </button>
-                    </div>
 
-                    <!-- Dynamic Sub-Filter Container (Pilih Bulan & Tahun / Pilih Tahun / Rentang Custom) -->
-                    <div id="containerSubFilter" style="display:none;align-items:center;gap:6px;background:#f8fafc;padding:3.5px 8px;border-radius:8px;border:1px solid #cbd5e1;flex-shrink:0;">
-                        
-                        <!-- Sub-Box 1: Month & Year Picker -->
-                        <div id="boxFilterMonthYear" style="display:none;align-items:center;gap:5px;">
-                            <select id="subSelectMonth" class="form-input text-xs" style="padding:3px 6px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;font-weight:600;">
+                        <div style="display:inline-flex;align-items:center;gap:6px;background:#f8fafc;padding:3px 9px;border-radius:8px;border:1px solid #cbd5e1;">
+                            <span style="font-size:11px;font-weight:700;color:#64748b;">Bulan:</span>
+                            <select id="directSelectMonth" onchange="onMonthYearChanged()" class="form-input text-xs" style="padding:3px 7px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;font-weight:600;background:#ffffff;cursor:pointer;">
                                 <?php foreach ($monthNames as $mNum => $mName): ?>
                                     <option value="<?= $mNum ?>" <?= $selectedMonth === $mNum ? 'selected' : '' ?>><?= $mName ?></option>
                                 <?php endforeach; ?>
                             </select>
-                            <select id="subSelectMonthYear" class="form-input text-xs" style="padding:3px 6px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;font-weight:600;">
+
+                            <span style="font-size:11px;font-weight:700;color:#64748b;margin-left:4px;">Tahun:</span>
+                            <select id="directSelectYear" onchange="onMonthYearChanged()" class="form-input text-xs" style="padding:3px 7px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;font-weight:600;background:#ffffff;cursor:pointer;">
                                 <?php foreach ($availableYears as $y): ?>
                                     <option value="<?= $y ?>" <?= $selectedYear === (int)$y ? 'selected' : '' ?>><?= $y ?></option>
                                 <?php endforeach; ?>
                             </select>
-                            <button type="button" onclick="applyMonthYearFilter()" style="padding:4px 10px;background:#2563eb;color:#ffffff;font-size:11px;font-weight:700;border-radius:6px;border:none;cursor:pointer;box-shadow:0 1px 2px rgba(37,99,235,0.2);">
-                                Terapkan
-                            </button>
-                        </div>
-
-                        <!-- Sub-Box 2: Specific Year Picker (e.g. Cek Tahun Lalu) -->
-                        <div id="boxFilterSpecificYear" style="display:none;align-items:center;gap:5px;">
-                            <span style="font-size:11px;font-weight:700;color:#475569;">Tahun:</span>
-                            <select id="subSelectYearOnly" class="form-input text-xs" style="padding:3px 8px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;font-weight:600;">
-                                <?php foreach ($availableYears as $y): ?>
-                                    <option value="<?= $y ?>" <?= $selectedYear === (int)$y ? 'selected' : '' ?>><?= $y ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                            <button type="button" onclick="applySpecificYearFilter()" style="padding:4px 10px;background:#2563eb;color:#ffffff;font-size:11px;font-weight:700;border-radius:6px;border:none;cursor:pointer;box-shadow:0 1px 2px rgba(37,99,235,0.2);">
-                                Terapkan
-                            </button>
-                        </div>
-
-                        <!-- Sub-Box 3: Custom Date Range Picker -->
-                        <div id="boxFilterCustomDate" style="display:none;align-items:center;gap:5px;">
-                            <input type="date" id="filterStartDate" value="<?= htmlspecialchars($startDate) ?>" class="form-input text-xs" style="width:125px;padding:3px 6px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;">
-                            <span style="color:#94a3b8;font-weight:bold;">&ndash;</span>
-                            <input type="date" id="filterEndDate" value="<?= htmlspecialchars($endDate) ?>" class="form-input text-xs" style="width:125px;padding:3px 6px;border-radius:6px;border:1px solid #cbd5e1;font-size:11px;">
-                            <button type="button" onclick="applyCustomDateRange()" style="padding:4px 10px;background:#2563eb;color:#ffffff;font-size:11px;font-weight:700;border-radius:6px;border:none;cursor:pointer;box-shadow:0 1px 2px rgba(37,99,235,0.2);">
-                                Terapkan
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -557,11 +501,15 @@ if ($pdo) {
                         </select>
                     </div>
 
-                    <!-- Unit Segmented Toggle (PCS vs LOT) -->
+                    <!-- Unit Segmented Toggle (PCS vs PPM vs LOT) -->
                     <div style="display:flex;align-items:center;gap:3px;background:#f1f5f9;padding:3px;border-radius:9px;border:1px solid #e2e8f0;" title="Pilih Satuan Analisis">
                         <button type="button" id="btnUnitPcs" onclick="switchUnit('pcs')"
                                 style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:800;border:none;cursor:pointer;transition:all 0.2s;background:#0f172a;color:#ffffff;box-shadow:0 1px 3px rgba(15,23,42,0.25);">
                             PCS
+                        </button>
+                        <button type="button" id="btnUnitPpm" onclick="switchUnit('ppm')"
+                                style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:800;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
+                            PPM
                         </button>
                         <button type="button" id="btnUnitLot" onclick="switchUnit('lot')"
                                 style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:800;border:none;cursor:pointer;transition:all 0.2s;background:transparent;color:#64748b;">
@@ -663,92 +611,146 @@ if ($pdo) {
                 </div>
             </div>
 
-            <!-- ROW 2: DUA GRAFIK BERDAMPINGAN (TREN KEJADIAN & DISTRIBUSI PART) -->
-            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(360px, 1fr));gap:12px;">
-                <!-- KIRI: GRAFIK TREN KEJADIAN DEFECT -->
+            <!-- ── TIER 1: GRAFIK TREN KOMPARASI MULTI-HORIZON DEFECT (LEBAR PENUH 100%) ── -->
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.03);display:flex;flex-direction:column;gap:10px;width:100%;">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                    <div>
+                        <h3 style="margin:0;font-size:13px;font-weight:900;color:#0f172a;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                            <svg width="15" height="15" fill="none" stroke="#2563eb" stroke-width="2.5" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                            </svg>
+                            <span>Tren &amp; Komparasi Kejadian Defect</span>
+                            <span class="overviewCardDefectBadge" style="display:inline-flex;align-items:center;padding:1.5px 7px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:5px;font-size:11px;font-weight:800;">-</span>
+                        </h3>
+                        <p id="overviewTrendIntervalDesc" style="margin:1px 0 0 21px;font-size:10px;color:#64748b;">
+                            Komparasi makro-ke-mikro: Tahunan (Tahun dengan Data) &rarr; Bulanan (Tahun Berjalan) &rarr; Harian Siklus Kerja (Bulan Berjalan).
+                        </p>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <button type="button" id="btnOverviewThreshold" onclick="openThresholdModal('overview')"
+                                style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;font-size:10px;font-weight:800;border:1px solid #fecaca;border-radius:5px;cursor:pointer;background:#fef2f2;color:#b91c1c;transition:all 0.15s;"
+                                title="Atur Batas Ambang / Target Maksimal untuk Tren Ini">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+                            <span>Target: <strong id="lblOverviewThreshold" style="font-weight:900;">-</strong></span>
+                        </button>
+                        <!-- Selector Resolusi Periode Mikro: Mingguan vs Harian -->
+                        <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
+                            <button type="button" id="btnOverviewResWeekly" onclick="switchOverviewResolution('weekly')"
+                                    style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);"
+                                    title="Tampilkan komparasi Tahunan, Bulanan, dan Mingguan (W1-W4)">
+                                Resolusi Mingguan
+                            </button>
+                            <button type="button" id="btnOverviewResDaily" onclick="switchOverviewResolution('daily')"
+                                    style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;"
+                                    title="Tampilkan komparasi Tahunan, Bulanan, dan Harian per tanggal siklus kerja">
+                                Resolusi Harian
+                            </button>
+                        </div>
+                        <!-- Switcher Garis vs Batang -->
+                        <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
+                            <button type="button" id="btnOverviewTrendBar" onclick="switchOverviewTrendType('bar')"
+                                    style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                                Batang
+                            </button>
+                            <button type="button" id="btnOverviewTrendLine" onclick="switchOverviewTrendType('line')"
+                                    style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
+                                Garis
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+
+
+                <!-- Canvas Tren Full Width -->
+                <div style="position:relative;height:240px;width:100%;">
+                    <canvas id="chartOverviewTrend"></canvas>
+                </div>
+            </div>
+
+            <!-- ── TIER 2: DUA SEBARAN BERDAMPINGAN (MODEL 50% & PART 50%) ── -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(420px, 1fr));gap:12px;">
+
+                <!-- KIRI: SEBARAN DEFECT BY MODEL -->
                 <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.03);display:flex;flex-direction:column;gap:10px;">
                     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
                         <div>
                             <h3 style="margin:0;font-size:13px;font-weight:900;color:#0f172a;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                <svg width="15" height="15" fill="none" stroke="#2563eb" stroke-width="2.5" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                                <svg width="15" height="15" fill="none" stroke="#4f46e5" stroke-width="2.5" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                                 </svg>
-                                <span>Tren Kejadian Defect</span>
-                                <span class="overviewCardDefectBadge" style="display:inline-flex;align-items:center;padding:1.5px 7px;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:5px;font-size:11px;font-weight:800;">-</span>
+                                <span>Sebaran Model Terdampak</span>
+                                <span class="overviewCardDefectBadge" style="display:inline-flex;align-items:center;padding:1.5px 7px;background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;border-radius:5px;font-size:11px;font-weight:800;">-</span>
                             </h3>
-                            <p id="overviewTrendIntervalDesc" style="margin:1px 0 0 21px;font-size:10px;color:#64748b;">
-                                Fluktuasi temuan defect sepanjang rentang waktu terpilih.
+                            <p style="margin:1px 0 0 21px;font-size:10px;color:#64748b;">
+                                Komposisi tipe/model produk penyumbang cacat ini.
                             </p>
                         </div>
                         <div style="display:flex;align-items:center;gap:6px;">
-                            <button type="button" id="btnOverviewThreshold" onclick="openThresholdModal('overview')"
-                                    style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;font-size:10px;font-weight:800;border:1px solid #fecaca;border-radius:5px;cursor:pointer;background:#fef2f2;color:#b91c1c;transition:all 0.15s;"
-                                    title="Atur Batas Ambang / Target Maksimal untuk Tren Ini">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-                                <span>Target: <strong id="lblOverviewThreshold" style="font-weight:900;">-</strong></span>
-                            </button>
-                            <!-- Toggle Interval Harian vs Mingguan (Khusus Rentang Bulanan) -->
-                            <div id="overviewTrendIntervalGroup" style="display:none;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
-                                <button type="button" id="btnOverviewIntervalDaily" onclick="switchOverviewInterval('daily')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                            <!-- Sub-Toggle Resolusi Tren Model (Week vs Harian) -->
+                            <div id="overviewModelSubResGroup" style="display:none;align-items:center;background:#e2e8f0;padding:2px;border-radius:6px;gap:2px;">
+                                <button type="button" id="btnModelResWeekly" onclick="switchModelTrendResolution('weekly')"
+                                        style="padding:2.5px 7px;font-size:9.5px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                                    Week (W1-W4)
+                                </button>
+                                <button type="button" id="btnModelResDaily" onclick="switchModelTrendResolution('daily')"
+                                        style="padding:2.5px 7px;font-size:9.5px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
                                     Harian
                                 </button>
-                                <button type="button" id="btnOverviewIntervalWeekly" onclick="switchOverviewInterval('weekly')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
-                                    Mingguan
-                                </button>
                             </div>
-                            <!-- Sub-Toggle Mode Mingguan 6 Hari Kerja (Cut-off Kalender vs Siklus Kerja Penuh) -->
-                            <div id="overviewWeeklyModeGroup" style="display:none;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
-                                <button type="button" id="btnOverviewWeeklyCutoff" onclick="switchOverviewWeeklyMode('cutoff')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);"
-                                        title="Menghitung hari kerja Senin-Sabtu murni dalam batas kalender bulan ini">
-                                    Cut-off Kalender
+
+                            <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;flex-wrap:wrap;gap:2px;">
+                                <button type="button" id="btnOverviewModelDonut" onclick="switchOverviewModelChartType('table')"
+                                        style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                                    Tabel
                                 </button>
-                                <button type="button" id="btnOverviewWeeklyFull" onclick="switchOverviewWeeklyMode('full_week')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;"
-                                        title="Menarik awal minggu ke hari Senin terdekat di akhir bulan sebelumnya agar genap 6 hari kerja">
-                                    Siklus Kerja Penuh
+                                <button type="button" id="btnOverviewModelTotal" onclick="switchOverviewModelChartType('bar_total')"
+                                        style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
+                                    Total
                                 </button>
-                            </div>
-                            <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
-                                <button type="button" id="btnOverviewTrendLine" onclick="switchOverviewTrendType('line')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
-                                    Garis
+                                <button type="button" id="btnOverviewModelLine" onclick="switchOverviewModelChartType('line_trend')"
+                                        style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;"
+                                        title="Grafik tren garis rentang tanggal per model">
+                                    Tren Garis
                                 </button>
-                                <button type="button" id="btnOverviewTrendBar" onclick="switchOverviewTrendType('bar')"
-                                        style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
-                                    Batang
+                                <button type="button" id="btnOverviewModelBar" onclick="switchOverviewModelChartType('bar_trend')"
+                                        style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;"
+                                        title="Grafik tren batang bertingkat rentang tanggal per model">
+                                    Tren Batang
                                 </button>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Mini KPI Summary Strip -->
-                    <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;">
-                        <div>
-                            <span style="font-size:9px;font-weight:800;color:#64748b;text-transform:uppercase;display:block;">Total Temuan:</span>
-                            <span id="overviewKpiTotal" style="font-size:15px;font-weight:900;color:#0f172a;">-</span>
-                            <span id="overviewKpiUnit" style="font-size:10px;font-weight:700;color:#64748b;margin-left:2px;">PCS</span>
+                    <!-- Container Grafik Model (Table Layout OR Full Width Timeline/Bar) -->
+                    <div id="overviewModelChartContainer" style="min-height:245px;display:flex;align-items:stretch;">
+                        <!-- Mode 1: Table Layout -->
+                        <div id="overviewModelDonutWrapper" style="display:flex;flex-direction:column;width:100%;max-height:245px;overflow-y:auto;" class="thin-scrollbar">
+                            <table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">
+                                <thead style="position:sticky;top:0;background:#f8fafc;z-index:5;border-bottom:1.5px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);">
+                                    <tr style="color:#64748b;font-weight:800;text-transform:uppercase;font-size:9.5px;letter-spacing:0.4px;">
+                                        <th style="padding:6px 8px;width:32px;text-align:center;">No</th>
+                                        <th style="padding:6px 10px;">Model Produk</th>
+                                        <th style="padding:6px 10px;text-align:right;width:110px;">Total Temuan</th>
+                                        <th style="padding:6px 10px;text-align:center;width:130px;">Batas Target</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="overviewModelTableBody">
+                                    <tr>
+                                        <td colspan="4" style="padding:20px;text-align:center;color:#94a3b8;font-size:11px;">Memuat sebaran model...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
                         </div>
-                        <div>
-                            <span style="font-size:9px;font-weight:800;color:#64748b;text-transform:uppercase;display:block;">Puncak Kasus:</span>
-                            <span id="overviewKpiPeak" style="font-size:12px;font-weight:800;color:#dc2626;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;">-</span>
-                        </div>
-                        <div>
-                            <span style="font-size:9px;font-weight:800;color:#64748b;text-transform:uppercase;display:block;">Rata-Rata:</span>
-                            <span id="overviewKpiAvg" style="font-size:15px;font-weight:900;color:#0f172a;">-</span>
-                            <span id="overviewKpiAvgUnit" style="font-size:10px;font-weight:700;color:#64748b;margin-left:2px;">PCS</span>
-                        </div>
-                    </div>
 
-                    <!-- Canvas Tren -->
-                    <div style="position:relative;height:210px;width:100%;">
-                        <canvas id="chartOverviewTrend"></canvas>
+                        <!-- Mode 2: Full Width Canvas untuk Total Bar / Tren Garis / Tren Batang -->
+                        <div id="overviewModelTimelineWrapper" style="display:none;position:relative;height:245px;width:100%;">
+                            <canvas id="chartOverviewModels"></canvas>
+                        </div>
                     </div>
                 </div>
 
-                <!-- KANAN: GRAFIK DISTRIBUSI PART TERDAMPAK (TOGGLE DONUT / BAR) -->
+                <!-- KANAN: SEBARAN DEFECT BY PART -->
                 <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,0.03);display:flex;flex-direction:column;gap:10px;">
                     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
                         <div>
@@ -757,14 +759,26 @@ if ($pdo) {
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
                                 </svg>
-                                <span>Sebaran Part Terdampak - </span>
+                                <span>Sebaran Part Terdampak</span>
                                 <span class="overviewCardDefectBadge" style="display:inline-flex;align-items:center;padding:1.5px 7px;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;border-radius:5px;font-size:11px;font-weight:800;">-</span>
                             </h3>
                             <p style="margin:1px 0 0 21px;font-size:10px;color:#64748b;">
                                 Komposisi part code penyumbang cacat ini.
                             </p>
                         </div>
-                        <div style="display:flex;align-items:center;gap:4px;">
+                        <div style="display:flex;align-items:center;gap:6px;">
+                            <!-- Sub-Toggle Resolusi Tren Part (Week vs Harian) -->
+                            <div id="overviewPartSubResGroup" style="display:none;align-items:center;background:#e2e8f0;padding:2px;border-radius:6px;gap:2px;">
+                                <button type="button" id="btnPartResWeekly" onclick="switchPartTrendResolution('weekly')"
+                                        style="padding:2.5px 7px;font-size:9.5px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                                    Week (W1-W4)
+                                </button>
+                                <button type="button" id="btnPartResDaily" onclick="switchPartTrendResolution('daily')"
+                                        style="padding:2.5px 7px;font-size:9.5px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;">
+                                    Harian
+                                </button>
+                            </div>
+
                             <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;flex-wrap:wrap;gap:2px;">
                                 <button type="button" id="btnOverviewPartDonut" onclick="switchOverviewPartChartType('table')"
                                         style="padding:3px 9px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
@@ -790,7 +804,7 @@ if ($pdo) {
 
                     <!-- Container Grafik Part (Table Layout OR Full Width Timeline/Bar) -->
                     <div id="overviewPartChartContainer" style="min-height:245px;display:flex;align-items:stretch;">
-                        <!-- Mode 1: Table Layout (Pengganti Donut: Tabel Sebaran Ramping Responsif) -->
+                        <!-- Mode 1: Table Layout -->
                         <div id="overviewPartDonutWrapper" style="display:flex;flex-direction:column;width:100%;max-height:245px;overflow-y:auto;" class="thin-scrollbar">
                             <table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">
                                 <thead style="position:sticky;top:0;background:#f8fafc;z-index:5;border-bottom:1.5px solid #e2e8f0;box-shadow:0 1px 2px rgba(0,0,0,0.02);">
@@ -1210,17 +1224,17 @@ if ($pdo) {
                                     Mingguan
                                 </button>
                             </div>
-                            <!-- Sub-Toggle Mode Mingguan 6 Hari Kerja (Cut-off Kalender vs Siklus Kerja Penuh) -->
-                            <div id="partOverviewWeeklyModeGroup" style="display:none;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
-                                <button type="button" id="btnPartOverviewWeeklyCutoff" onclick="switchPartOverviewWeeklyMode('cutoff')"
+                            <!-- Sub-Toggle Mode Harian (Siklus Kerja vs Kalender Murni) -->
+                            <div id="partOverviewDailyModeGroup" style="display:none;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
+                                <button type="button" id="btnPartOverviewDailyWorkCycle" onclick="switchPartOverviewDailyMode('work_cycle')"
                                         style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);"
-                                        title="Menghitung hari kerja Senin-Sabtu murni dalam batas kalender bulan ini">
-                                    Cut-off Kalender
+                                        title="Menampilkan harian sesuai siklus minggu kerja (tanggal sisa bulan lalu dihilangkan agar sinkron)">
+                                    Siklus Kerja
                                 </button>
-                                <button type="button" id="btnPartOverviewWeeklyFull" onclick="switchPartOverviewWeeklyMode('full_week')"
+                                <button type="button" id="btnPartOverviewDailyFullMonth" onclick="switchPartOverviewDailyMode('full_month')"
                                         style="padding:3px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;"
-                                        title="Menarik awal minggu ke hari Senin terdekat di akhir bulan sebelumnya agar genap 6 hari kerja">
-                                    Siklus Kerja Penuh
+                                        title="Menampilkan harian full murni dari tanggal 1 kalender">
+                                    Kalender Murni
                                 </button>
                             </div>
                             <div style="display:flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;">
@@ -1906,19 +1920,26 @@ if ($pdo) {
     var overviewState = {
         selectedDefectId: null,
         selectedDefectName: '',
-        trendChartType: 'line',
+        trendMode: 'multi_horizon',     // 'multi_horizon' | 'daily'
+        subResolution: 'weekly',        // 'weekly' (default) | 'daily'
+        trendChartType: 'bar',          // default 'bar' for multi_horizon
         trendInterval: 'daily',
-        weeklyMode: 'cutoff',
-        partChartType: 'table',
+        dailyMode: 'work_cycle',        // 'work_cycle' | 'full_month'
+        modelChartType: 'table',        // 'table' | 'bar_total' | 'line_trend' | 'bar_trend'
+        partChartType: 'table',         // 'table' | 'bar_total' | 'line_trend' | 'bar_trend'
         threshold: null,
         thresholdInfo: null,
         cachedDefects: null,
         cachedTrendData: null,
+        cachedMultiHorizonData: null,
+        cachedModelsData: null,
+        cachedModelsTimelineData: null,
         cachedPartsData: null,
         cachedPartsTimelineData: null
     };
 
     var chartOverviewTrendInstance = null;
+    var chartOverviewModelsInstance = null;
     var chartOverviewPartsInstance = null;
     var chartOverviewPartsDonutInstance = null;
 
@@ -1928,7 +1949,7 @@ if ($pdo) {
         selectedPartName: '',
         trendChartType: 'line',
         trendInterval: 'daily',
-        weeklyMode: 'cutoff',
+        dailyMode: 'work_cycle', // 'work_cycle' | 'full_month'
         defectChartType: 'table',
         threshold: null,
         thresholdInfo: null,
@@ -1976,21 +1997,13 @@ if ($pdo) {
 
         if (funnelState.filterType) {
             p.append('filter_type', funnelState.filterType);
-        }
-
-        if (funnelState.filterType === 'month_year') {
-            p.append('month', funnelState.month);
-            p.append('year', funnelState.year);
-        } else if (funnelState.filterType === 'specific_year') {
-            p.append('year', funnelState.year);
-        } else if (funnelState.filterType === 'custom') {
-            p.append('start_date', funnelState.startDate);
-            p.append('end_date', funnelState.endDate);
-        } else if (funnelState.filterType === 'all_years') {
-            p.append('filter_type', 'all_years');
         } else {
             p.append('preset', funnelState.preset);
         }
+
+        // Always append month and year for multi-horizon & monthly synchronization
+        p.append('month', funnelState.month);
+        p.append('year', funnelState.year);
 
         p.append('top_rank', funnelState.topRank);
 
@@ -2016,21 +2029,11 @@ if ($pdo) {
 
         if (funnelState.filterType) {
             p.append('filter_type', funnelState.filterType);
-        }
-
-        if (funnelState.filterType === 'month_year') {
-            p.append('month', funnelState.month);
-            p.append('year', funnelState.year);
-        } else if (funnelState.filterType === 'specific_year') {
-            p.append('year', funnelState.year);
-        } else if (funnelState.filterType === 'custom') {
-            p.append('start_date', funnelState.startDate);
-            p.append('end_date', funnelState.endDate);
-        } else if (funnelState.filterType === 'all_years') {
-            p.append('filter_type', 'all_years');
         } else {
             p.append('preset', funnelState.preset);
         }
+        p.append('month', funnelState.month);
+        p.append('year', funnelState.year);
 
         p.append('mode', currentAnalysisMode);
 
@@ -2110,85 +2113,55 @@ if ($pdo) {
     }
 
     // ── Sub-Filter Controls Toggle ────────────────────────────────────────────
-    function openSubFilter(type) {
-        funnelState.preset = type;
-        funnelState.filterType = type;
-        updatePresetPillStyles();
+    // ── Filter Controls Actions (Simplified Direct Month & Year Controls) ──
+    var CURRENT_SYSTEM_MONTH = <?= (int)date('n') ?>;
+    var CURRENT_SYSTEM_YEAR  = <?= (int)date('Y') ?>;
 
-        var container = document.getElementById('containerSubFilter');
-        var boxMY     = document.getElementById('boxFilterMonthYear');
-        var boxSY     = document.getElementById('boxFilterSpecificYear');
-        var boxCust   = document.getElementById('boxFilterCustomDate');
+    function applyCurrentMonthFilter() {
+        var selM = document.getElementById('directSelectMonth');
+        var selY = document.getElementById('directSelectYear');
+        if (selM) selM.value = CURRENT_SYSTEM_MONTH;
+        if (selY) selY.value = CURRENT_SYSTEM_YEAR;
 
-        if (container) container.style.display = 'inline-flex';
-        if (boxMY)     boxMY.style.display     = (type === 'month_year') ? 'inline-flex' : 'none';
-        if (boxSY)     boxSY.style.display     = (type === 'specific_year') ? 'inline-flex' : 'none';
-        if (boxCust)   boxCust.style.display   = (type === 'custom') ? 'inline-flex' : 'none';
-    }
-
-    function closeSubFilter() {
-        var container = document.getElementById('containerSubFilter');
-        if (container) container.style.display = 'none';
-    }
-
-    // ── Filter Controls Actions (With State Preservation!) ───────────────────
-    function applyPreset(presetKey) {
-        funnelState.preset = presetKey;
-        closeSubFilter();
-
-        if (presetKey === 'all_years') {
-            funnelState.filterType = 'all_years';
-        } else {
-            funnelState.filterType = '';
-        }
-
-        updatePresetPillStyles();
-        refreshActiveSelections();
-    }
-
-    function applyMonthYearFilter() {
-        var m = document.getElementById('subSelectMonth').value;
-        var y = document.getElementById('subSelectMonthYear').value;
-
-        funnelState.preset     = 'month_year';
+        funnelState.month      = CURRENT_SYSTEM_MONTH;
+        funnelState.year       = CURRENT_SYSTEM_YEAR;
+        funnelState.preset     = 'bulanan';
         funnelState.filterType = 'month_year';
-        funnelState.month      = parseInt(m, 10);
-        funnelState.year       = parseInt(y, 10);
 
-        updatePresetPillStyles();
+        updateDateFilterButtonStyles();
         refreshActiveSelections();
     }
 
-    function applySpecificYearFilter() {
-        var y = document.getElementById('subSelectYearOnly').value;
+    function onMonthYearChanged() {
+        var selM = document.getElementById('directSelectMonth');
+        var selY = document.getElementById('directSelectYear');
+        var m = selM ? parseInt(selM.value, 10) : CURRENT_SYSTEM_MONTH;
+        var y = selY ? parseInt(selY.value, 10) : CURRENT_SYSTEM_YEAR;
 
-        funnelState.preset     = 'specific_year';
-        funnelState.filterType = 'specific_year';
-        funnelState.year       = parseInt(y, 10);
+        funnelState.month      = m;
+        funnelState.year       = y;
+        funnelState.preset     = (m === CURRENT_SYSTEM_MONTH && y === CURRENT_SYSTEM_YEAR) ? 'bulanan' : 'month_year';
+        funnelState.filterType = 'month_year';
 
-        updatePresetPillStyles();
+        updateDateFilterButtonStyles();
         refreshActiveSelections();
     }
 
-    function applyCustomDateRange() {
-        var s = document.getElementById('filterStartDate').value;
-        var e = document.getElementById('filterEndDate').value;
-        if (!s || !e) {
-            alert('Silakan pilih tanggal mulai dan tanggal selesai.');
-            return;
+    function updateDateFilterButtonStyles() {
+        var btn = document.getElementById('btnFilterBulanIni');
+        if (!btn) return;
+        var isCurrent = (funnelState.month === CURRENT_SYSTEM_MONTH && funnelState.year === CURRENT_SYSTEM_YEAR);
+        if (isCurrent) {
+            btn.style.background = '#2563eb';
+            btn.style.color      = '#ffffff';
+            btn.style.borderColor = '#bfdbfe';
+            btn.style.boxShadow  = '0 1px 3px rgba(37,99,235,0.25)';
+        } else {
+            btn.style.background = 'transparent';
+            btn.style.color      = '#64748b';
+            btn.style.borderColor = '#cbd5e1';
+            btn.style.boxShadow  = 'none';
         }
-        if (s > e) {
-            alert('Tanggal mulai tidak boleh lebih besar dari tanggal selesai.');
-            return;
-        }
-
-        funnelState.preset     = 'custom';
-        funnelState.filterType = 'custom';
-        funnelState.startDate  = s;
-        funnelState.endDate    = e;
-
-        updatePresetPillStyles();
-        refreshActiveSelections();
     }
 
     function switchSampleBasis(basis) {
@@ -2223,29 +2196,29 @@ if ($pdo) {
         funnelState.unit = unit;
 
         var btnPcs = document.getElementById('btnUnitPcs');
+        var btnPpm = document.getElementById('btnUnitPpm');
         var btnLot = document.getElementById('btnUnitLot');
-        if (unit === 'pcs') {
-            if (btnPcs) {
-                btnPcs.style.background = '#0f172a';
-                btnPcs.style.color = '#ffffff';
-                btnPcs.style.boxShadow = '0 1px 3px rgba(15,23,42,0.25)';
+
+        [btnPcs, btnPpm, btnLot].forEach(function(b) {
+            if (b) {
+                b.style.background = 'transparent';
+                b.style.color = '#64748b';
+                b.style.boxShadow = 'none';
             }
-            if (btnLot) {
-                btnLot.style.background = 'transparent';
-                btnLot.style.color = '#64748b';
-                btnLot.style.boxShadow = 'none';
-            }
-        } else {
-            if (btnLot) {
-                btnLot.style.background = '#d97706';
-                btnLot.style.color = '#ffffff';
-                btnLot.style.boxShadow = '0 1px 3px rgba(217,119,6,0.3)';
-            }
-            if (btnPcs) {
-                btnPcs.style.background = 'transparent';
-                btnPcs.style.color = '#64748b';
-                btnPcs.style.boxShadow = 'none';
-            }
+        });
+
+        if (unit === 'pcs' && btnPcs) {
+            btnPcs.style.background = '#0f172a';
+            btnPcs.style.color = '#ffffff';
+            btnPcs.style.boxShadow = '0 1px 3px rgba(15,23,42,0.25)';
+        } else if (unit === 'ppm' && btnPpm) {
+            btnPpm.style.background = '#4f46e5';
+            btnPpm.style.color = '#ffffff';
+            btnPpm.style.boxShadow = '0 1px 3px rgba(79,70,229,0.3)';
+        } else if (unit === 'lot' && btnLot) {
+            btnLot.style.background = '#d97706';
+            btnLot.style.color = '#ffffff';
+            btnLot.style.boxShadow = '0 1px 3px rgba(217,119,6,0.3)';
         }
 
         refreshActiveSelections();
@@ -2257,15 +2230,12 @@ if ($pdo) {
     }
 
     function resetAllFilters() {
-        funnelState.preset      = 'bulanan';
-        funnelState.filterType  = '';
         funnelState.unit        = 'pcs';
         funnelState.sampleBasis = 'lot';
         funnelState.customer    = '';
         funnelState.topRank     = 'all';
         var selCust = document.getElementById('selectCustomer');
         if (selCust) selCust.value = '';
-        closeSubFilter();
 
         var btnPcs = document.getElementById('btnUnitPcs');
         var btnLot = document.getElementById('btnUnitLot');
@@ -2282,7 +2252,7 @@ if ($pdo) {
 
         // Clear drilldown selections on explicit full reset
         clearFullSelections();
-        applyPreset('bulanan');
+        applyCurrentMonthFilter();
     }
 
     function switchTopRank(rk) {
@@ -2310,19 +2280,7 @@ if ($pdo) {
     }
 
     function updatePresetPillStyles() {
-        document.querySelectorAll('.preset-pill-btn').forEach(function(btn) {
-            var p = btn.getAttribute('data-preset');
-            if (p === funnelState.preset) {
-                btn.style.background = '#2563eb';
-                btn.style.color = '#ffffff';
-                btn.style.boxShadow = '0 1px 3px rgba(37,99,235,0.25)';
-            } else {
-                btn.style.background = 'transparent';
-                btn.style.color = '#64748b';
-                btn.style.boxShadow = 'none';
-            }
-        });
-
+        updateDateFilterButtonStyles();
         updateWeeklySwitcherVisibility();
     }
 
@@ -2332,17 +2290,17 @@ if ($pdo) {
         
         var grpOverview = document.getElementById('overviewTrendIntervalGroup');
         var grpPart     = document.getElementById('partOverviewTrendIntervalGroup');
-        var grpOverviewWeekly = document.getElementById('overviewWeeklyModeGroup');
-        var grpPartWeekly     = document.getElementById('partOverviewWeeklyModeGroup');
+        var grpOverviewDaily = document.getElementById('overviewDailyModeGroup');
+        var grpPartDaily     = document.getElementById('partOverviewDailyModeGroup');
 
         if (grpOverview) grpOverview.style.display = isMonthly ? 'inline-flex' : 'none';
         if (grpPart) grpPart.style.display = isMonthly ? 'inline-flex' : 'none';
 
-        if (grpOverviewWeekly) {
-            grpOverviewWeekly.style.display = (isMonthly && overviewState.trendInterval === 'weekly') ? 'inline-flex' : 'none';
+        if (grpOverviewDaily) {
+            grpOverviewDaily.style.display = (isMonthly && overviewState.trendInterval === 'daily') ? 'inline-flex' : 'none';
         }
-        if (grpPartWeekly) {
-            grpPartWeekly.style.display = (isMonthly && partOverviewState.trendInterval === 'weekly') ? 'inline-flex' : 'none';
+        if (grpPartDaily) {
+            grpPartDaily.style.display = (isMonthly && partOverviewState.trendInterval === 'daily') ? 'inline-flex' : 'none';
         }
 
         if (!isMonthly) {
@@ -2395,6 +2353,7 @@ if ($pdo) {
         loadOverviewDefects(function() {
             if (overviewState.selectedDefectId) {
                 loadOverviewTrend();
+                loadOverviewModels();
                 loadOverviewParts();
                 loadOverviewHistory();
             }
@@ -2589,10 +2548,37 @@ if ($pdo) {
         highlightOverviewRankPill(defectId);
         closeOverviewDefectMenu();
 
-        // Load 3 components in parallel
+        // Load components in parallel
         loadOverviewTrend();
+        loadOverviewModels();
         loadOverviewParts();
         loadOverviewHistory();
+    }
+
+    function switchOverviewResolution(res) {
+        overviewState.subResolution = res;
+        var btnWeekly = document.getElementById('btnOverviewResWeekly');
+        var btnDaily  = document.getElementById('btnOverviewResDaily');
+
+        if (btnWeekly && btnDaily) {
+            if (res === 'weekly') {
+                btnWeekly.style.background = '#0f172a';
+                btnWeekly.style.color = '#ffffff';
+                btnWeekly.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+                btnDaily.style.background = 'transparent';
+                btnDaily.style.color = '#64748b';
+                btnDaily.style.boxShadow = 'none';
+            } else {
+                btnDaily.style.background = '#0f172a';
+                btnDaily.style.color = '#ffffff';
+                btnDaily.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+                btnWeekly.style.background = 'transparent';
+                btnWeekly.style.color = '#64748b';
+                btnWeekly.style.boxShadow = 'none';
+            }
+        }
+
+        loadOverviewTrend();
     }
 
     function switchOverviewInterval(interval) {
@@ -2618,38 +2604,17 @@ if ($pdo) {
             }
         }
 
-        var grpWeeklyMode = document.getElementById('overviewWeeklyModeGroup');
-        if (grpWeeklyMode) {
-            grpWeeklyMode.style.display = (interval === 'weekly') ? 'inline-flex' : 'none';
+        var grpDaily = document.getElementById('overviewDailyModeGroup');
+        if (grpDaily) {
+            var isMonthly = (funnelState.preset === 'bulanan' || funnelState.filterType === 'month_year' || funnelState.preset === 'month_year');
+            grpDaily.style.display = (isMonthly && interval === 'daily') ? 'inline-flex' : 'none';
         }
 
         loadOverviewTrend();
     }
 
-    function switchOverviewWeeklyMode(mode) {
-        overviewState.weeklyMode = mode;
-        var btnCutoff = document.getElementById('btnOverviewWeeklyCutoff');
-        var btnFull   = document.getElementById('btnOverviewWeeklyFull');
-
-        if (btnCutoff && btnFull) {
-            if (mode === 'cutoff') {
-                btnCutoff.style.background = '#0f172a';
-                btnCutoff.style.color = '#ffffff';
-                btnCutoff.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
-                btnFull.style.background = 'transparent';
-                btnFull.style.color = '#64748b';
-                btnFull.style.boxShadow = 'none';
-            } else {
-                btnFull.style.background = '#0f172a';
-                btnFull.style.color = '#ffffff';
-                btnFull.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
-                btnCutoff.style.background = 'transparent';
-                btnCutoff.style.color = '#64748b';
-                btnCutoff.style.boxShadow = 'none';
-            }
-        }
-
-        loadOverviewTrend();
+    function switchOverviewDailyMode(mode) {
+        switchOverviewDailySubMode(mode);
     }
 
     function switchOverviewTrendType(type) {
@@ -2675,17 +2640,52 @@ if ($pdo) {
             }
         }
 
-        if (overviewState.cachedTrendData) {
-            renderOverviewTrendChart(overviewState.cachedTrendData);
+        if (overviewState.trendMode === 'multi_horizon') {
+            if (overviewState.cachedMultiHorizonData) {
+                renderOverviewMultiHorizonChart(overviewState.cachedMultiHorizonData);
+            } else {
+                loadOverviewTrend();
+            }
+        } else {
+            if (overviewState.cachedTrendData) {
+                renderOverviewTrendChart(overviewState.cachedTrendData);
+            } else {
+                loadOverviewTrend();
+            }
         }
     }
 
-    function switchOverviewPartChartType(type) {
-        overviewState.partChartType = type;
-        var btnDonut = document.getElementById('btnOverviewPartDonut');
-        var btnTotal = document.getElementById('btnOverviewPartTotal');
-        var btnLine  = document.getElementById('btnOverviewPartLine');
-        var btnBar   = document.getElementById('btnOverviewPartBar');
+    function switchModelTrendResolution(res) {
+        overviewState.modelTrendResolution = res;
+        var btnW = document.getElementById('btnModelResWeekly');
+        var btnD = document.getElementById('btnModelResDaily');
+        if (btnW && btnD) {
+            if (res === 'weekly') {
+                btnW.style.background = '#0f172a';
+                btnW.style.color      = '#ffffff';
+                btnW.style.boxShadow  = '0 1px 2px rgba(15,23,42,0.2)';
+                btnD.style.background = 'transparent';
+                btnD.style.color      = '#64748b';
+                btnD.style.boxShadow  = 'none';
+            } else {
+                btnD.style.background = '#0f172a';
+                btnD.style.color      = '#ffffff';
+                btnD.style.boxShadow  = '0 1px 2px rgba(15,23,42,0.2)';
+                btnW.style.background = 'transparent';
+                btnW.style.color      = '#64748b';
+                btnW.style.boxShadow  = 'none';
+            }
+        }
+        loadOverviewModelsTimeline();
+    }
+
+    function switchOverviewModelChartType(type) {
+        overviewState.modelChartType = type;
+        var btnDonut = document.getElementById('btnOverviewModelDonut');
+        var btnTotal = document.getElementById('btnOverviewModelTotal');
+        var btnLine  = document.getElementById('btnOverviewModelLine');
+        var btnBar   = document.getElementById('btnOverviewModelBar');
+        var grpSubRes = document.getElementById('overviewModelSubResGroup');
 
         var allBtns = [btnDonut, btnTotal, btnLine, btnBar];
         allBtns.forEach(function(b) {
@@ -2695,6 +2695,434 @@ if ($pdo) {
                 b.style.boxShadow = 'none';
             }
         });
+
+        if (grpSubRes) {
+            grpSubRes.style.display = (type === 'line_trend' || type === 'bar_trend') ? 'inline-flex' : 'none';
+        }
+
+        if ((type === 'table' || type === 'doughnut') && btnDonut) {
+            btnDonut.style.background = '#0f172a';
+            btnDonut.style.color = '#ffffff';
+            btnDonut.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+        } else if (type === 'bar_total' && btnTotal) {
+            btnTotal.style.background = '#0f172a';
+            btnTotal.style.color = '#ffffff';
+            btnTotal.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+        } else if (type === 'line_trend' && btnLine) {
+            btnLine.style.background = '#0f172a';
+            btnLine.style.color = '#ffffff';
+            btnLine.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+        } else if (type === 'bar_trend' && btnBar) {
+            btnBar.style.background = '#0f172a';
+            btnBar.style.color = '#ffffff';
+            btnBar.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+        }
+
+        if (type === 'line_trend' || type === 'bar_trend') {
+            loadOverviewModelsTimeline();
+        } else {
+            if (overviewState.cachedModelsData) {
+                renderOverviewModelsChart(overviewState.cachedModelsData);
+            } else {
+                loadOverviewModels();
+            }
+        }
+    }
+
+    function loadOverviewModelsTimeline() {
+        if (!overviewState.selectedDefectId) return;
+
+        // get_models returns timeline in trend key
+        var subRes = overviewState.modelTrendResolution || 'weekly';
+        var url = buildApiUrl('get_models', {
+            defect_id: overviewState.selectedDefectId,
+            top_rank: funnelState.topRank,
+            sub_resolution: subRes,
+            trend_interval: subRes
+        });
+
+        fetch(url)
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (!data.success) return;
+                overviewState.cachedModelsTimelineData = data.trend || null;
+                if (data.trend) {
+                    renderOverviewModelsTimelineChart(data.trend);
+                }
+            })
+            .catch(function(err) {
+                console.error("Error loading overview models timeline:", err);
+            });
+    }
+
+    function renderOverviewModelsTimelineChart(data) {
+        var donutWrapper    = document.getElementById('overviewModelDonutWrapper');
+        var timelineWrapper = document.getElementById('overviewModelTimelineWrapper');
+        if (donutWrapper) donutWrapper.style.display = 'none';
+        if (timelineWrapper) timelineWrapper.style.display = 'block';
+
+        var canvas = document.getElementById('chartOverviewModels');
+        if (!canvas) return;
+        if (chartOverviewModelsInstance) chartOverviewModelsInstance.destroy();
+
+        var ctx = canvas.getContext('2d');
+        var isLine = (overviewState.modelChartType === 'line_trend');
+        var unitLabel = data.unit || 'PCS';
+
+        var palette = ['#4f46e5', '#0284c7', '#059669', '#d97706', '#db2777', '#7c3aed', '#0d9488', '#64748b'];
+
+        var datasets = (data.datasets || []).map(function(ds, idx) {
+            var color = palette[idx % palette.length];
+            if (isLine) {
+                return {
+                    label: ds.label,
+                    data: ds.data,
+                    borderColor: color,
+                    backgroundColor: color,
+                    borderWidth: 2.5,
+                    pointBackgroundColor: color,
+                    pointBorderColor: '#ffffff',
+                    pointBorderWidth: 2,
+                    pointRadius: 3.5,
+                    fill: false,
+                    tension: 0.3,
+                    order: 2
+                };
+            } else {
+                return {
+                    label: ds.label,
+                    data: ds.data,
+                    backgroundColor: color,
+                    borderRadius: 4,
+                    barPercentage: 0.7,
+                    categoryPercentage: 0.8,
+                    stack: 'modelStack',
+                    order: 2
+                };
+            }
+        });
+
+        // Batas Target Merah jika ada
+        var labels = data.labels || [];
+        if (overviewState.threshold !== null && overviewState.threshold !== undefined && labels.length > 0) {
+            var targetVal = overviewState.threshold;
+            var targetData = labels.map(function() { return targetVal; });
+            datasets.push({
+                type: 'line',
+                label: '🎯 Batas Target: ' + targetVal.toLocaleString() + ' ' + unitLabel,
+                data: targetData,
+                borderColor: '#dc2626',
+                borderWidth: 2,
+                borderDash: [6, 5],
+                pointRadius: 0,
+                pointHoverRadius: 0,
+                fill: false,
+                tension: 0,
+                order: 1
+            });
+        }
+
+        chartOverviewModelsInstance = new Chart(ctx, {
+            type: isLine ? 'line' : 'bar',
+            data: {
+                labels: labels,
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        align: 'center',
+                        labels: {
+                            boxWidth: 12,
+                            font: { size: 10, weight: '700' },
+                            color: '#475569',
+                            padding: 10
+                        }
+                    },
+                    tooltip: {
+                        mode: isLine ? 'nearest' : 'index',
+                        intersect: false,
+                        backgroundColor: '#0f172a',
+                        titleColor: '#f8fafc',
+                        bodyColor: '#e2e8f0',
+                        padding: 10,
+                        cornerRadius: 8,
+                        filter: function(tooltipItem) {
+                            return Number(tooltipItem.raw || 0) > 0;
+                        },
+                        callbacks: {
+                            label: function(ctx) {
+                                var val = Number(ctx.raw || 0).toLocaleString();
+                                return ' ' + ctx.dataset.label + ': ' + val + ' ' + unitLabel;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        ticks: { font: { size: 10, weight: '600' }, color: '#64748b', maxRotation: 45 }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        stacked: !isLine,
+                        grid: { color: '#f1f5f9' },
+                        ticks: {
+                            font: { size: 10, weight: '600' },
+                            color: '#64748b',
+                            callback: function(value) {
+                                if (Number.isInteger(value)) return Number(value).toLocaleString();
+                                return null;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    function loadOverviewModels() {
+        if (!overviewState.selectedDefectId) return;
+
+        var url = buildApiUrl('get_models', {
+            defect_id: overviewState.selectedDefectId
+        });
+
+        fetch(url)
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (!data.success) return;
+                overviewState.cachedModelsData = data;
+                renderOverviewModelsChart(data);
+            })
+            .catch(function(err) {
+                console.error("Error loading overview models:", err);
+            });
+    }
+
+    function renderOverviewModelsChart(data) {
+        var chartType = overviewState.modelChartType;
+        var unitLabel = data.unit || 'PCS';
+
+        var donutWrapper    = document.getElementById('overviewModelDonutWrapper');
+        var timelineWrapper = document.getElementById('overviewModelTimelineWrapper');
+
+        var items = data.items || [];
+        var labels = (data.chartLabels || []).slice();
+        var counts = (data.chartData || []).slice();
+        var colors = (data.chartColors || []).slice();
+
+        if (counts.length === 0 || data.grandMetric === 0) {
+            labels = ['Tidak ada model'];
+            counts = [1];
+            colors = ['#e2e8f0'];
+        }
+
+        if (chartType === 'table' || chartType === 'doughnut') {
+            if (donutWrapper) donutWrapper.style.display = 'block';
+            if (timelineWrapper) timelineWrapper.style.display = 'none';
+
+            var tbody = document.getElementById('overviewModelTableBody');
+            if (tbody) {
+                if (!items || items.length === 0 || data.grandMetric === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="padding:22px;text-align:center;color:#94a3b8;font-size:11px;">Tidak ada temuan model pada defect ini.</td></tr>';
+                } else {
+                    var html = '';
+                    var rank = 1;
+                    items.forEach(function(item) {
+                        var val = Number(item.val || 0).toLocaleString();
+                        var pct = data.grandMetric > 0 ? (Math.round((item.val / data.grandMetric) * 1000) / 10) : 0;
+                        var color = item.color || '#4f46e5';
+                        var modelName = item.item_name || 'General / Unspecified Model';
+
+                        var rankBadgeStyle = 'font-size:10px;font-weight:900;padding:2px 6px;border-radius:4px;';
+                        if (rank === 1) {
+                            rankBadgeStyle += 'background:#fef3c7;color:#92400e;border:1px solid #fcd34d;';
+                        } else if (rank === 2) {
+                            rankBadgeStyle += 'background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;';
+                        } else if (rank === 3) {
+                            rankBadgeStyle += 'background:#ffedd5;color:#9a3412;border:1px solid #fdba74;';
+                        } else {
+                            rankBadgeStyle += 'background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;';
+                        }
+
+                        var rawValNum = Number(item.val || 0);
+                        var targetVal = (overviewState.threshold !== null && overviewState.threshold !== undefined) 
+                            ? Number(overviewState.threshold) 
+                            : ((item.threshold_val !== undefined && item.threshold_val !== null) ? Number(item.threshold_val) : null);
+
+                        var targetCellHtml = '';
+                        if (targetVal !== null) {
+                            var isOver = (rawValNum > targetVal);
+                            var badgeBg = isOver ? '#fef2f2' : '#f0fdf4';
+                            var badgeColor = isOver ? '#b91c1c' : '#15803d';
+                            var badgeBorder = isOver ? '#fecaca' : '#bbf7d0';
+                            var statusText = isOver ? '⚠️ Over' : '✓ Aman';
+
+                            targetCellHtml = '<div style="display:flex;align-items:center;justify-content:center;gap:5px;">' +
+                                             '  <span style="font-weight:900;color:' + (isOver ? '#dc2626' : '#0f172a') + ';font-size:11px;">' + targetVal.toLocaleString() + '</span> ' +
+                                             '  <span style="font-size:9.5px;font-weight:700;color:#64748b;">' + unitLabel + '</span>' +
+                                             '  <span style="font-size:9px;font-weight:800;padding:1px 5px;border-radius:4px;background:' + badgeBg + ';color:' + badgeColor + ';border:1px solid ' + badgeBorder + ';">' + statusText + '</span>' +
+                                             '</div>';
+                        } else {
+                            targetCellHtml = '<span style="font-size:10px;font-weight:700;color:#94a3b8;background:#f8fafc;padding:2px 7px;border-radius:4px;border:1px solid #e2e8f0;">-</span>';
+                        }
+
+                        html += '<tr style="border-bottom:1px solid #f1f5f9;transition:background 0.15s;" onmouseover="this.style.background=\'#f8fafc\'" onmouseout="this.style.background=\'#ffffff\'">' +
+                                '  <td style="padding:6px 8px;text-align:center;">' +
+                                '    <span style="' + rankBadgeStyle + '">#' + rank + '</span>' +
+                                '  </td>' +
+                                '  <td style="padding:6px 10px;">' +
+                                '    <div style="display:flex;align-items:center;gap:6px;">' +
+                                '      <span style="width:8px;height:8px;border-radius:50%;background:' + color + ';flex-shrink:0;"></span>' +
+                                '      <div style="font-weight:800;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px;" title="' + escapeQuotes(modelName) + '">' +
+                                         escapeHtml(modelName) +
+                                '      </div>' +
+                                '    </div>' +
+                                '  </td>' +
+                                '  <td style="padding:6px 10px;text-align:right;white-space:nowrap;">' +
+                                '    <span style="font-weight:900;color:#0f172a;">' + val + '</span> ' +
+                                '    <span style="font-size:10px;font-weight:700;color:#64748b;">' + unitLabel + '</span>' +
+                                '  </td>' +
+                                '  <td style="padding:6px 10px;text-align:center;white-space:nowrap;">' +
+                                     targetCellHtml +
+                                '  </td>' +
+                                '</tr>';
+                        rank++;
+                    });
+                    tbody.innerHTML = html;
+                }
+            }
+
+        } else {
+            // Horizontal Bar Chart (Total Agregat)
+            if (donutWrapper) donutWrapper.style.display = 'none';
+            if (timelineWrapper) timelineWrapper.style.display = 'block';
+
+            var canvas = document.getElementById('chartOverviewModels');
+            if (!canvas) return;
+            if (chartOverviewModelsInstance) chartOverviewModelsInstance.destroy();
+
+            var ctx = canvas.getContext('2d');
+
+            var barLabelsWithQty = labels.map(function(lbl, i) {
+                var v = Number(counts[i] || 0).toLocaleString();
+                var p = data.grandMetric > 0 ? (Math.round((counts[i] / data.grandMetric) * 1000) / 10) + '%' : '0%';
+                return lbl + '  [' + v + ' ' + unitLabel + ' • ' + p + ']';
+            });
+
+            chartOverviewModelsInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: barLabelsWithQty,
+                    datasets: [{
+                        label: 'Temuan (' + unitLabel + ')',
+                        data: counts,
+                        backgroundColor: colors,
+                        borderRadius: 5,
+                        barPercentage: 0.7
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: '#0f172a',
+                            padding: 10,
+                            cornerRadius: 8,
+                            filter: function(tooltipItem) {
+                                return Number(tooltipItem.raw || 0) > 0;
+                            },
+                            callbacks: {
+                                label: function(ctx) {
+                                    var val = Number(ctx.raw || 0).toLocaleString();
+                                    var pct = data.grandMetric > 0 ? (Math.round((ctx.raw / data.grandMetric) * 1000) / 10) + '%' : '0%';
+                                    return ' Temuan: ' + val + ' ' + unitLabel + ' (' + pct + ')';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            grid: { color: '#f1f5f9' },
+                            ticks: {
+                                font: { size: 11, weight: '700' },
+                                color: '#475569',
+                                callback: function(val) {
+                                    if (Number.isInteger(val)) return Number(val).toLocaleString();
+                                    return null;
+                                }
+                            }
+                        },
+                        y: {
+                            grid: { display: false },
+                            ticks: {
+                                font: { size: 11, weight: '800' },
+                                color: '#0f172a',
+                                callback: function(val, index) {
+                                    var lbl = this.getLabelForValue(val);
+                                    if (lbl && lbl.length > 36) return lbl.substring(0, 34) + '...';
+                                    return lbl;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    function switchPartTrendResolution(res) {
+        overviewState.partTrendResolution = res;
+        var btnW = document.getElementById('btnPartResWeekly');
+        var btnD = document.getElementById('btnPartResDaily');
+        if (btnW && btnD) {
+            if (res === 'weekly') {
+                btnW.style.background = '#0f172a';
+                btnW.style.color      = '#ffffff';
+                btnW.style.boxShadow  = '0 1px 2px rgba(15,23,42,0.2)';
+                btnD.style.background = 'transparent';
+                btnD.style.color      = '#64748b';
+                btnD.style.boxShadow  = 'none';
+            } else {
+                btnD.style.background = '#0f172a';
+                btnD.style.color      = '#ffffff';
+                btnD.style.boxShadow  = '0 1px 2px rgba(15,23,42,0.2)';
+                btnW.style.background = 'transparent';
+                btnW.style.color      = '#64748b';
+                btnW.style.boxShadow  = 'none';
+            }
+        }
+        loadOverviewPartsTimeline();
+    }
+
+    function switchOverviewPartChartType(type) {
+        overviewState.partChartType = type;
+        var btnDonut = document.getElementById('btnOverviewPartDonut');
+        var btnTotal = document.getElementById('btnOverviewPartTotal');
+        var btnLine  = document.getElementById('btnOverviewPartLine');
+        var btnBar   = document.getElementById('btnOverviewPartBar');
+        var grpSubRes = document.getElementById('overviewPartSubResGroup');
+
+        var allBtns = [btnDonut, btnTotal, btnLine, btnBar];
+        allBtns.forEach(function(b) {
+            if (b) {
+                b.style.background = 'transparent';
+                b.style.color = '#64748b';
+                b.style.boxShadow = 'none';
+            }
+        });
+
+        if (grpSubRes) {
+            grpSubRes.style.display = (type === 'line_trend' || type === 'bar_trend') ? 'inline-flex' : 'none';
+        }
 
         if ((type === 'table' || type === 'doughnut') && btnDonut) {
             btnDonut.style.background = '#0f172a';
@@ -2728,17 +3156,25 @@ if ($pdo) {
     function loadOverviewPartsTimeline() {
         if (!overviewState.selectedDefectId) return;
 
-        var url = buildApiUrl('get_part_stacked_trend', {
+        var subRes = overviewState.partTrendResolution || 'weekly';
+        var url = buildApiUrl('get_parts', {
             defect_id: overviewState.selectedDefectId,
-            top_rank: funnelState.topRank
+            top_rank: funnelState.topRank,
+            sub_resolution: subRes,
+            trend_interval: subRes
         });
 
         fetch(url)
             .then(function(res) { return res.json(); })
             .then(function(data) {
                 if (!data.success) return;
-                overviewState.cachedPartsTimelineData = data;
-                renderOverviewPartsTimelineChart(data);
+                var trendData = data.trend || data;
+                overviewState.cachedPartsTimelineData = trendData;
+                if (data.trend) {
+                    renderOverviewPartsTimelineChart(data.trend);
+                } else {
+                    renderOverviewPartsTimelineChart(data);
+                }
             })
             .catch(function(err) {
                 console.error("Error loading overview parts timeline:", err);
@@ -3077,16 +3513,76 @@ if ($pdo) {
     function loadOverviewTrend() {
         if (!overviewState.selectedDefectId) return;
 
-        var url = buildApiUrl('get_trend_timeline', {
-            defect_id: overviewState.selectedDefectId,
-            trend_interval: overviewState.trendInterval || 'daily',
-            weekly_mode: overviewState.weeklyMode || 'cutoff'
-        });
-
         // Parallel fetch threshold value
         var threshUrl = buildApiUrl('get_threshold', {
             mode: 'overview',
             item_id: overviewState.selectedDefectId
+        });
+
+        if (overviewState.trendMode === 'multi_horizon') {
+            var urlHorizon = buildApiUrl('get_multi_horizon_trend', {
+                defect_id: overviewState.selectedDefectId,
+                sub_resolution: overviewState.subResolution || 'weekly'
+            });
+
+            Promise.all([
+                fetch(urlHorizon).then(function(res) { return res.json(); }),
+                fetch(threshUrl).then(function(res) { return res.json(); }).catch(function() { return { success: false }; })
+            ])
+            .then(function(results) {
+                var data = results[0];
+                var threshData = results[1];
+
+                if (!data.success) return;
+                overviewState.cachedMultiHorizonData = data;
+
+                // Process threshold info
+                if (threshData && threshData.success && threshData.threshold !== null && threshData.threshold !== undefined) {
+                    overviewState.threshold = Number(threshData.threshold);
+                    overviewState.thresholdInfo = threshData;
+                    var lblThresh = document.getElementById('lblOverviewThreshold');
+                    if (lblThresh) {
+                        lblThresh.textContent = overviewState.threshold.toLocaleString() + (threshData.is_specific ? '' : ' (All)');
+                    }
+                } else {
+                    overviewState.threshold = null;
+                    overviewState.thresholdInfo = null;
+                    var lblThresh = document.getElementById('lblOverviewThreshold');
+                    if (lblThresh) lblThresh.textContent = '-';
+                }
+
+                // Refresh tabel sebaran model & part agar Batas Target sinkron
+                if (overviewState.cachedPartsData && overviewState.partChartType === 'table') {
+                    renderOverviewPartsChart(overviewState.cachedPartsData);
+                }
+                if (overviewState.cachedModelsData && overviewState.modelChartType === 'table') {
+                    renderOverviewModelsChart(overviewState.cachedModelsData);
+                }
+
+                // Update subtitle keterangan interval
+                var elDesc = document.getElementById('overviewTrendIntervalDesc');
+                if (elDesc) {
+                    var mName = (data.meta ? data.meta.monthName : '');
+                    if (overviewState.subResolution === 'daily') {
+                        elDesc.textContent = 'Komparasi makro-ke-mikro: Tahunan (Tahun dengan Data) → Bulanan (Tahun Berjalan) → Harian Siklus Kerja (' + mName + ').';
+                    } else {
+                        elDesc.textContent = 'Komparasi makro-ke-mikro: Tahunan (Tahun dengan Data) → Bulanan (Tahun Berjalan) → Mingguan (' + mName + ').';
+                    }
+                }
+
+                renderOverviewMultiHorizonChart(data);
+            })
+            .catch(function(err) {
+                console.error("Error loading multi-horizon trend:", err);
+            });
+            return;
+        }
+
+        // Mode Timeline Harian
+        var url = buildApiUrl('get_trend_timeline', {
+            defect_id: overviewState.selectedDefectId,
+            trend_interval: 'daily',
+            daily_mode: overviewState.dailyMode || 'work_cycle'
         });
 
         Promise.all([
@@ -3115,9 +3611,12 @@ if ($pdo) {
                 if (lblThresh) lblThresh.textContent = '-';
             }
 
-            // Refresh tabel sebaran part agar Batas Target sinkron dengan target defect ini
+            // Refresh tabel sebaran model & part agar Batas Target sinkron
             if (overviewState.cachedPartsData && overviewState.partChartType === 'table') {
                 renderOverviewPartsChart(overviewState.cachedPartsData);
+            }
+            if (overviewState.cachedModelsData && overviewState.modelChartType === 'table') {
+                renderOverviewModelsChart(overviewState.cachedModelsData);
             }
 
             // Update Mini KPIs
@@ -3136,23 +3635,167 @@ if ($pdo) {
             if (elAvU) elAvU.textContent = kpis.unit || 'PCS';
 
             if (elDesc) {
-                if (kpis.intervalType === 'tahun') {
-                    elDesc.textContent = 'Distribusi total agregat temuan per tahun kalender.';
-                } else if (kpis.intervalType === 'jam') {
-                    elDesc.textContent = 'Distribusi temuan per jam (06:00 - 22:00) pada hari inspeksi.';
-                } else if (kpis.intervalType === 'minggu') {
-                    elDesc.textContent = 'Komparasi temuan mingguan (W1 - W5) sepanjang bulan terpilih.';
-                } else if (kpis.intervalType === 'hari') {
-                    elDesc.textContent = 'Distribusi temuan harian sepanjang rentang waktu terpilih.';
-                } else {
-                    elDesc.textContent = 'Distribusi temuan bulanan sepanjang rentang waktu terpilih.';
-                }
+                elDesc.textContent = (overviewState.dailyMode === 'full_month')
+                    ? 'Distribusi harian kalender murni (dari tanggal 1 awal bulan).'
+                    : 'Distribusi harian sesuai siklus kerja (tanggal sisa bulan lalu disinkronkan).';
             }
 
             renderOverviewTrendChart(data);
         })
         .catch(function(err) {
             console.error("Error loading overview trend:", err);
+        });
+    }
+
+    function renderOverviewMultiHorizonChart(data) {
+        var canvas = document.getElementById('chartOverviewTrend');
+        if (!canvas) return;
+        if (chartOverviewTrendInstance) chartOverviewTrendInstance.destroy();
+
+        var ctx = canvas.getContext('2d');
+        var isBar = (overviewState.trendChartType === 'bar');
+        var unitLabel = (data.meta && data.meta.unitLabel) ? data.meta.unitLabel : 'Pcs';
+        var labels = data.labels || [];
+        var counts = data.counts || [];
+        var barColors = data.barColors || [];
+        var borderColors = data.borderColors || [];
+        var tooltips = data.tooltips || [];
+
+        var datasets = [];
+
+        var isDense = (overviewState.trendResolution === 'daily' || labels.length > 25);
+
+        datasets.push({
+            label: 'Temuan (' + unitLabel + ')',
+            data: counts,
+            borderColor: isBar ? borderColors : '#2563eb',
+            backgroundColor: isBar ? barColors : 'rgba(37,99,235,0.08)',
+            borderWidth: isBar ? 1 : 2.5,
+            borderRadius: isBar ? (isDense ? 2 : 4) : 0,
+            barPercentage: isDense ? 0.75 : 0.65,
+            categoryPercentage: isDense ? 0.90 : 0.85,
+            pointBackgroundColor: isBar ? barColors : '#2563eb',
+            pointBorderColor: '#ffffff',
+            pointBorderWidth: 2,
+            pointRadius: isBar ? 0 : 3.5,
+            pointHoverRadius: 6,
+            fill: !isBar,
+            tension: 0.35,
+            order: 2
+        });
+
+        // Batas Ambang / Target Maksimal jika ada
+        if (overviewState.threshold !== null && overviewState.threshold !== undefined && labels.length > 0) {
+            var targetVal = overviewState.threshold;
+            var targetData = labels.map(function() { return targetVal; });
+            datasets.push({
+                type: 'line',
+                label: 'Batas Target: ' + targetVal.toLocaleString() + ' ' + unitLabel,
+                data: targetData,
+                borderColor: '#dc2626',
+                borderWidth: 2,
+                borderDash: [6, 5],
+                pointRadius: 0,
+                pointHoverRadius: 0,
+                fill: false,
+                tension: 0,
+                order: 1
+            });
+        }
+
+        chartOverviewTrendInstance = new Chart(ctx, {
+            type: overviewState.trendChartType,
+            data: {
+                labels: labels,
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: (overviewState.threshold !== null),
+                        position: 'bottom',
+                        align: 'center',
+                        labels: {
+                            boxWidth: 14,
+                            boxHeight: 2,
+                            font: { size: 10, weight: '700' },
+                            color: '#475569',
+                            padding: 8
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: '#0f172a',
+                        titleColor: '#f8fafc',
+                        bodyColor: '#e2e8f0',
+                        padding: 10,
+                        cornerRadius: 6,
+                        callbacks: {
+                            title: function(items) {
+                                if (!items || items.length === 0) return '';
+                                var idx = items[0].dataIndex;
+                                return (tooltips[idx] !== undefined) ? tooltips[idx] : items[0].label;
+                            },
+                            label: function(context) {
+                                var val = Number(context.raw || 0).toLocaleString();
+                                if (context.dataset.borderDash) {
+                                    return ' 🎯 ' + context.dataset.label;
+                                }
+                                return ' Temuan: ' + val + ' ' + unitLabel;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: {
+                            display: true,
+                            color: function(ctxScale) {
+                                // Buat garis pemisah tipis antar zona horizon
+                                var idx = ctxScale.index;
+                                if (data.sections && data.sections.length > 1) {
+                                    for (var s = 0; s < data.sections.length - 1; s++) {
+                                        if (idx === data.sections[s].endIndex) {
+                                            return '#94a3b8';
+                                        }
+                                    }
+                                }
+                                return 'transparent';
+                            },
+                            lineWidth: 1.5
+                        },
+                        ticks: {
+                            autoSkip: false,
+                            font: { 
+                                size: isDense ? 8.5 : 10, 
+                                weight: '700' 
+                            },
+                            padding: isDense ? 2 : 4,
+                            color: function(ctxTick) {
+                                var idx = ctxTick.index;
+                                if (barColors[idx]) return barColors[idx];
+                                return '#64748b';
+                            },
+                            maxRotation: 0
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: '#f1f5f9' },
+                        ticks: {
+                            font: { size: 10, weight: '600' },
+                            color: '#64748b',
+                            callback: function(value) {
+                                if (Number.isInteger(value)) return Number(value).toLocaleString();
+                                return null;
+                            }
+                        }
+                    }
+                }
+            }
         });
     }
 
@@ -3315,6 +3958,10 @@ if ($pdo) {
             chartOverviewTrendInstance.destroy();
             chartOverviewTrendInstance = null;
         }
+        if (chartOverviewModelsInstance) {
+            chartOverviewModelsInstance.destroy();
+            chartOverviewModelsInstance = null;
+        }
         if (chartOverviewPartsInstance) {
             chartOverviewPartsInstance.destroy();
             chartOverviewPartsInstance = null;
@@ -3324,7 +3971,12 @@ if ($pdo) {
             chartOverviewPartsDonutInstance = null;
         }
 
-        // Bersihkan canvas donut & bar secara manual jika masih ada bekas render
+        // Bersihkan canvas model & part & trend secara manual jika masih ada bekas render
+        var cvsModel = document.getElementById('chartOverviewModels');
+        if (cvsModel) {
+            var ctxM = cvsModel.getContext('2d');
+            if (ctxM) ctxM.clearRect(0, 0, cvsModel.width, cvsModel.height);
+        }
         var cvsDonut = document.getElementById('chartOverviewPartsDonut');
         if (cvsDonut) {
             var ctxD = cvsDonut.getContext('2d');
@@ -3354,8 +4006,21 @@ if ($pdo) {
         }
 
         // Reset state cache
+        overviewState.cachedModelsData = null;
+        overviewState.cachedModelsTimelineData = null;
         overviewState.cachedPartsData = null;
+        overviewState.cachedPartsTimelineData = null;
         overviewState.cachedTrendData = null;
+        overviewState.cachedMultiHorizonData = null;
+
+        var tbodyModel = document.getElementById('overviewModelTableBody');
+        if (tbodyModel) {
+            tbodyModel.innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:#94a3b8;font-size:11px;">Tidak ada data model.</td></tr>';
+        }
+        var tbodyPart = document.getElementById('overviewPartTableBody');
+        if (tbodyPart) {
+            tbodyPart.innerHTML = '<tr><td colspan="4" style="padding:20px;text-align:center;color:#94a3b8;font-size:11px;">Tidak ada data part.</td></tr>';
+        }
 
         var tbody = document.getElementById('overviewHistoryTableBody');
         if (tbody) {
@@ -3363,12 +4028,6 @@ if ($pdo) {
         }
         var countBadge = document.getElementById('overviewTableCountBadge');
         if (countBadge) countBadge.textContent = '0 Temuan';
-        var elTot = document.getElementById('overviewKpiTotal');
-        if (elTot) elTot.textContent = '0';
-        var elPk = document.getElementById('overviewKpiPeak');
-        if (elPk) elPk.textContent = '-';
-        var elAvg = document.getElementById('overviewKpiAvg');
-        if (elAvg) elAvg.textContent = '0';
     }
 
     // ── PART OVERVIEW JAVASCRIPT CONTROLLER (EXECUTIVE PART-CENTRIC VIEW) ─────
@@ -3605,24 +4264,25 @@ if ($pdo) {
             }
         }
 
-        var grpWeeklyMode = document.getElementById('partOverviewWeeklyModeGroup');
-        if (grpWeeklyMode) {
-            grpWeeklyMode.style.display = (interval === 'weekly') ? 'inline-flex' : 'none';
+        var grpDaily = document.getElementById('partOverviewDailyModeGroup');
+        if (grpDaily) {
+            var isMonthly = (funnelState.preset === 'bulanan' || funnelState.filterType === 'month_year' || funnelState.preset === 'month_year');
+            grpDaily.style.display = (isMonthly && interval === 'daily') ? 'inline-flex' : 'none';
         }
 
         loadPartOverviewTrend();
     }
 
-    function switchPartOverviewWeeklyMode(mode) {
-        partOverviewState.weeklyMode = mode;
-        var btnCutoff = document.getElementById('btnPartOverviewWeeklyCutoff');
-        var btnFull   = document.getElementById('btnPartOverviewWeeklyFull');
+    function switchPartOverviewDailyMode(mode) {
+        partOverviewState.dailyMode = mode;
+        var btnWork = document.getElementById('btnPartOverviewDailyWorkCycle');
+        var btnFull = document.getElementById('btnPartOverviewDailyFullMonth');
 
-        if (btnCutoff && btnFull) {
-            if (mode === 'cutoff') {
-                btnCutoff.style.background = '#0f172a';
-                btnCutoff.style.color = '#ffffff';
-                btnCutoff.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
+        if (btnWork && btnFull) {
+            if (mode === 'work_cycle') {
+                btnWork.style.background = '#0f172a';
+                btnWork.style.color = '#ffffff';
+                btnWork.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
                 btnFull.style.background = 'transparent';
                 btnFull.style.color = '#64748b';
                 btnFull.style.boxShadow = 'none';
@@ -3630,9 +4290,9 @@ if ($pdo) {
                 btnFull.style.background = '#0f172a';
                 btnFull.style.color = '#ffffff';
                 btnFull.style.boxShadow = '0 1px 2px rgba(15,23,42,0.2)';
-                btnCutoff.style.background = 'transparent';
-                btnCutoff.style.color = '#64748b';
-                btnCutoff.style.boxShadow = 'none';
+                btnWork.style.background = 'transparent';
+                btnWork.style.color = '#64748b';
+                btnWork.style.boxShadow = 'none';
             }
         }
 
@@ -3718,7 +4378,7 @@ if ($pdo) {
         var url = buildApiUrl('get_trend_timeline', {
             part_id: partOverviewState.selectedPartId,
             trend_interval: partOverviewState.trendInterval || 'daily',
-            weekly_mode: partOverviewState.weeklyMode || 'cutoff'
+            daily_mode: partOverviewState.dailyMode || 'work_cycle'
         });
 
         // Parallel fetch threshold value for part
@@ -5349,5 +6009,7 @@ if ($pdo) {
         });
     });
     </script>
+
+    </div><!-- End of #defect-body -->
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

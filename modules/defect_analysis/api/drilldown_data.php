@@ -80,10 +80,23 @@ if ($filterType === 'all_years' || $preset === 'all_years') {
     $startDate  = sprintf('%04d-01-01', $selectedYear);
     $endDate    = ($selectedYear === (int)date('Y')) ? date('Y-m-d') : sprintf('%04d-12-31', $selectedYear);
 
-} elseif ($filterType === 'month_year' || $preset === 'month_year') {
+} elseif ($filterType === 'month_year' || $preset === 'month_year' || $preset === 'bulanan' || empty($preset)) {
     $filterType = 'month_year';
-    $startDate  = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
-    $endDate    = date('Y-m-t', strtotime($startDate));
+    $monthStart = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
+    $firstDayDt = new DateTime($monthStart);
+    $firstDayDow = (int)$firstDayDt->format('N'); // 1 = Mon ... 7 = Sun
+
+    // Cari Hari Minggu pertama di bulan ini (Sunday Anchor standar pabrik)
+    $w1Sun = clone $firstDayDt;
+    if ($firstDayDow !== 7) {
+        $w1Sun->modify('-' . $firstDayDow . ' days');
+    }
+    if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+        $w1Sun->modify('+7 days');
+    }
+
+    $startDate = $w1Sun->format('Y-m-d');
+    $endDate   = date('Y-m-t', strtotime($monthStart));
 
 } elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
     $filterType = 'custom';
@@ -91,9 +104,6 @@ if ($filterType === 'all_years' || $preset === 'all_years') {
     $endDate    = sanitize($_GET['end_date'] ?? date('Y-m-d'));
 
 } else {
-    if (empty($preset)) {
-        $preset = 'bulanan';
-    }
     switch ($preset) {
         case 'hari_ini':
             $startDate = date('Y-m-d');
@@ -108,7 +118,6 @@ if ($filterType === 'all_years' || $preset === 'all_years') {
             $endDate   = date('Y-m-d');
             break;
         default:
-            $preset    = 'bulanan';
             $startDate = date('Y-m-01');
             $endDate   = date('Y-m-d');
     }
@@ -232,7 +241,9 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
     ];
 }
 
-function getTimeframeIntervals($startDate, $endDate, $filterType) {
+$subResolution = sanitize($_GET['sub_resolution'] ?? ($_GET['trend_interval'] ?? 'weekly'));
+
+function getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution = 'weekly', $refYear = null, $refMonth = null) {
     $isSingleDay = ($startDate === $endDate);
     $daysDiff = (strtotime($endDate) - strtotime($startDate)) / 86400;
     $trendMap = [];
@@ -255,6 +266,44 @@ function getTimeframeIntervals($startDate, $endDate, $filterType) {
             $trendMap[$yKey] = ['label' => $yKey, 'key' => $yKey];
         }
         $dateFormat = '%Y';
+    } elseif ($filterType === 'month_year' && $subResolution === 'weekly') {
+        // MODE MINGGUAN SIKLUS PABRIK (W1 - W4/W5 Minggu ke Sabtu)
+        $intervalType = 'minggu';
+        $y = $refYear ?: (int)date('Y', strtotime($startDate));
+        $m = $refMonth ?: (int)date('n', strtotime($startDate));
+        $mNames = [
+            1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+            7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+        ];
+
+        $curSun = new DateTime($startDate); // Sudah w1Sun
+        $targetMonth = sprintf('%02d', $m);
+        $wIdx = 1;
+
+        while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+            $curSat = clone $curSun;
+            $curSat->modify('+6 days');
+
+            $sStr = $curSun->format('Y-m-d');
+            $eStr = $curSat->format('Y-m-d');
+            $sDay = $curSun->format('d');
+            $eDay = $curSat->format('d');
+            $sMon = $curSun->format('M');
+            $eMon = $curSat->format('M');
+
+            $lbl = "W{$wIdx} ({$sDay}-{$eDay} {$sMon})";
+            $trendMap["W{$wIdx}"] = [
+                'label'      => $lbl,
+                'shortLabel' => "W{$wIdx}",
+                'key'        => "W{$wIdx}",
+                'start_date' => $sStr,
+                'end_date'   => $eStr
+            ];
+
+            $curSun->modify('+7 days');
+            $wIdx++;
+        }
+        $dateFormat = 'custom_week';
     } elseif ($daysDiff <= 90) {
         $intervalType = 'hari';
         $startPeriod = new DateTime($startDate);
@@ -298,14 +347,15 @@ function getTimeframeIntervals($startDate, $endDate, $filterType) {
     ];
 }
 
-function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $topItems, $levelType, $defectId = 0, $modelId = null, $unit = 'pcs', $palette = []) {
+function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $topItems, $levelType, $defectId = 0, $modelId = null, $unit = 'pcs', $palette = [], $subResolution = 'weekly', $refYear = null, $refMonth = null) {
     if (empty($topItems)) {
         return ['labels' => [], 'datasets' => [], 'rawMatrix' => []];
     }
 
-    $tf = getTimeframeIntervals($startDate, $endDate, $filterType);
+    $tf = getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution, $refYear, $refMonth);
     $dateFormat   = $tf['dateFormat'];
     $trendMap     = $tf['trendMap'];
+    $isWeeklyCustom = ($dateFormat === 'custom_week');
 
     $colMap = [
         'defect' => 'dds.defect_type_id',
@@ -352,79 +402,44 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
 
     $wSumSql = implode(' AND ', $wSum);
 
-    $sqlSum = "SELECT 
-                DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
-                COALESCE({$targetCol}, 0) AS item_key,
-                COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
-                COALESCE(SUM(dds.lot_count), 0) AS total_lots
-               FROM oqc_daily_defect_summary dds
-               WHERE {$wSumSql}
-               GROUP BY time_key, item_key";
-    
-    $stSum = $pdo->prepare($sqlSum);
-    $stSum->execute($pSum);
-    foreach ($stSum->fetchAll(PDO::FETCH_ASSOC) as $r) {
-        $tk = $r['time_key'];
-        $ik = (string)$r['item_key'];
-        if (isset($itemSeries[$ik][$tk])) {
-            $val = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
-            $itemSeries[$ik][$tk] += $val;
-        }
-    }
-
-    if ($endDate >= date('Y-m-d')) {
-        $actColMap = [
-            'defect' => 'ngr.defect_type_id',
-            'model'  => 'COALESCE(mp.model_id, 0)',
-            'part'   => 'ngr.part_id'
-        ];
-        $actCol = $actColMap[$levelType];
-
-        $wAct = [
-            "s.status = 'in_progress'",
-            "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-            "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
-        ];
-        $pAct = [
-            ':sd_act'      => $startDate . ' 00:00:00',
-            ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-        ];
-        if ($customer !== '') {
-            $wAct[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-            $pAct[':cust_act'] = $customer;
-        }
-        if ($levelType === 'model' && $defectId > 0) {
-            $wAct[] = "ngr.defect_type_id = :defId_act";
-            $pAct[':defId_act'] = $defectId;
-        } elseif ($levelType === 'part') {
-            if ($defectId > 0) {
-                $wAct[] = "ngr.defect_type_id = :defId_act";
-                $pAct[':defId_act'] = $defectId;
-            }
-            if ($modelId !== null) {
-                if ($modelId > 0) {
-                    $wAct[] = "mp.model_id = :mId_act";
-                    $pAct[':mId_act'] = $modelId;
-                } else {
-                    $wAct[] = "(mp.model_id IS NULL OR mp.model_id = 0)";
+    if ($isWeeklyCustom) {
+        $sqlSum = "SELECT 
+                    dds.summary_date,
+                    COALESCE({$targetCol}, 0) AS item_key,
+                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                   FROM oqc_daily_defect_summary dds
+                   WHERE {$wSumSql}
+                   GROUP BY dds.summary_date, item_key";
+        $stSum = $pdo->prepare($sqlSum);
+        $stSum->execute($pSum);
+        foreach ($stSum->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $sDate = $r['summary_date'];
+            $ik = (string)$r['item_key'];
+            // Cari bucket W1..W4 mana yang memuat sDate
+            foreach ($trendMap as $wKey => $wMeta) {
+                if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                    if (isset($itemSeries[$ik][$wKey])) {
+                        $val = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+                        $itemSeries[$ik][$wKey] += $val;
+                    }
+                    break;
                 }
             }
         }
-        $wActSql = implode(' AND ', $wAct);
-        $sqlAct = "SELECT 
-                    DATE_FORMAT(s.started_at, '{$dateFormat}') AS time_key,
-                    {$actCol} AS item_key,
-                    COALESCE(SUM(ngr.qty_ng), 0) AS total_pcs,
-                    COUNT(DISTINCT s.id) AS total_lots
-                   FROM inspection_ng_records ngr
-                   INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                   LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                   LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                   WHERE {$wActSql}
+    } else {
+        $sqlSum = "SELECT 
+                    DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
+                    COALESCE({$targetCol}, 0) AS item_key,
+                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                   FROM oqc_daily_defect_summary dds
+                   WHERE {$wSumSql}
                    GROUP BY time_key, item_key";
-        $stAct = $pdo->prepare($sqlAct);
-        $stAct->execute($pAct);
-        foreach ($stAct->fetchAll(PDO::FETCH_ASSOC) as $r) {
+        
+        $stSum = $pdo->prepare($sqlSum);
+        $stSum->execute($pSum);
+        foreach ($stSum->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $tk = $r['time_key'];
             $ik = (string)$r['item_key'];
             if (isset($itemSeries[$ik][$tk])) {
@@ -514,63 +529,16 @@ try {
         $stSum->execute($pSum);
         $rowsSum = $stSum->fetchAll(PDO::FETCH_ASSOC);
 
-        // 2. Query active 'in_progress' sessions if date range includes today
-        $rowsAct = [];
-        if ($endDate >= date('Y-m-d')) {
-            $pAct = [
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            $custActSql = "";
-            if ($customer !== '') {
-                $custActSql = "AND COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pAct[':cust_act'] = $customer;
-            }
-            $sqlAct = "SELECT 
-                        dt.id AS item_id,
-                        dt.name AS item_name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS total_pcs,
-                        COUNT(DISTINCT s.id) AS total_lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE s.status = 'in_progress'
-                         AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                         AND s.started_at >= :sd_act AND s.started_at < :ed_act_next
-                         {$custActSql}
-                       GROUP BY dt.id, dt.name";
-            $stAct = $pdo->prepare($sqlAct);
-            $stAct->execute($pAct);
-            $rowsAct = $stAct->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        // Merge summary and active
-        $merged = [];
+        $raw = [];
         foreach ($rowsSum as $r) {
-            $id = (int)$r['item_id'];
-            $merged[$id] = [
-                'item_id'    => $id,
+            $raw[] = [
+                'item_id'    => (int)$r['item_id'],
                 'item_name'  => $r['item_name'],
                 'total_pcs'  => (int)$r['total_pcs'],
                 'total_lots' => (int)$r['total_lots']
             ];
         }
-        foreach ($rowsAct as $r) {
-            $id = (int)$r['item_id'];
-            if (!isset($merged[$id])) {
-                $merged[$id] = [
-                    'item_id'    => $id,
-                    'item_name'  => $r['item_name'],
-                    'total_pcs'  => 0,
-                    'total_lots' => 0
-                ];
-            }
-            $merged[$id]['total_pcs'] += (int)$r['total_pcs'];
-            $merged[$id]['total_lots'] += (int)$r['total_lots'];
-        }
 
-        $raw = array_values($merged);
         usort($raw, function($a, $b) use ($unit) {
             $vA = ($unit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
             $vB = ($unit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
@@ -615,66 +583,16 @@ try {
         $stSum->execute($pSum);
         $rowsSum = $stSum->fetchAll(PDO::FETCH_ASSOC);
 
-        // 2. Query active 'in_progress' sessions if range covers today
-        $rowsAct = [];
-        if ($endDate >= date('Y-m-d')) {
-            $pAct = [
-                ':defId'       => $defectId,
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            $custActSql = "";
-            if ($customer !== '') {
-                $custActSql = "AND COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pAct[':cust_act'] = $customer;
-            }
-            $sqlAct = "SELECT 
-                        COALESCE(mp.model_id, 0) AS item_id,
-                        COALESCE(NULLIF(TRIM(mm.name), ''), NULLIF(TRIM(mp.model), ''), 'General / Unspecified Model') AS item_name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS total_pcs,
-                        COUNT(DISTINCT s.id) AS total_lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       LEFT JOIN master_parts mp ON ngr.part_id = mp.id
-                       LEFT JOIN master_models mm ON mp.model_id = mm.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE s.status = 'in_progress'
-                         AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
-                         AND ngr.defect_type_id = :defId
-                         AND s.started_at >= :sd_act AND s.started_at < :ed_act_next
-                         {$custActSql}
-                       GROUP BY item_id, item_name";
-            $stAct = $pdo->prepare($sqlAct);
-            $stAct->execute($pAct);
-            $rowsAct = $stAct->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        // Merge
-        $merged = [];
+        $raw = [];
         foreach ($rowsSum as $r) {
-            $id = (int)$r['item_id'];
-            $merged[$id] = [
-                'item_id'    => $id,
+            $raw[] = [
+                'item_id'    => (int)$r['item_id'],
                 'item_name'  => $r['item_name'],
                 'total_pcs'  => (int)$r['total_pcs'],
                 'total_lots' => (int)$r['total_lots']
             ];
         }
-        foreach ($rowsAct as $r) {
-            $id = (int)$r['item_id'];
-            if (!isset($merged[$id])) {
-                $merged[$id] = [
-                    'item_id'    => $id,
-                    'item_name'  => $r['item_name'],
-                    'total_pcs'  => 0,
-                    'total_lots' => 0
-                ];
-            }
-            $merged[$id]['total_pcs'] += (int)$r['total_pcs'];
-            $merged[$id]['total_lots'] += (int)$r['total_lots'];
-        }
 
-        $raw = array_values($merged);
         usort($raw, function($a, $b) use ($unit) {
             $vA = ($unit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
             $vB = ($unit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
@@ -688,7 +606,7 @@ try {
         $defectName = $stmtD->fetchColumn() ?: 'Defect #' . $defectId;
 
         $res = formatItemsWithTopLimit($raw, $topRank, $unit, $paletteModels);
-        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'model', $defectId, null, $unit, $paletteModels);
+        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'model', $defectId, null, $unit, $paletteModels, $subResolution, $selectedYear, $selectedMonth);
         $res['success'] = true;
         $res['defectName'] = $defectName;
         echo json_encode($res);
@@ -735,57 +653,10 @@ try {
         $stSum->execute($pSum);
         $rowsSum = $stSum->fetchAll(PDO::FETCH_ASSOC);
 
-        // 2. Active in-progress sessions if any
-        $rowsAct = [];
-        if ($endDate >= date('Y-m-d')) {
-            $wAct = [
-                "s.status = 'in_progress'",
-                "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                "ngr.defect_type_id = :defId",
-                "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
-            ];
-            $pAct = [
-                ':defId'       => $defectId,
-                ':sd_act'      => $startDate . ' 00:00:00',
-                ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-            ];
-            if ($modelId !== null) {
-                if ($modelId > 0) {
-                    $wAct[] = "mp.model_id = :mId";
-                    $pAct[':mId'] = $modelId;
-                } else {
-                    $wAct[] = "(mp.model_id IS NULL OR mp.model_id = 0)";
-                }
-            }
-            if ($customer !== '') {
-                $wAct[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust_act";
-                $pAct[':cust_act'] = $customer;
-            }
-            $wActSql = implode(' AND ', $wAct);
-            $sqlAct = "SELECT 
-                        mp.id AS item_id,
-                        CONCAT(mp.part_code, ' - ', mp.part_name) AS item_name,
-                        mp.part_code,
-                        mp.part_name,
-                        COALESCE(SUM(ngr.qty_ng), 0) AS total_pcs,
-                        COUNT(DISTINCT s.id) AS total_lots
-                       FROM inspection_ng_records ngr
-                       INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                       INNER JOIN master_parts mp ON ngr.part_id = mp.id
-                       LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                       WHERE {$wActSql}
-                       GROUP BY mp.id, mp.part_code, mp.part_name";
-            $stAct = $pdo->prepare($sqlAct);
-            $stAct->execute($pAct);
-            $rowsAct = $stAct->fetchAll(PDO::FETCH_ASSOC);
-        }
-
-        // Merge
-        $merged = [];
+        $raw = [];
         foreach ($rowsSum as $r) {
-            $id = (int)$r['item_id'];
-            $merged[$id] = [
-                'item_id'    => $id,
+            $raw[] = [
+                'item_id'    => (int)$r['item_id'],
                 'item_name'  => $r['item_name'],
                 'part_code'  => $r['part_code'],
                 'part_name'  => $r['part_name'],
@@ -793,23 +664,7 @@ try {
                 'total_lots' => (int)$r['total_lots']
             ];
         }
-        foreach ($rowsAct as $r) {
-            $id = (int)$r['item_id'];
-            if (!isset($merged[$id])) {
-                $merged[$id] = [
-                    'item_id'    => $id,
-                    'item_name'  => $r['item_name'],
-                    'part_code'  => $r['part_code'],
-                    'part_name'  => $r['part_name'],
-                    'total_pcs'  => 0,
-                    'total_lots' => 0
-                ];
-            }
-            $merged[$id]['total_pcs'] += (int)$r['total_pcs'];
-            $merged[$id]['total_lots'] += (int)$r['total_lots'];
-        }
 
-        $raw = array_values($merged);
         usort($raw, function($a, $b) use ($unit) {
             $vA = ($unit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
             $vB = ($unit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
@@ -830,7 +685,7 @@ try {
         }
 
         $res = formatItemsWithTopLimit($raw, $topRank, $unit, $paletteParts);
-        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'part', $defectId, $modelId, $unit, $paletteParts);
+        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'part', $defectId, $modelId, $unit, $paletteParts, $subResolution, $selectedYear, $selectedMonth);
         $res['success'] = true;
         $res['modelName'] = $modelName;
 
@@ -924,7 +779,7 @@ try {
                     LEFT JOIN users u ON s.inspector_id = u.id
                     WHERE {$wSqlH}
                     ORDER BY s.started_at DESC, ngr.id DESC
-                    LIMIT 150";
+                    LIMIT 300";
 
         $stmtH = $pdo->prepare($sqlHist);
         $stmtH->execute($paramsH);
@@ -1160,7 +1015,7 @@ try {
             $wSumTSql = implode(' AND ', $wSumT);
 
             $trendInterval = isset($_GET['trend_interval']) ? trim($_GET['trend_interval']) : 'daily';
-            $weeklyMode    = isset($_GET['weekly_mode']) ? trim($_GET['weekly_mode']) : 'cutoff';
+            $dailyMode     = isset($_GET['daily_mode']) ? trim($_GET['daily_mode']) : 'work_cycle'; // 'work_cycle' (default) | 'full_month'
 
             if ($filterType === 'all_years' || ($filterType === 'custom' && $daysDiff > 730)) {
                 $intervalType = 'tahun';
@@ -1171,96 +1026,64 @@ try {
                 }
                 $dateFormat = '%Y';
             } elseif ($trendInterval === 'weekly' && $daysDiff <= 35) {
-                // Mingguan Hybrid 6 Hari Kerja (Senin - Sabtu, Minggu Off)
+                // Mingguan Operasional Industri 6 Hari Kerja (Aturan Sunday Anchor: Minggu - Sabtu)
                 $intervalType = 'minggu';
-                $mCode = date('M', strtotime($startDate));
                 $monthStart = date('Y-m-01', strtotime($startDate));
-                $monthEnd   = date('Y-m-t', strtotime($startDate));
-
-                // Hitung awal W1
                 $firstDayDt = new DateTime($monthStart);
                 $firstDayDow = (int)$firstDayDt->format('N'); // 1 = Mon, ..., 7 = Sun
 
-                if ($weeklyMode === 'full_week') {
-                    // Tarik ke hari Senin terdekat (bisa di akhir bulan sebelumnya)
-                    $w1StartDt = clone $firstDayDt;
-                    if ($firstDayDow > 1) {
-                        $w1StartDt->modify('-' . ($firstDayDow - 1) . ' days');
-                    }
-                } else {
-                    // Cut-off: mulai tepat di tgl 1 (kecuali tgl 1 hari Minggu, mulai Senin tgl 2)
-                    $w1StartDt = clone $firstDayDt;
-                    if ($firstDayDow === 7) {
-                        $w1StartDt->modify('+1 day');
-                    }
+                // 1. Cari hari Minggu pembuka dari minggu yang memuat tanggal 1
+                $w1Sun = clone $firstDayDt;
+                if ($firstDayDow !== 7) {
+                    $w1Sun->modify('-' . $firstDayDow . ' days');
                 }
 
-                // Susun bucket mingguan (Senin - Sabtu)
+                // 2. Aturan Sunday Anchor: Jika hari Minggu jatuh di bulan sebelumnya,
+                // maka Senin - Sabtu (termasuk tgl 1 awal bulan) adalah milik bulan sebelumnya.
+                // Minggu pertama (W1) bulan ini baru mulai pada hari Minggu berikutnya di bulan ini.
+                if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+                    $w1Sun->modify('+7 days');
+                }
+
+                // 3. Susun bucket mingguan (Minggu - Sabtu, 7 hari penuh)
                 $weeklyBuckets = [];
-                $curStart = clone $w1StartDt;
+                $curSun = clone $w1Sun;
                 $wIdx = 1;
+                $targetMonth = $firstDayDt->format('m');
 
-                while ($curStart->format('Y-m-d') <= $monthEnd && $wIdx <= 6) {
-                    $curDow = (int)$curStart->format('N');
-                    if ($curDow === 7) {
-                        $curStart->modify('+1 day');
-                        continue;
+                while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+                    $curSat = clone $curSun;
+                    $curSat->modify('+6 days'); // Sabtu
+
+                    $sStr = $curSun->format('Y-m-d');
+                    $eStr = $curSat->format('Y-m-d');
+                    $sLabel = $curSun->format('d');
+                    $eLabel = $curSat->format('d');
+                    $sMonth = $curSun->format('M');
+                    $eMonth = $curSat->format('M');
+
+                    if ($sMonth === $eMonth) {
+                        $lblText = "W{$wIdx} ({$sLabel}-{$eLabel} {$sMonth})";
+                    } else {
+                        $lblText = "W{$wIdx} ({$sLabel} {$sMonth} - {$eLabel} {$eMonth})";
                     }
 
-                    // Akhir minggu adalah Sabtu (atau akhir bulan jika mode cutoff)
-                    $curEnd = clone $curStart;
-                    $daysToSat = 6 - (int)$curEnd->format('N');
-                    if ($daysToSat > 0) {
-                        $curEnd->modify("+{$daysToSat} days");
-                    }
+                    $weeklyBuckets["W{$wIdx}"] = [
+                        'key'        => "W{$wIdx}",
+                        'label'      => $lblText,
+                        'start_date' => $sStr,
+                        'end_date'   => $eStr
+                    ];
+                    $trendMap["W{$wIdx}"] = ['label' => $lblText, 'pcs' => 0, 'lot' => 0];
 
-                    if ($weeklyMode === 'cutoff' && $curEnd->format('Y-m-d') > $monthEnd) {
-                        $curEnd = new DateTime($monthEnd);
-                        // Jika tgl akhir bulan adalah hari Minggu, mundurkan ke Sabtu
-                        if ((int)$curEnd->format('N') === 7) {
-                            $curEnd->modify('-1 day');
-                        }
-                    }
-
-                    $sStr = $curStart->format('Y-m-d');
-                    $eStr = $curEnd->format('Y-m-d');
-
-                    if ($sStr <= $eStr) {
-                        $sLabel = $curStart->format('d');
-                        $eLabel = $curEnd->format('d');
-                        $sMonth = $curStart->format('M');
-                        $eMonth = $curEnd->format('M');
-
-                        if ($sMonth === $eMonth) {
-                            $lblText = "W{$wIdx} ({$sLabel}-{$eLabel} {$sMonth})";
-                        } else {
-                            $lblText = "W{$wIdx} ({$sLabel} {$sMonth} - {$eLabel} {$eMonth})";
-                        }
-
-                        $weeklyBuckets["W{$wIdx}"] = [
-                            'key'        => "W{$wIdx}",
-                            'label'      => $lblText,
-                            'start_date' => $sStr,
-                            'end_date'   => $eStr
-                        ];
-                        $trendMap["W{$wIdx}"] = ['label' => $lblText, 'pcs' => 0, 'lot' => 0];
-                        $wIdx++;
-                    }
-
-                    // Lanjut ke hari Senin berikutnya
-                    $nextMon = clone $curStart;
-                    $nextMon->modify('+7 days');
-                    // Pastikan jatuh pada hari Senin
-                    $nDow = (int)$nextMon->format('N');
-                    if ($nDow > 1) {
-                        $nextMon->modify('-' . ($nDow - 1) . ' days');
-                    }
-                    $curStart = $nextMon;
+                    $curSun->modify('+7 days');
+                    $wIdx++;
                 }
 
-                // Query summary table
-                $effectiveStart = ($weeklyMode === 'full_week' && !empty($weeklyBuckets['W1'])) ? $weeklyBuckets['W1']['start_date'] : $startDate;
-                $effectiveEnd   = $endDate;
+                // 4. Rentang tanggal efektif query database
+                $effectiveStart = !empty($weeklyBuckets['W1']) ? $weeklyBuckets['W1']['start_date'] : $startDate;
+                $lastBucketKey = 'W' . ($wIdx - 1);
+                $effectiveEnd   = !empty($weeklyBuckets[$lastBucketKey]) ? $weeklyBuckets[$lastBucketKey]['end_date'] : $endDate;
 
                 $wSumTWeekly = [
                     "dds.summary_date >= :w_sd AND dds.summary_date <= :w_ed"
@@ -1301,8 +1124,6 @@ try {
                 $stmtSumT->execute($pSumTWeekly);
                 foreach ($stmtSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
                     $sDate = $r['summary_date'];
-                    $dow = (int)date('N', strtotime($sDate));
-                    if ($dow === 7) continue; // Abaikan hari Minggu (6 hari kerja)
 
                     foreach ($weeklyBuckets as $wbKey => $wb) {
                         if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
@@ -1316,8 +1137,29 @@ try {
                 $dateFormat = 'weekly_bucket';
             } elseif ($daysDiff <= 90) {
                 $intervalType = 'hari';
-                $startPeriod = new DateTime($startDate);
+
+                // Tentukan tanggal mulai harian: jika mode work_cycle (default) pada rentang bulanan,
+                // potong tanggal awal yang merupakan sisa minggu bulan sebelumnya
+                $dailyStartDate = $startDate;
+                $isMonthlyView = ($daysDiff <= 35 && (int)date('d', strtotime($startDate)) === 1);
+                if ($isMonthlyView && $dailyMode === 'work_cycle') {
+                    $firstDayDt = new DateTime(date('Y-m-01', strtotime($startDate)));
+                    $firstDayDow = (int)$firstDayDt->format('N');
+                    $w1Sun = clone $firstDayDt;
+                    if ($firstDayDow !== 7) {
+                        $w1Sun->modify('-' . $firstDayDow . ' days');
+                    }
+                    if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+                        $w1Sun->modify('+7 days');
+                    }
+                    $dailyStartDate = $w1Sun->format('Y-m-d');
+                }
+
+                $startPeriod = new DateTime($dailyStartDate);
                 $endPeriod   = new DateTime($endDate);
+                if ($startPeriod > $endPeriod) {
+                    $startPeriod = clone $endPeriod;
+                }
                 $endPeriod->modify('+1 day');
                 $interval    = new DateInterval('P1D');
                 $period      = new DatePeriod($startPeriod, $interval, $endPeriod);
@@ -1412,8 +1254,6 @@ try {
                 foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
                     if ($dateFormat === 'weekly_bucket') {
                         $sDate = $r['time_key'];
-                        $dow = (int)date('N', strtotime($sDate));
-                        if ($dow === 7) continue; // Abaikan hari Minggu
 
                         foreach ($weeklyBuckets as $wbKey => $wb) {
                             if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
@@ -1456,7 +1296,18 @@ try {
         }
 
         $grandMetric = ($unit === 'lot') ? $grandLots : $grandPcs;
-        $avgMetric   = ($activeIntervals > 0 && $grandMetric > 0) ? round($grandMetric / $activeIntervals, 1) : 0;
+        
+        // Rata-rata adaptif: jika > 0 tapi < 0.1 gunakan 2 desimal (agar tidak jadi 0 bulat)
+        if ($activeIntervals > 0 && $grandMetric > 0) {
+            $rawAvg = $grandMetric / $activeIntervals;
+            if ($rawAvg < 0.1) {
+                $avgMetric = round($rawAvg, 2);
+            } else {
+                $avgMetric = round($rawAvg, 1);
+            }
+        } else {
+            $avgMetric = 0;
+        }
 
         // Fetch meta names
         $defectName = '';
@@ -1509,6 +1360,521 @@ try {
             ]
         ]);
         exit;
+
+    } elseif ($action === 'get_multi_horizon_trend') {
+        if ($defectId <= 0) {
+            echo json_encode(['success' => false, 'message' => 'defect_id required']);
+            exit;
+        }
+
+        $refYear  = $selectedYear ?: (int)date('Y');
+        $refMonth = $selectedMonth ?: (int)date('n');
+
+        // ── 1. HORIZON TAHUNAN (Dinamis: Hanya tahun yang ada rekam data defect, maks 4 tahun terakhir s/d refYear) ──
+        $wYDetect = [
+            "dds.defect_type_id = :defId",
+            "YEAR(dds.summary_date) <= :refYear"
+        ];
+        $pYDetect = [
+            ':defId'   => $defectId,
+            ':refYear' => $refYear
+        ];
+        if ($customer !== '') {
+            $wYDetect[] = "dds.customer = :cust";
+            $pYDetect[':cust'] = $customer;
+        }
+        $sqlDetectY = "SELECT DISTINCT YEAR(dds.summary_date) AS yr
+                       FROM oqc_daily_defect_summary dds
+                       WHERE " . implode(' AND ', $wYDetect) . "
+                       ORDER BY yr ASC";
+        $stDetectY = $pdo->prepare($sqlDetectY);
+        $stDetectY->execute($pYDetect);
+        $detectedYears = $stDetectY->fetchAll(PDO::FETCH_COLUMN);
+
+        // Jika data kosong atau kurang dari 3, berikan rolling default 3 tahun terakhir (refYear-2, refYear-1, refYear)
+        if (empty($detectedYears)) {
+            $years = [$refYear - 2, $refYear - 1, $refYear];
+        } else {
+            // Ambil maksimal 4 tahun terakhir agar visual tetap proporsional dan tidak berjejal jika sudah 10+ tahun
+            if (count($detectedYears) > 4) {
+                $years = array_slice($detectedYears, -4);
+            } else {
+                $years = $detectedYears;
+            }
+            // Pastikan refYear minimal ikut ada dalam list
+            if (!in_array($refYear, $years)) {
+                $years[] = $refYear;
+                sort($years);
+            }
+        }
+
+        $yearlyCounts = [];
+        foreach ($years as $yr) {
+            $yearlyCounts[(string)$yr] = 0;
+        }
+
+        $minYear = min($years);
+        $maxYear = max($years);
+        $wY = [
+            "dds.defect_type_id = :defId",
+            "dds.summary_date >= :minY_d AND dds.summary_date <= :maxY_d"
+        ];
+        $pY = [
+            ':defId'  => $defectId,
+            ':minY_d' => sprintf('%04d-01-01', $minYear),
+            ':maxY_d' => sprintf('%04d-12-31', $maxYear)
+        ];
+        if ($customer !== '') {
+            $wY[] = "dds.customer = :cust";
+            $pY[':cust'] = $customer;
+        }
+        $sqlY = "SELECT 
+                    DATE_FORMAT(dds.summary_date, '%Y') AS y_key,
+                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                 FROM oqc_daily_defect_summary dds
+                 WHERE " . implode(' AND ', $wY) . "
+                 GROUP BY y_key";
+        $stY = $pdo->prepare($sqlY);
+        $stY->execute($pY);
+        foreach ($stY->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $yk = $r['y_key'];
+            if (isset($yearlyCounts[$yk])) {
+                $yearlyCounts[$yk] = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+            }
+        }
+
+        // Jika PPM: Ambil total sample populasi tahunan dari oqc_daily_summary
+        if ($unit === 'ppm') {
+            $wYSample = [
+                "summary_date >= :minY_d AND summary_date <= :maxY_d"
+            ];
+            $pYSample = [
+                ':minY_d' => sprintf('%04d-01-01', $minYear),
+                ':maxY_d' => sprintf('%04d-12-31', $maxYear)
+            ];
+            if ($customer !== '') {
+                $wYSample[] = "customer = :cust";
+                $pYSample[':cust'] = $customer;
+            }
+            $sampleColExp = ($sampleBasis === 'session')
+                ? "COALESCE(NULLIF(SUM(total_sample_size_session), 0), SUM(total_sample_size), 0)"
+                : "COALESCE(NULLIF(SUM(total_sample_size_lot), 0), SUM(total_sample_size), 0)";
+
+            $sqlYSample = "SELECT 
+                            DATE_FORMAT(summary_date, '%Y') AS y_key,
+                            {$sampleColExp} AS sample_pop
+                           FROM oqc_daily_summary
+                           WHERE " . implode(' AND ', $wYSample) . "
+                           GROUP BY y_key";
+            $stYSample = $pdo->prepare($sqlYSample);
+            $stYSample->execute($pYSample);
+            $sampleYMap = $stYSample->fetchAll(PDO::FETCH_KEY_PAIR);
+            foreach ($yearlyCounts as $yrStr => &$yVal) {
+                $pop = (int)($sampleYMap[$yrStr] ?? 0);
+                $yVal = ($pop > 0) ? round(($yVal / $pop) * 1000000, 1) : 0;
+            }
+            unset($yVal);
+        }
+
+        // ── 2. HORIZON BULANAN (Jan s/d Bulan Berjalan di Tahun Terpilih) ──
+        $maxMonth = ($refYear === (int)date('Y')) ? (int)date('n') : 12;
+        $mNames = [
+            1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+            7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+        ];
+        $monthlyCounts = [];
+        for ($m = 1; $m <= $maxMonth; $m++) {
+            $monthlyCounts[$m] = 0;
+        }
+
+        // Koreksi batas akhir bulan dengan date('Y-m-t') agar bukan string literal "...-t"
+        $maxMonthLastDay = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $refYear, $maxMonth)));
+
+        $wM = [
+            "dds.defect_type_id = :defId",
+            "dds.summary_date >= :minM_d AND dds.summary_date <= :maxM_d"
+        ];
+        $pM = [
+            ':defId'  => $defectId,
+            ':minM_d' => sprintf('%04d-01-01', $refYear),
+            ':maxM_d' => $maxMonthLastDay
+        ];
+        if ($customer !== '') {
+            $wM[] = "dds.customer = :cust";
+            $pM[':cust'] = $customer;
+        }
+        $sqlM = "SELECT 
+                    MONTH(dds.summary_date) AS m_num,
+                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                 FROM oqc_daily_defect_summary dds
+                 WHERE " . implode(' AND ', $wM) . "
+                 GROUP BY m_num";
+        $stM = $pdo->prepare($sqlM);
+        $stM->execute($pM);
+        foreach ($stM->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $mn = (int)$r['m_num'];
+            if (isset($monthlyCounts[$mn])) {
+                $monthlyCounts[$mn] = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+            }
+        }
+
+        // Jika PPM: Ambil total sample populasi bulanan dari oqc_daily_summary
+        if ($unit === 'ppm') {
+            $wMSample = [
+                "summary_date >= :minM_d AND summary_date <= :maxM_d"
+            ];
+            $pMSample = [
+                ':minM_d' => sprintf('%04d-01-01', $refYear),
+                ':maxM_d' => $maxMonthLastDay
+            ];
+            if ($customer !== '') {
+                $wMSample[] = "customer = :cust";
+                $pMSample[':cust'] = $customer;
+            }
+            $sampleColExp = ($sampleBasis === 'session')
+                ? "COALESCE(NULLIF(SUM(total_sample_size_session), 0), SUM(total_sample_size), 0)"
+                : "COALESCE(NULLIF(SUM(total_sample_size_lot), 0), SUM(total_sample_size), 0)";
+
+            $sqlMSample = "SELECT 
+                            MONTH(summary_date) AS m_num,
+                            {$sampleColExp} AS sample_pop
+                           FROM oqc_daily_summary
+                           WHERE " . implode(' AND ', $wMSample) . "
+                           GROUP BY m_num";
+            $stMSample = $pdo->prepare($sqlMSample);
+            $stMSample->execute($pMSample);
+            $sampleMMap = $stMSample->fetchAll(PDO::FETCH_KEY_PAIR);
+            foreach ($monthlyCounts as $mNum => &$mVal) {
+                $pop = (int)($sampleMMap[$mNum] ?? 0);
+                $mVal = ($pop > 0) ? round(($mVal / $pop) * 1000000, 1) : 0;
+            }
+            unset($mVal);
+        }
+
+        $subResolution = isset($_GET['sub_resolution']) ? trim($_GET['sub_resolution']) : 'weekly';
+
+        // ── 3. HORIZON KE-3 (Aturan Sunday Anchor: Mingguan atau Harian Siklus Kerja) ──
+        $monthStart = sprintf('%04d-%02d-01', $refYear, $refMonth);
+        $firstDayDt = new DateTime($monthStart);
+        $firstDayDow = (int)$firstDayDt->format('N'); // 1 = Mon ... 7 = Sun
+
+        // Cari Hari Minggu pembuka siklus W1
+        $w1Sun = clone $firstDayDt;
+        if ($firstDayDow !== 7) {
+            $w1Sun->modify('-' . $firstDayDow . ' days');
+        }
+        // Sunday Anchor: Jika jatuh di bulan sebelumnya, W1 mulai pada Minggu pertama di bulan ini
+        if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+            $w1Sun->modify('+7 days');
+        }
+
+        $monthEndStr = date('Y-m-t', strtotime($monthStart));
+        $w1SunDayStr = $w1Sun->format('d');
+        $mLastDayStr = date('d', strtotime($monthEndStr));
+
+        $microLabels  = [];
+        $microCounts  = [];
+        $microTooltips= [];
+        $sectionTitle = '';
+        $sectionSub   = '';
+
+        if ($subResolution === 'daily') {
+            // MODE HARIAN (per tanggal tgl 04 s/d akhir bulan)
+            $sectionTitle = 'HARIAN SIKLUS (' . strtoupper($mNames[$refMonth]) . ')';
+            $sectionSub   = "Tgl {$w1SunDayStr} - {$mLastDayStr} {$mNames[$refMonth]}";
+
+            $monthEndDt  = new DateTime($monthEndStr);
+            $dailyBuckets = [];
+            $curDay = clone $w1Sun;
+            while ($curDay <= $monthEndDt) {
+                $dStr = $curDay->format('Y-m-d');
+                $dDayNum = $curDay->format('d');
+                $dDowShort = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'][(int)$curDay->format('w')];
+
+                $dailyBuckets[$dStr] = [
+                    'dayNum'   => $dDayNum,
+                    'tooltip'  => "{$dDowShort}, {$dDayNum} " . $mNames[$refMonth] . " {$refYear}",
+                    'count'    => 0
+                ];
+                $curDay->modify('+1 day');
+            }
+
+            if (!empty($dailyBuckets)) {
+                $wD = [
+                    "dds.defect_type_id = :defId",
+                    "dds.summary_date >= :dStart AND dds.summary_date <= :dEnd"
+                ];
+                $pD = [
+                    ':defId'  => $defectId,
+                    ':dStart' => $w1Sun->format('Y-m-d'),
+                    ':dEnd'   => $monthEndStr
+                ];
+                if ($customer !== '') {
+                    $wD[] = "dds.customer = :cust";
+                    $pD[':cust'] = $customer;
+                }
+                $sqlD = "SELECT 
+                            dds.summary_date,
+                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                         FROM oqc_daily_defect_summary dds
+                         WHERE " . implode(' AND ', $wD) . "
+                         GROUP BY dds.summary_date";
+                $stD = $pdo->prepare($sqlD);
+                $stD->execute($pD);
+                foreach ($stD->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $sDate = $r['summary_date'];
+                    if (isset($dailyBuckets[$sDate])) {
+                        $dailyBuckets[$sDate]['count'] = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+                    }
+                }
+
+                // Jika PPM: Ambil sample per tanggal
+                if ($unit === 'ppm') {
+                    $wDSample = ["summary_date >= :dStart AND summary_date <= :dEnd"];
+                    $pDSample = [':dStart' => $w1Sun->format('Y-m-d'), ':dEnd' => $monthEndStr];
+                    if ($customer !== '') {
+                        $wDSample[] = "customer = :cust";
+                        $pDSample[':cust'] = $customer;
+                    }
+                    $sampleColExp = ($sampleBasis === 'session')
+                        ? "COALESCE(NULLIF(SUM(total_sample_size_session), 0), SUM(total_sample_size), 0)"
+                        : "COALESCE(NULLIF(SUM(total_sample_size_lot), 0), SUM(total_sample_size), 0)";
+
+                    $sqlDSample = "SELECT summary_date, {$sampleColExp} AS sample_pop 
+                                   FROM oqc_daily_summary 
+                                   WHERE " . implode(' AND ', $wDSample) . " 
+                                   GROUP BY summary_date";
+                    $stDSample = $pdo->prepare($sqlDSample);
+                    $stDSample->execute($pDSample);
+                    $sampleDMap = $stDSample->fetchAll(PDO::FETCH_KEY_PAIR);
+                    foreach ($dailyBuckets as $dStr => &$db) {
+                        $pop = (int)($sampleDMap[$dStr] ?? 0);
+                        $db['count'] = ($pop > 0) ? round(($db['count'] / $pop) * 1000000, 1) : 0;
+                    }
+                    unset($db);
+                }
+            }
+
+            foreach ($dailyBuckets as $db) {
+                $microLabels[]   = $db['dayNum'];
+                $microCounts[]   = $db['count'];
+                $microTooltips[] = $db['tooltip'];
+            }
+
+        } else {
+            // MODE MINGGUAN (DEFAULT: W1 - W4/W5 dengan aturan Sunday Anchor)
+            $sectionTitle = 'MINGGUAN (' . strtoupper($mNames[$refMonth]) . ')';
+            $sectionSub   = 'Siklus Minggu - Sabtu';
+
+            $weeklyBuckets = [];
+            $curSun = clone $w1Sun;
+            $wIdx = 1;
+            $targetMonth = $firstDayDt->format('m');
+
+            while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+                $curSat = clone $curSun;
+                $curSat->modify('+6 days');
+
+                $sStr = $curSun->format('Y-m-d');
+                $eStr = $curSat->format('Y-m-d');
+                $sLabel = $curSun->format('d');
+                $eLabel = $curSat->format('d');
+                $sMonth = $curSun->format('M');
+                $eMonth = $curSat->format('M');
+
+                $lblText = ($sMonth === $eMonth) ? "W{$wIdx} ({$sLabel}-{$eLabel} {$sMonth})" : "W{$wIdx} ({$sLabel} {$sMonth}-{$eLabel} {$eMonth})";
+
+                $weeklyBuckets["W{$wIdx}"] = [
+                    'label'      => $lblText,
+                    'shortLabel' => "W{$wIdx}",
+                    'start_date' => $sStr,
+                    'end_date'   => $eStr,
+                    'count'      => 0
+                ];
+
+                $curSun->modify('+7 days');
+                $wIdx++;
+            }
+
+            if (!empty($weeklyBuckets)) {
+                $lastBucketKey = 'W' . ($wIdx - 1);
+                $wEffStart = $weeklyBuckets['W1']['start_date'];
+                $wEffEnd   = $weeklyBuckets[$lastBucketKey]['end_date'];
+
+                $wW = [
+                    "dds.defect_type_id = :defId",
+                    "dds.summary_date >= :ws AND dds.summary_date <= :we"
+                ];
+                $pW = [
+                    ':defId' => $defectId,
+                    ':ws'    => $wEffStart,
+                    ':we'    => $wEffEnd
+                ];
+                if ($customer !== '') {
+                    $wW[] = "dds.customer = :cust";
+                    $pW[':cust'] = $customer;
+                }
+                $sqlW = "SELECT 
+                            dds.summary_date,
+                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                         FROM oqc_daily_defect_summary dds
+                         WHERE " . implode(' AND ', $wW) . "
+                         GROUP BY dds.summary_date";
+                $stW = $pdo->prepare($sqlW);
+                $stW->execute($pW);
+                foreach ($stW->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $sDate = $r['summary_date'];
+                    $val = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+                    foreach ($weeklyBuckets as $wbKey => &$wb) {
+                        if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
+                            $wb['count'] += $val;
+                            break;
+                        }
+                    }
+                    unset($wb);
+                }
+
+                // Jika PPM: Ambil sample per rentang mingguan
+                if ($unit === 'ppm') {
+                    $wWSample = ["summary_date >= :ws AND summary_date <= :we"];
+                    $pWSample = [':ws' => $wEffStart, ':we' => $wEffEnd];
+                    if ($customer !== '') {
+                        $wWSample[] = "customer = :cust";
+                        $pWSample[':cust'] = $customer;
+                    }
+                    $sampleColExp = ($sampleBasis === 'session')
+                        ? "COALESCE(NULLIF(SUM(total_sample_size_session), 0), SUM(total_sample_size), 0)"
+                        : "COALESCE(NULLIF(SUM(total_sample_size_lot), 0), SUM(total_sample_size), 0)";
+
+                    $sqlWSample = "SELECT summary_date, {$sampleColExp} AS sample_pop 
+                                   FROM oqc_daily_summary 
+                                   WHERE " . implode(' AND ', $wWSample) . " 
+                                   GROUP BY summary_date";
+                    $stWSample = $pdo->prepare($sqlWSample);
+                    $stWSample->execute($pWSample);
+                    $sampleWRows = $stWSample->fetchAll(PDO::FETCH_ASSOC);
+
+                    $sampleWBuckets = [];
+                    foreach ($weeklyBuckets as $wbKey => $wb) {
+                        $sampleWBuckets[$wbKey] = 0;
+                    }
+                    foreach ($sampleWRows as $sr) {
+                        $sd = $sr['summary_date'];
+                        $pop = (int)$sr['sample_pop'];
+                        foreach ($weeklyBuckets as $wbKey => $wb) {
+                            if ($sd >= $wb['start_date'] && $sd <= $wb['end_date']) {
+                                $sampleWBuckets[$wbKey] += $pop;
+                                break;
+                            }
+                        }
+                    }
+                    foreach ($weeklyBuckets as $wbKey => &$wb) {
+                        $pop = $sampleWBuckets[$wbKey] ?? 0;
+                        $wb['count'] = ($pop > 0) ? round(($wb['count'] / $pop) * 1000000, 1) : 0;
+                    }
+                    unset($wb);
+                }
+            }
+
+            foreach ($weeklyBuckets as $wb) {
+                $microLabels[]   = $wb['shortLabel'];
+                $microCounts[]   = $wb['count'];
+                $microTooltips[] = $wb['label'];
+            }
+        }
+
+        // ── 4. RAKIT COMPOSITE LABELS & DATASETS DENGAN COLOR PALETTE ZONA ──
+        $allLabels  = [];
+        $allCounts  = [];
+        $barColors  = [];
+        $borderCols = [];
+        $tooltips   = [];
+
+        // Zona 1: Tahunan (Dark Navy / Slate)
+        $idxStartYear = count($allLabels);
+        foreach ($yearlyCounts as $yrStr => $cnt) {
+            $allLabels[]  = $yrStr;
+            $allCounts[]  = $cnt;
+            $barColors[]  = '#1e293b'; // Slate 800
+            $borderCols[] = '#0f172a';
+            $tooltips[]   = "Tahun {$yrStr}";
+        }
+        $idxEndYear = count($allLabels) - 1;
+
+        // Zona 2: Bulanan (Royal Blue)
+        $idxStartMonth = count($allLabels);
+        foreach ($monthlyCounts as $mNum => $cnt) {
+            $mLabel = $mNames[$mNum];
+            $allLabels[]  = $mLabel;
+            $allCounts[]  = $cnt;
+            $barColors[]  = '#2563eb'; // Blue 600
+            $borderCols[] = '#1d4ed8';
+            $tooltips[]   = "Bulan {$mNames[$mNum]} {$refYear}";
+        }
+        $idxEndMonth = count($allLabels) - 1;
+
+        // Zona 3: Mingguan atau Harian (Emerald / Teal)
+        $idxStartMicro = count($allLabels);
+        foreach ($microLabels as $mIdx => $mLbl) {
+            $allLabels[]  = $mLbl;
+            $allCounts[]  = $microCounts[$mIdx];
+            $barColors[]  = '#059669'; // Emerald 600
+            $borderCols[] = '#047857';
+            $tooltips[]   = $microTooltips[$mIdx];
+        }
+        $idxEndMicro = count($allLabels) - 1;
+
+        // Fetch Meta Defect Name
+        $stD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
+        $stD->execute([':id' => $defectId]);
+        $defectName = $stD->fetchColumn() ?: '';
+
+        echo json_encode([
+            'success'     => true,
+            'labels'      => $allLabels,
+            'counts'      => $allCounts,
+            'barColors'   => $barColors,
+            'borderColors'=> $borderCols,
+            'tooltips'    => $tooltips,
+            'sections'    => [
+                [
+                    'name'       => 'TAHUNAN',
+                    'sub'        => count($years) . ' Tahun Terakhir',
+                    'startIndex' => $idxStartYear,
+                    'endIndex'   => $idxEndYear,
+                    'color'      => '#1e293b'
+                ],
+                [
+                    'name'       => "BULANAN ({$refYear})",
+                    'sub'        => "Jan - {$mNames[$maxMonth]} {$refYear}",
+                    'startIndex' => $idxStartMonth,
+                    'endIndex'   => $idxEndMonth,
+                    'color'      => '#2563eb'
+                ],
+                [
+                    'name'       => $sectionTitle,
+                    'sub'        => $sectionSub,
+                    'startIndex' => $idxStartMicro,
+                    'endIndex'   => $idxEndMicro,
+                    'color'      => '#059669'
+                ]
+            ],
+            'meta'        => [
+                'defectName'    => $defectName,
+                'year'          => $refYear,
+                'month'         => $refMonth,
+                'monthName'     => $mNames[$refMonth],
+                'subResolution' => $subResolution,
+                'unit'          => strtoupper($unit),
+                'unitLabel'     => ($unit === 'lot' ? 'Lot' : ($unit === 'ppm' ? 'PPM' : 'Pcs'))
+            ]
+        ]);
+        exit;
+
     } elseif ($action === 'get_part_ranking') {
         // 1. Query pre-aggregated daily summaries grouped by part (uses idx_dds_part_date)
         $wSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
@@ -1660,10 +2026,11 @@ try {
         $placeholders = implode(',', array_fill(0, count($topPartIds), '?'));
 
         // 2. Build timeframe intervals
-        $tf = getTimeframeIntervals($startDate, $endDate, $filterType);
-        $intervalType = $tf['intervalType'];
-        $dateFormat   = $tf['dateFormat'];
-        $trendMap     = $tf['trendMap']; // keys: time_key => ['label' => ..., 'key' => ...]
+        $tf = getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution, $selectedYear, $selectedMonth);
+        $intervalType   = $tf['intervalType'];
+        $dateFormat     = $tf['dateFormat'];
+        $trendMap       = $tf['trendMap']; // keys: time_key => ['label' => ..., 'key' => ...]
+        $isWeeklyCustom = ($dateFormat === 'custom_week');
 
         // 3. Initialize data structure: partId => [ time_key => pcs ]
         $partSeries = [];
@@ -1692,20 +2059,44 @@ try {
         }
         $wSumTSql = implode(' AND ', $wSumT);
 
-        $sqlT = "SELECT 
-                    DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
-                    dds.part_id,
-                    COALESCE(SUM(dds.qty_ng), 0) AS total_ng
-                 FROM oqc_daily_defect_summary dds
-                 WHERE {$wSumTSql}
-                 GROUP BY time_key, dds.part_id";
-        $stT = $pdo->prepare($sqlT);
-        $stT->execute($pSumT);
-        foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $tk  = $row['time_key'];
-            $pid = (int)$row['part_id'];
-            if (isset($partSeries[$pid][$tk])) {
-                $partSeries[$pid][$tk] += (int)$row['total_ng'];
+        if ($isWeeklyCustom) {
+            $sqlT = "SELECT 
+                        dds.summary_date,
+                        dds.part_id,
+                        COALESCE(SUM(dds.qty_ng), 0) AS total_ng
+                     FROM oqc_daily_defect_summary dds
+                     WHERE {$wSumTSql}
+                     GROUP BY dds.summary_date, dds.part_id";
+            $stT = $pdo->prepare($sqlT);
+            $stT->execute($pSumT);
+            foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $sDate = $row['summary_date'];
+                $pid   = (int)$row['part_id'];
+                foreach ($trendMap as $wKey => $wMeta) {
+                    if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                        if (isset($partSeries[$pid][$wKey])) {
+                            $partSeries[$pid][$wKey] += (int)$row['total_ng'];
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            $sqlT = "SELECT 
+                        DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
+                        dds.part_id,
+                        COALESCE(SUM(dds.qty_ng), 0) AS total_ng
+                     FROM oqc_daily_defect_summary dds
+                     WHERE {$wSumTSql}
+                     GROUP BY time_key, dds.part_id";
+            $stT = $pdo->prepare($sqlT);
+            $stT->execute($pSumT);
+            foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $tk  = $row['time_key'];
+                $pid = (int)$row['part_id'];
+                if (isset($partSeries[$pid][$tk])) {
+                    $partSeries[$pid][$tk] += (int)$row['total_ng'];
+                }
             }
         }
 
@@ -2372,7 +2763,7 @@ try {
                     LEFT JOIN users u ON s.inspector_id = u.id
                     WHERE {$wSqlH}
                     ORDER BY s.started_at DESC, ngr.id DESC
-                    LIMIT 200";
+                    LIMIT 300";
 
         $stmtH = $pdo->prepare($sqlHist);
         $stmtH->execute($paramsH);

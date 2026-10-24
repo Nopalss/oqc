@@ -52,72 +52,164 @@ if (!function_exists('get_document_types_config')) {
  *   [PartCode]_rev01.pdf                    (Rev format)
  *   [PartCode].pdf                          (Base format)
  */
+if (!function_exists('classify_part_file_type')) {
+    /**
+     * Mengenali jenis dokumen berdasarkan nama file dan ekstensinya
+     */
+    function classify_part_file_type($filename) {
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        $nameOnly = strtolower(pathinfo($filename, PATHINFO_FILENAME));
+
+        if ($ext === 'stp' || $ext === 'step') {
+            return 'drawing_3d';
+        }
+
+        if ($ext === 'pdf') {
+            // Cek kata kunci dokumen QC
+            if (preg_match('/(^|[_\-\s])(pi|process[_\-\s]?inspection)($|[_\-\s0-9])/i', $nameOnly)) {
+                return 'pi';
+            }
+            if (preg_match('/(^|[_\-\s])(qp|qpoint|q[_\-\s]?point|quality[_\-\s]?point)($|[_\-\s0-9])/i', $nameOnly)) {
+                return 'qpoint';
+            }
+            if (preg_match('/(^|[_\-\s])(pac|part[_\-\s]?approval|certificate)($|[_\-\s0-9])/i', $nameOnly)) {
+                return 'pac';
+            }
+            if (preg_match('/(^|[_\-\s])(pack|packing|standar[_\-\s]?pack)($|[_\-\s0-9])/i', $nameOnly)) {
+                return 'standar_packing';
+            }
+            // Sisanya diklasifikasikan sebagai gambar kerja 2D
+            return 'drawing_2d';
+        }
+
+        return 'unknown';
+    }
+}
+
+if (!function_exists('extract_part_code_from_string')) {
+    /**
+     * Ekstrak Part Code dari nama folder atau file (misal: "1768125_COVER SUB-ASSY" -> "1768125", "1768125-00.pdf" -> "1768125")
+     */
+    function extract_part_code_from_string($str) {
+        $clean = trim($str, "/\\ \t\n\r\0\x0B");
+        if ($clean === '') return '';
+        // Buang ekstensi jika ada
+        $clean = pathinfo($clean, PATHINFO_FILENAME);
+        // Coba tangkap alphanumeric dengan kemungkinan tanda minus di tengah (seperti kode part: 1768125 atau ABC-123)
+        // Pemisah nama part biasanya spasi atau underscore ganda/tunggal diikuti teks
+        if (preg_match('/^([a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)?)/', $clean, $m)) {
+            return $m[1];
+        }
+        return $clean;
+    }
+}
+
+/**
+ * Scan uploads/parts/{PartCode}/ atau uploads/documents/ untuk semua PDF dokumen QC.
+ */
 if (!function_exists('get_part_documents_summary')) {
     function get_part_documents_summary($partCode) {
         $cleanPartCode = trim((string)$partCode);
         $configs = get_document_types_config();
         $result = [];
 
-        $baseUploadDir = realpath(__DIR__ . '/../uploads/documents');
+        $rootAppDir = realpath(__DIR__ . '/..');
+        $unifiedPartDir = $rootAppDir ? ($rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'parts' . DIRECTORY_SEPARATOR . $cleanPartCode) : null;
 
-        foreach ($configs as $docKey => $cfg) {
-            $folderName = $cfg['folder'];
-            $docFolder = $baseUploadDir ? ($baseUploadDir . DIRECTORY_SEPARATOR . $folderName) : null;
-            
+        // Tambahkan konfigurasi 2D dan 3D ke daftar tipe dokumen yang dipindai
+        $allDocConfigs = array_merge([
+            '2d' => [
+                'code' => '2d',
+                'label' => 'Gambar 2D',
+                'full_label' => 'Gambar Kerja 2D (PDF)',
+                'folder' => '',
+            ],
+            '3d' => [
+                'code' => '3d',
+                'label' => 'Tampilan 3D',
+                'full_label' => 'Model Solid 3D (.STP/.STEP)',
+                'folder' => '',
+            ],
+        ], $configs);
+
+        // Ambil semua file di folder part (PDF, STP, STEP)
+        $allPartFiles = [];
+        if ($cleanPartCode !== '' && $unifiedPartDir && is_dir($unifiedPartDir)) {
+            $rawFiles = scandir($unifiedPartDir) ?: [];
+            foreach ($rawFiles as $rf) {
+                if ($rf === '.' || $rf === '..') continue;
+                $fPath = $unifiedPartDir . DIRECTORY_SEPARATOR . $rf;
+                if (is_file($fPath)) {
+                    $allPartFiles[] = $fPath;
+                }
+            }
+        }
+
+        foreach ($allDocConfigs as $docKey => $cfg) {
             $versions = [];
+            $scannedFiles = [];
 
-            if ($cleanPartCode !== '' && $docFolder && is_dir($docFolder)) {
-                // Read all PDF files in this directory to perform strict regex matching
-                $allPdfFiles = glob($docFolder . DIRECTORY_SEPARATOR . '*.pdf');
+            if (!empty($allPartFiles)) {
+                foreach ($allPartFiles as $upPath) {
+                    $uName = basename($upPath);
+                    $detectedType = classify_part_file_type($uName);
+                    
+                    // Normalisasi pemetaan 2d & 3d
+                    $matchesThisType = false;
+                    if ($docKey === '2d' && $detectedType === 'drawing_2d') {
+                        $matchesThisType = true;
+                    } elseif ($docKey === '3d' && $detectedType === 'drawing_3d') {
+                        $matchesThisType = true;
+                    } elseif ($detectedType === $docKey) {
+                        $matchesThisType = true;
+                    }
 
-                if (!empty($allPdfFiles)) {
-                    // Regex boundary: Part Code must be followed by [_-](prefix)(number) OR end with .pdf
-                    $quotedCode = preg_quote($cleanPartCode, '/');
-                    $pattern = '/^' . $quotedCode . '(?:[_-](v(?:er)?|rev)?([0-9]+))?\.pdf$/i';
-
-                    foreach ($allPdfFiles as $filePath) {
-                        $filename = basename($filePath);
-
-                        if (preg_match($pattern, $filename, $matches)) {
-                            $prefix = strtolower($matches[1] ?? '');
-                            $rawNum = $matches[2] ?? null;
-
-                            // Determine numeric order and display label
-                            if ($rawNum !== null) {
-                                $versionOrder = (int)$rawNum;
-                                if ($prefix === 'v' || $prefix === 'ver') {
-                                    $versionLabel = 'v' . $rawNum;
-                                } elseif ($prefix === 'rev') {
-                                    $versionLabel = 'Rev ' . $rawNum;
-                                } else {
-                                    // Numeric revision like _00, _01
-                                    $versionLabel = 'Revisi ' . $rawNum;
-                                }
-                            } else {
-                                // Default / base file like PartCode.pdf
-                                $versionOrder = 0;
-                                $versionLabel = 'Revisi 00';
-                            }
-
-                            $relativeRelPath = 'uploads/documents/' . $folderName . '/' . $filename;
-
-                            $versions[] = [
-                                'version' => $versionOrder,
-                                'version_key' => $filename,
-                                'version_label' => $versionLabel,
-                                'filename' => $filename,
-                                'ext' => 'pdf',
-                                'format' => 'pdf',
-                                'file_path' => $relativeRelPath,
-                                'file_size' => filesize($filePath),
-                                'modified_at' => filemtime($filePath),
-                            ];
-                        }
+                    if ($matchesThisType) {
+                        $scannedFiles[] = [
+                            'path' => $upPath,
+                            'is_unified' => true
+                        ];
                     }
                 }
             }
 
-            // Sort versions descending: latest revision first (e.g., 02 > 01 > 00 or v2 > v1)
+            if (!empty($scannedFiles)) {
+                foreach ($scannedFiles as $fItem) {
+                    $filePath = $fItem['path'];
+                    $filename = basename($filePath);
+                    $fileExt = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+
+                    // Parse nomor revisi
+                    $versionOrder = 0;
+                    $versionLabel = 'Revisi 00';
+
+                    if (preg_match('/(?:[_\-\s](?:v|rev)?([0-9]+))\.[a-z0-9]+$/i', $filename, $mNum)) {
+                        $versionOrder = (int)$mNum[1];
+                        $versionLabel = 'Revisi ' . str_pad($versionOrder, 2, '0', STR_PAD_LEFT);
+                    } elseif (preg_match('/(?:v|rev)([0-9]+)\.[a-z0-9]+$/i', $filename, $mNum2)) {
+                        $versionOrder = (int)$mNum2[1];
+                        $versionLabel = 'v' . $versionOrder;
+                    }
+
+                    $relativeRelPath = 'uploads/parts/' . $cleanPartCode . '/' . $filename;
+
+                    $versions[] = [
+                        'version' => $versionOrder,
+                        'version_key' => $filename,
+                        'version_label' => $versionLabel,
+                        'filename' => $filename,
+                        'ext' => $fileExt,
+                        'format' => $fileExt,
+                        'file_path' => $relativeRelPath,
+                        'relative_url' => $relativeRelPath,
+                        'full_url' => function_exists('base_url') ? base_url($relativeRelPath) : (defined('BASE_URL') ? (BASE_URL . '/' . $relativeRelPath) : $relativeRelPath),
+                        'file_size' => @filesize($filePath) ?: 0,
+                        'modified_at' => @filemtime($filePath) ?: 0,
+                    ];
+                }
+            }
+
+            // Urutkan versi terbaru di paling atas
             usort($versions, function ($a, $b) {
                 if ($a['version'] === $b['version']) {
                     return $b['modified_at'] - $a['modified_at'];
@@ -125,7 +217,7 @@ if (!function_exists('get_part_documents_summary')) {
                 return $b['version'] - $a['version'];
             });
 
-            // Mark latest version
+            // Beri penanda is_latest
             if (!empty($versions)) {
                 foreach ($versions as $idx => &$v) {
                     $v['is_latest'] = ($idx === 0);
@@ -152,3 +244,77 @@ if (!function_exists('get_part_documents_summary')) {
         return $result;
     }
 }
+
+if (!function_exists('resolve_safe_document_upload_name')) {
+    /**
+     * Menghasilkan nama file yang aman, mendukung penamaan versi dari pengguna
+     * dan mencegah penimpaan file lama (auto-increment versi jika nama sudah ada).
+     *
+     * @param string $partCode
+     * @param string $docKey ('drawing_2d', 'drawing_3d', 'pi', 'qpoint', 'pac', 'standar_packing')
+     * @param string $originalFilename Nama file asli saat di-upload user
+     * @param string $unifiedPartDir Path folder uploads/parts/{PartCode}/
+     * @return string Nama file tujuan yang aman
+     */
+    function resolve_safe_document_upload_name($partCode, $docKey, $originalFilename, $unifiedPartDir) {
+        $ext = strtolower(pathinfo($originalFilename, PATHINFO_EXTENSION));
+        $nameOnly = pathinfo($originalFilename, PATHINFO_FILENAME);
+
+        // Standar prefix nama dasar jika tidak terdeteksi
+        $basePrefixMap = [
+            'drawing_2d'      => $partCode,
+            'drawing_3d'      => $partCode,
+            'pi'              => 'pi',
+            'qpoint'          => 'qpoint',
+            'pac'             => 'pac',
+            'standar_packing' => 'packing'
+        ];
+        $defaultPrefix = $basePrefixMap[$docKey] ?? $docKey;
+
+        // 1. Cek apakah user sudah memberikan penamaan versi di nama file (misal: pac_02, pi_01, 1768125-01)
+        $userRev = null;
+        if (preg_match('/(?:[_\-\s](?:v|rev)?([0-9]+))$/i', $nameOnly, $mNum)) {
+            $userRev = (int)$mNum[1];
+        } elseif (preg_match('/(?:v|rev)([0-9]+)$/i', $nameOnly, $mNum2)) {
+            $userRev = (int)$mNum2[1];
+        }
+
+        // Tentukan kandidat nama file
+        $sep = ($docKey === 'drawing_2d' || $docKey === 'drawing_3d') ? '-' : '_';
+        
+        if ($userRev !== null) {
+            $candidateName = $defaultPrefix . $sep . str_pad($userRev, 2, '0', STR_PAD_LEFT) . '.' . $ext;
+        } else {
+            $candidateName = $defaultPrefix . $sep . '00.' . $ext;
+        }
+
+        $targetPath = $unifiedPartDir . DIRECTORY_SEPARATOR . $candidateName;
+
+        // 2. Jika file dengan nama kandidat belum ada di server, pakai nama tersebut
+        if (!file_exists($targetPath)) {
+            return $candidateName;
+        }
+
+        // 3. Jika file sudah ada di server, lakukan auto-increment nomor revisi agar versi lama tidak tertimpa
+        $existingFiles = glob($unifiedPartDir . DIRECTORY_SEPARATOR . '*.' . $ext) ?: [];
+        $maxRev = ($userRev !== null) ? $userRev : 0;
+
+        foreach ($existingFiles as $ef) {
+            $efName = basename($ef);
+            $efType = classify_part_file_type($efName);
+            if ($efType === $docKey) {
+                if (preg_match('/(?:[_\-\s](?:v|rev)?([0-9]+))\.' . preg_quote($ext, '/') . '$/i', $efName, $mE)) {
+                    $rNum = (int)$mE[1];
+                    if ($rNum > $maxRev) {
+                        $maxRev = $rNum;
+                    }
+                }
+            }
+        }
+
+        // Beri nomor versi berikutnya
+        $nextRev = $maxRev + 1;
+        return $defaultPrefix . $sep . str_pad($nextRev, 2, '0', STR_PAD_LEFT) . '.' . $ext;
+    }
+}
+

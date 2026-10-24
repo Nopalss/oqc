@@ -126,7 +126,26 @@ if (!function_exists('getLotAqlFallback')) {
 if (!function_exists('getShiftName')) {
     function getShiftName($timestamp) {
         if (empty($timestamp)) return 'Shift 1';
-        $hour = (int)date('H', strtotime($timestamp));
+        $ts = is_numeric($timestamp) ? (int)$timestamp : strtotime($timestamp);
+        if (!$ts) return 'Shift 1';
+
+        $dayOfWeek = (int)date('N', $ts); // 1 = Senin, ..., 6 = Sabtu, 7 = Minggu
+        $hour      = (int)date('H', $ts);
+
+        // KONDISI KHUSUS: HARI SABTU (Setengah Hari / 5 Jam per shift)
+        if ($dayOfWeek === 6) {
+            if ($hour >= 7 && $hour < 12) {
+                return 'Shift 1';
+            } elseif ($hour >= 12 && $hour < 17) {
+                return 'Shift 2';
+            } elseif ($hour >= 17 && $hour < 22) {
+                return 'Shift 3';
+            } else {
+                return 'Shift 3';
+            }
+        }
+
+        // KONDISI REGULER: SENIN - JUMAT & MINGGU
         if ($hour >= 7 && $hour < 15) {
             return 'Shift 1';
         } elseif ($hour >= 15 && $hour < 23) {

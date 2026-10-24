@@ -49,14 +49,38 @@ function redirect($path) {
 
 /**
  * Standard Shift Detection based on Timestamp
- * Shift 1: 07:00 - 15:00
- * Shift 2: 15:00 - 23:00
- * Shift 3: 23:00 - 07:00
+ * Regular (Monday - Friday, Sunday):
+ *   Shift 1: 07:00 - 15:00
+ *   Shift 2: 15:00 - 23:00
+ *   Shift 3: 23:00 - 07:00
+ * Saturday (Half Day / 5-hour intervals):
+ *   Shift 1: 07:00 - 12:00
+ *   Shift 2: 12:00 - 17:00
+ *   Shift 3: 17:00 - 22:00 (dan lembur malam sebelum 07:00)
  */
 if (!function_exists('getShiftName')) {
     function getShiftName($timestamp) {
         if (empty($timestamp)) return 'Shift 1';
-        $hour = (int)date('H', strtotime($timestamp));
+        $ts = is_numeric($timestamp) ? (int)$timestamp : strtotime($timestamp);
+        if (!$ts) return 'Shift 1';
+
+        $dayOfWeek = (int)date('N', $ts); // 1 = Senin, ..., 6 = Sabtu, 7 = Minggu
+        $hour      = (int)date('H', $ts);
+
+        // KONDISI KHUSUS: HARI SABTU (Setengah Hari / 5 Jam per shift)
+        if ($dayOfWeek === 6) {
+            if ($hour >= 7 && $hour < 12) {
+                return 'Shift 1';
+            } elseif ($hour >= 12 && $hour < 17) {
+                return 'Shift 2';
+            } elseif ($hour >= 17 && $hour < 22) {
+                return 'Shift 3';
+            } else {
+                return 'Shift 3';
+            }
+        }
+
+        // KONDISI REGULER: SENIN - JUMAT & MINGGU
         if ($hour >= 7 && $hour < 15) {
             return 'Shift 1';
         } elseif ($hour >= 15 && $hour < 23) {
@@ -716,6 +740,47 @@ function get_part_drawing_assets($partCode, $modelName = '') {
     if (!$cleanPartCode) return $result;
 
     $rootAppDir = realpath(__DIR__ . '/..');
+
+    // Priority 1: Check unified directory uploads/parts/{PartCode}/
+    $unifiedDir = $rootAppDir ? ($rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'parts' . DIRECTORY_SEPARATOR . $cleanPartCode) : null;
+    if ($unifiedDir && is_dir($unifiedDir)) {
+        $result['folder_found'] = $unifiedDir;
+        $files = scandir($unifiedDir);
+        if ($files) {
+            foreach ($files as $f) {
+                if ($f === '.' || $f === '..') continue;
+                $fullPath = $unifiedDir . DIRECTORY_SEPARATOR . $f;
+                if (!is_file($fullPath)) continue;
+
+                $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
+                $nameOnly = strtolower(pathinfo($f, PATHINFO_FILENAME));
+
+                // 3D Model: STP or STEP
+                if (($ext === 'stp' || $ext === 'step') && !$result['drawing_3d_path']) {
+                    $relPath = 'uploads/parts/' . $cleanPartCode . '/' . $f;
+                    $result['drawing_3d_path'] = $relPath;
+                    $result['drawing_3d_url']  = base_url($relPath);
+                }
+
+                // 2D Drawing: PDF yang bukan dokumen QC
+                if ($ext === 'pdf' && !$result['drawing_2d_path']) {
+                    // Cek jika bukan pi, qp, pac, atau packing
+                    $isQcDoc = preg_match('/(^|[_\-\s])(pi|process|qp|qpoint|q[_\-\s]?point|quality|pac|approval|cert|pack|packing)($|[_\-\s0-9])/i', $nameOnly);
+                    if (!$isQcDoc) {
+                        $relPath = 'uploads/parts/' . $cleanPartCode . '/' . $f;
+                        $result['drawing_2d_path'] = $relPath;
+                        $result['drawing_2d_url']  = base_url($relPath);
+                    }
+                }
+            }
+        }
+
+        // Jika kedua drawing (atau salah satunya) sudah ditemukan di unified dir, kembalikan langsung
+        if ($result['drawing_2d_path'] || $result['drawing_3d_path']) {
+            return $result;
+        }
+    }
+
     $baseDir = realpath(__DIR__ . '/../uploads/drawings');
     if (!$baseDir || !is_dir($baseDir)) {
         return $result;

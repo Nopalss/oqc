@@ -147,7 +147,7 @@ $initialDocs = $currPartCode ? get_part_documents_summary($currPartCode) : [];
                 <h4 class="text-xs font-extrabold text-slate-800 uppercase tracking-wider mb-1" id="custom-doc-placeholder-title">DOKUMEN BELUM TERSEDIA</h4>
                 <p class="text-xs text-slate-500 max-w-sm mb-3" id="custom-doc-placeholder-desc">File dokumen belum diunggah untuk Part Code ini.</p>
                 <div class="inline-flex items-center text-[11px] font-mono font-bold text-slate-400 bg-slate-100 px-3 py-1 rounded-md border border-slate-200">
-                    uploads/documents/<span id="custom-doc-placeholder-folder">-</span>/
+                    uploads/parts/<span id="custom-doc-placeholder-folder"><?= htmlspecialchars($currPartCode ?: '-') ?></span>/
                 </div>
             </div>
         </div>

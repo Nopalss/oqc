@@ -1,10 +1,11 @@
 <?php
 $breadcrumbCategory = "MASTER DATA";
-$pageTitle = "Master Data Drawing (2D & 3D)";
-$pageSubtitle = "Kelola berkas acuan gambar teknik 2D (PDF) dan 3D (.STP) per Part Code";
+$pageTitle = "Master Data Drawing & Dokumen Mutu";
+$pageSubtitle = "Kelola berkas acuan gambar teknik 2D/3D serta dokumen mutu (PI, Q-Point, PAC, Standar Packing) per Part Code";
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
+require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
 
@@ -32,36 +33,38 @@ $offset = 0;
 
 if ($pdo) {
     try {
-        // 1. Fast Indexing of Physical Drawing Folders
+        // 1. Fast Indexing of Physical Drawing Folders (Single Pass)
         $rootAppDir = realpath(__DIR__ . '/../..');
         $baseDrawingsDir = $rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'drawings';
-        $dirs = glob($baseDrawingsDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR);
         $diskFilesIndex = [];
 
-        if ($dirs) {
-            foreach ($dirs as $mDir) {
-                $bName = strtolower(basename($mDir));
-                if ($bName === '2d' || $bName === '3d') continue;
-                $pDirs = glob($mDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR);
-                if ($pDirs) {
-                    foreach ($pDirs as $pd) {
-                        $folderName = basename($pd);
-                        $parts = preg_split('/[\s_]+/', $folderName);
-                        $pCode = $parts[0] ?? '';
-                        if (!$pCode) continue;
+        if (is_dir($baseDrawingsDir)) {
+            $dirs = glob($baseDrawingsDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR);
+            if ($dirs) {
+                foreach ($dirs as $mDir) {
+                    $bName = strtolower(basename($mDir));
+                    if ($bName === '2d' || $bName === '3d') continue;
+                    $pDirs = glob($mDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR);
+                    if ($pDirs) {
+                        foreach ($pDirs as $pd) {
+                            $folderName = basename($pd);
+                            $parts = preg_split('/[\s_]+/', $folderName);
+                            $pCode = $parts[0] ?? '';
+                            if (!$pCode) continue;
 
-                        $pdfFiles = glob($pd . DIRECTORY_SEPARATOR . '*.pdf');
-                        $stpFiles = glob($pd . DIRECTORY_SEPARATOR . '*.{stp,step}', GLOB_BRACE);
+                            $pdfFiles = glob($pd . DIRECTORY_SEPARATOR . '*.pdf');
+                            $stpFiles = glob($pd . DIRECTORY_SEPARATOR . '*.{stp,step}', GLOB_BRACE);
 
-                        $rel2d = !empty($pdfFiles) ? str_replace([$rootAppDir . DIRECTORY_SEPARATOR, '\\'], ['', '/'], $pdfFiles[0]) : null;
-                        $rel3d = !empty($stpFiles) ? str_replace([$rootAppDir . DIRECTORY_SEPARATOR, '\\'], ['', '/'], $stpFiles[0]) : null;
+                            $rel2d = !empty($pdfFiles) ? str_replace([$rootAppDir . DIRECTORY_SEPARATOR, '\\'], ['', '/'], $pdfFiles[0]) : null;
+                            $rel3d = !empty($stpFiles) ? str_replace([$rootAppDir . DIRECTORY_SEPARATOR, '\\'], ['', '/'], $stpFiles[0]) : null;
 
-                        $diskFilesIndex[$pCode] = [
-                            'path_2d' => $rel2d,
-                            'path_3d' => $rel3d,
-                            'has_2d'  => !empty($rel2d),
-                            'has_3d'  => !empty($rel3d)
-                        ];
+                            $diskFilesIndex[$pCode] = [
+                                'path_2d' => $rel2d,
+                                'path_3d' => $rel3d,
+                                'has_2d'  => !empty($rel2d),
+                                'has_3d'  => !empty($rel3d)
+                            ];
+                        }
                     }
                 }
             }
@@ -89,7 +92,7 @@ if ($pdo) {
         $stmt->execute($params);
         $rawParts = $stmt->fetchAll();
 
-        // 3. Resolve Real-Time Filesystem Assets & Apply Formal Status Filter
+        // 3. Fast In-Memory Map Resolution & Apply Status Filter (No recursive disk scans)
         $filteredParts = [];
         foreach ($rawParts as $row) {
             $pCode = $row['part_code'];
@@ -103,17 +106,6 @@ if ($pdo) {
             $path3D = $disk['path_3d'] ?? null;
             if (!$path3D && !empty($row['drawing_3d_path']) && file_exists($rootAppDir . DIRECTORY_SEPARATOR . $row['drawing_3d_path'])) {
                 $path3D = $row['drawing_3d_path'];
-            }
-
-            // Fallback lookup via helper if atypical folder naming exists
-            if (!$path2D || !$path3D) {
-                $fs = get_part_drawing_assets($pCode, $row['model_name']);
-                if (!$path2D && !empty($fs['drawing_2d_path'])) {
-                    $path2D = $fs['drawing_2d_path'];
-                }
-                if (!$path3D && !empty($fs['drawing_3d_path'])) {
-                    $path3D = $fs['drawing_3d_path'];
-                }
             }
 
             $has2D = !empty($path2D);
@@ -154,6 +146,41 @@ if ($pdo) {
         $offset = ($page - 1) * $limit;
 
         $drawings = array_slice($filteredParts, $offset, $limit);
+
+        // 5. Fast Single-Pass Indexing for QC Documents (100% Struktur Baru uploads/parts/{part_code}/*.pdf)
+        $basePartsDir = $rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'parts';
+
+        foreach ($drawings as &$dRow) {
+            $pCode = trim((string)($dRow['part_code'] ?? ''));
+            $docFlags = [
+                'pi'              => false,
+                'qpoint'          => false,
+                'pac'             => false,
+                'standar_packing' => false
+            ];
+
+            if ($pCode !== '') {
+                $partDir = $basePartsDir . DIRECTORY_SEPARATOR . $pCode;
+                if (is_dir($partDir)) {
+                    $pdfFiles = glob($partDir . DIRECTORY_SEPARATOR . '*.pdf') ?: [];
+                    foreach ($pdfFiles as $pdfPath) {
+                        $fName = basename($pdfPath);
+                        $type = classify_part_file_type($fName);
+                        if (isset($docFlags[$type])) {
+                            $docFlags[$type] = true;
+                        }
+                    }
+                }
+            }
+
+            $dRow['qc_docs'] = [
+                'pi'              => ['has_document' => $docFlags['pi']],
+                'qpoint'          => ['has_document' => $docFlags['qpoint']],
+                'pac'             => ['has_document' => $docFlags['pac']],
+                'standar_packing' => ['has_document' => $docFlags['standar_packing']]
+            ];
+        }
+        unset($dRow);
     } catch (PDOException $e) {
         $drawings = [];
         $totalItems = 0;
@@ -209,8 +236,15 @@ if ($pdo) {
                     <?php endif; ?>
                 </form>
 
-                <div class="text-xs text-slate-500 font-medium whitespace-nowrap">
-                    Total Part: <span class="font-bold text-slate-800"><?= $totalItems ?></span>
+                <div class="flex items-center gap-3">
+                    <div class="text-xs text-slate-500 font-medium whitespace-nowrap">
+                        Total Part: <span class="font-bold text-slate-800"><?= $totalItems ?></span>
+                    </div>
+
+                    <a href="<?= base_url('modules/master_drawings/import_zip.php') ?>" class="btn-primary py-1 px-3 text-xs font-bold inline-flex items-center gap-1.5 rounded-lg shadow-xs hover:shadow-sm">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                        <span>Import Berkas (ZIP)</span>
+                    </a>
                 </div>
 
             </div>
@@ -225,8 +259,9 @@ if ($pdo) {
                             <th class="px-4 py-3">No</th>
                             <th class="px-4 py-3">Part Code</th>
                             <th class="px-4 py-3">Part Name</th>
-                            <th class="px-4 py-3 text-center">Gambar 2D (PDF)</th>
-                            <th class="px-4 py-3 text-center">Gambar 3D (.STP)</th>
+                            <th class="px-4 py-3 text-center">Gambar 2D</th>
+                            <th class="px-4 py-3 text-center">Gambar 3D</th>
+                            <th class="px-4 py-3 text-center">Dokumen Mutu</th>
                             <th class="px-4 py-3">Update Terakhir</th>
                             <th class="px-4 py-3 text-right">Aksi</th>
                         </tr>
@@ -234,7 +269,7 @@ if ($pdo) {
                     <tbody class="divide-y divide-slate-100">
                         <?php if (empty($drawings)): ?>
                             <tr>
-                                <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                                <td colspan="8" class="px-4 py-8 text-center text-slate-400">
                                     Belum ada data Master Part & Drawing.
                                 </td>
                             </tr>
@@ -284,6 +319,23 @@ if ($pdo) {
                                         <?php else: ?>
                                             <span class="badge badge-secondary">Belum Ada</span>
                                         <?php endif; ?>
+                                    </td>
+
+                                    <!-- QC Documents Status Badges -->
+                                    <td class="px-4 py-3 text-center whitespace-nowrap">
+                                        <?php
+                                        $qcd = $row['qc_docs'] ?? [];
+                                        $hasPi = !empty($qcd['pi']['has_document']);
+                                        $hasQp = !empty($qcd['qpoint']['has_document']);
+                                        $hasPac = !empty($qcd['pac']['has_document']);
+                                        $hasPack = !empty($qcd['standar_packing']['has_document']);
+                                        ?>
+                                        <div class="inline-flex items-center gap-1">
+                                            <span class="px-1.5 py-0.5 rounded text-[9.5px] font-extrabold <?= $hasPi ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' : 'bg-slate-100 text-slate-400' ?>" title="<?= $hasPi ? 'PI Tersedia' : 'PI Belum Ada' ?>">PI</span>
+                                            <span class="px-1.5 py-0.5 rounded text-[9.5px] font-extrabold <?= $hasQp ? 'bg-amber-100 text-amber-800 border border-amber-200' : 'bg-slate-100 text-slate-400' ?>" title="<?= $hasQp ? 'Q-Point Tersedia' : 'Q-Point Belum Ada' ?>">QP</span>
+                                            <span class="px-1.5 py-0.5 rounded text-[9.5px] font-extrabold <?= $hasPac ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-slate-100 text-slate-400' ?>" title="<?= $hasPac ? 'PAC Tersedia' : 'PAC Belum Ada' ?>">PAC</span>
+                                            <span class="px-1.5 py-0.5 rounded text-[9.5px] font-extrabold <?= $hasPack ? 'bg-orange-100 text-orange-800 border border-orange-200' : 'bg-slate-100 text-slate-400' ?>" title="<?= $hasPack ? 'Standar Packing Tersedia' : 'Standar Packing Belum Ada' ?>">PACK</span>
+                                        </div>
                                     </td>
 
                                     <td class="px-4 py-3 text-[11px] text-slate-500 whitespace-nowrap">

@@ -134,12 +134,12 @@ function switchDocumentTab(tab) {
         box2d.classList.remove('hidden');
         box3d.classList.add('hidden');
         boxCustom.classList.add('hidden');
-        if (versionContainer) versionContainer.classList.add('hidden');
+        updateVersionDropdownForTab('2d');
     } else if (tab === '3d') {
         box3d.classList.remove('hidden');
         box2d.classList.add('hidden');
         boxCustom.classList.add('hidden');
-        if (versionContainer) versionContainer.classList.add('hidden');
+        updateVersionDropdownForTab('3d');
 
         if (typeof is3dViewerInitialized !== 'undefined' && !is3dViewerInitialized && typeof init3dViewer === 'function') {
             init3dViewer();
@@ -161,7 +161,7 @@ function switchDrawingTab(tab) {
 }
 
 /**
- * Populate Version Dropdown for the Selected Document
+ * Populate Version Dropdown for the Selected Document (Supports 2D, 3D, PI, Q-Point, PAC, Standar Packing)
  */
 function updateVersionDropdownForTab(docType) {
     var versionContainer = document.getElementById('doc-version-selector-container');
@@ -190,10 +190,54 @@ function updateVersionDropdownForTab(docType) {
 }
 
 /**
- * Handle Version Dropdown Change
+ * Handle Version Dropdown Change (2D, 3D, and QC Documents)
  */
 function onDocumentVersionChange(fileKey) {
-    if (activeDocumentTab !== '2d' && activeDocumentTab !== '3d') {
+    if (!fileKey) return;
+
+    if (activeDocumentTab === '2d') {
+        var doc2d = currentPartDocuments['2d'];
+        if (doc2d && doc2d.versions) {
+            var selectedVersion = null;
+            doc2d.versions.forEach(function(v) {
+                if (v.filename === fileKey) selectedVersion = v;
+            });
+            if (selectedVersion) {
+                var iframe = document.getElementById('pdf-frame');
+                var placeholder = document.getElementById('drawing-placeholder-box');
+                if (iframe) {
+                    var targetUrl = (selectedVersion.full_url || (window.APP_BASE_URL + '/' + selectedVersion.file_path)) + '#toolbar=0';
+                    iframe.src = targetUrl;
+                    iframe.style.display = 'block';
+                }
+                if (placeholder) placeholder.style.display = 'none';
+            }
+        }
+    } else if (activeDocumentTab === '3d') {
+        var doc3d = currentPartDocuments['3d'];
+        if (doc3d && doc3d.versions) {
+            var selectedVersion3d = null;
+            doc3d.versions.forEach(function(v) {
+                if (v.filename === fileKey) selectedVersion3d = v;
+            });
+            if (selectedVersion3d) {
+                var container = document.getElementById('cad-3d-viewport');
+                var targetStpUrl = selectedVersion3d.full_url || (window.APP_BASE_URL + '/' + selectedVersion3d.file_path);
+                if (container) {
+                    container.setAttribute('data-stp-url', targetStpUrl);
+                    container.style.display = 'block';
+                }
+                var p3d = document.getElementById('cad-3d-placeholder-box');
+                if (p3d) p3d.style.display = 'none';
+
+                if (typeof renderCadStep === 'function') {
+                    renderCadStep('cad-3d-viewport', targetStpUrl);
+                } else if (typeof init3dViewer === 'function') {
+                    init3dViewer();
+                }
+            }
+        }
+    } else {
         loadCustomDocumentViewer(activeDocumentTab, fileKey);
     }
 }
@@ -231,7 +275,7 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     var docInfo = currentPartDocuments[docType];
     var folderName = docInfo ? docInfo.folder : docType.toUpperCase();
 
-    if (pFolder) pFolder.textContent = folderName;
+    if (pFolder) pFolder.textContent = partCode || '-';
 
     if (!docInfo || !docInfo.has_document || !partCode) {
         // Document does not exist
@@ -242,7 +286,7 @@ function loadCustomDocumentViewer(docType, targetVersion) {
         if (placeholder) {
             placeholder.style.display = 'flex';
             if (pTitle) pTitle.textContent = (docInfo ? docInfo.full_label : docType.toUpperCase()) + ' BELUM TERSEDIA';
-            if (pDesc) pDesc.textContent = 'File belum diunggah untuk Part Code ' + (partCode || '-') + ' di folder uploads/documents/' + folderName + '/';
+            if (pDesc) pDesc.textContent = 'File belum diunggah untuk Part Code ' + (partCode || '-') + ' di folder uploads/parts/' + (partCode || '-') + '/';
         }
         if (loading) loading.classList.add('hidden');
         return;

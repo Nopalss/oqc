@@ -7,6 +7,7 @@
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
 
@@ -55,55 +56,14 @@ $cleanPartName = str_replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], '-'
 $rawModelName  = trim((string)$part['model_name']);
 $cleanModel    = !empty($rawModelName) ? str_replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], '-', $rawModelName) : 'GENERAL';
 
-// Base Drawings Directory
+// 2. Siapkan Direktori Terpusat Part: uploads/parts/{PartCode}/
 $rootAppDir = realpath(__DIR__ . '/../..');
-$baseDir = $rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'drawings';
-if (!is_dir($baseDir)) {
-    mkdir($baseDir, 0777, true);
+$unifiedPartDir = $rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'parts' . DIRECTORY_SEPARATOR . $cleanPartCode;
+if (!is_dir($unifiedPartDir)) {
+    mkdir($unifiedPartDir, 0777, true);
 }
 
-// 2. Locate or Create Target Model Directory
-$modelDir = $baseDir . DIRECTORY_SEPARATOR . $cleanModel;
-if (!is_dir($modelDir)) {
-    // Check case-insensitive match first
-    $subdirs = glob($baseDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR);
-    $foundModelDir = null;
-    if ($subdirs) {
-        foreach ($subdirs as $sd) {
-            if (strcasecmp(basename($sd), $cleanModel) === 0) {
-                $foundModelDir = $sd;
-                break;
-            }
-        }
-    }
-    if ($foundModelDir) {
-        $modelDir = $foundModelDir;
-    } else {
-        mkdir($modelDir, 0777, true);
-    }
-}
-
-// 3. Locate or Create Target Part Directory inside Model Directory
-$targetPartDir = find_part_folder_in_dir($modelDir, $cleanPartCode);
-
-// If not in model dir, check across other model folders (maybe part was placed elsewhere)
-if (!$targetPartDir) {
-    $existingFs = get_part_drawing_assets($cleanPartCode, $cleanModel);
-    if (!empty($existingFs['folder_found']) && is_dir($existingFs['folder_found'])) {
-        $targetPartDir = $existingFs['folder_found'];
-    }
-}
-
-// If still not found, create new part folder
-if (!$targetPartDir || !is_dir($targetPartDir)) {
-    $folderName = $cleanPartCode . ' _ ' . $cleanPartName;
-    $targetPartDir = $modelDir . DIRECTORY_SEPARATOR . $folderName;
-    if (!is_dir($targetPartDir)) {
-        mkdir($targetPartDir, 0777, true);
-    }
-}
-
-// 4. Fetch existing database record (if any)
+// 3. Fetch existing database record (if any)
 $stmtCheck = $pdo->prepare("SELECT * FROM master_drawings WHERE part_id = :part_id");
 $stmtCheck->execute([':part_id' => $part_id]);
 $existing = $stmtCheck->fetch();
@@ -112,25 +72,15 @@ $path2D = $existing['drawing_2d_path'] ?? null;
 $path3D = $existing['drawing_3d_path'] ?? null;
 $uploadedAny = false;
 
-// Handle 2D File Upload (.pdf)
+// Handle 2D File Upload (.pdf) -> Simpan ke uploads/parts/{PartCode}/ dengan preservasi versi
 if (isset($_FILES['file_2d']) && $_FILES['file_2d']['error'] === UPLOAD_ERR_OK) {
-    $ext = strtolower(pathinfo($_FILES['file_2d']['name'], PATHINFO_EXTENSION));
+    $origName = $_FILES['file_2d']['name'];
+    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
     if ($ext === 'pdf') {
-        // Clean up old pdf files in target folder if different name
-        $existingFiles = glob($targetPartDir . DIRECTORY_SEPARATOR . '*.pdf');
-        if ($existingFiles) {
-            foreach ($existingFiles as $ef) {
-                if (is_file($ef)) {
-                    @unlink($ef);
-                }
-            }
-        }
-
-        $destFilename2D = $cleanPartCode . '.pdf';
-        $destPath2D = $targetPartDir . DIRECTORY_SEPARATOR . $destFilename2D;
+        $destFilename2D = resolve_safe_document_upload_name($cleanPartCode, 'drawing_2d', $origName, $unifiedPartDir);
+        $destPath2D = $unifiedPartDir . DIRECTORY_SEPARATOR . $destFilename2D;
         if (move_uploaded_file($_FILES['file_2d']['tmp_name'], $destPath2D)) {
-            $rel2D = str_replace($rootAppDir . DIRECTORY_SEPARATOR, '', $destPath2D);
-            $path2D = str_replace('\\', '/', $rel2D);
+            $path2D = 'uploads/parts/' . $cleanPartCode . '/' . $destFilename2D;
             $uploadedAny = true;
         }
     } else {
@@ -138,29 +88,43 @@ if (isset($_FILES['file_2d']) && $_FILES['file_2d']['error'] === UPLOAD_ERR_OK) 
     }
 }
 
-// Handle 3D File Upload (.stp / .step)
+// Handle 3D File Upload (.stp / .step) -> Simpan ke uploads/parts/{PartCode}/ dengan preservasi versi
 if (isset($_FILES['file_3d']) && $_FILES['file_3d']['error'] === UPLOAD_ERR_OK) {
-    $ext = strtolower(pathinfo($_FILES['file_3d']['name'], PATHINFO_EXTENSION));
+    $origName = $_FILES['file_3d']['name'];
+    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
     if ($ext === 'stp' || $ext === 'step') {
-        // Clean up old stp/step files in target folder if different name
-        $existingStp = glob($targetPartDir . DIRECTORY_SEPARATOR . '*.{stp,step}', GLOB_BRACE);
-        if ($existingStp) {
-            foreach ($existingStp as $es) {
-                if (is_file($es)) {
-                    @unlink($es);
-                }
-            }
-        }
-
-        $destFilename3D = $cleanPartCode . '.' . $ext;
-        $destPath3D = $targetPartDir . DIRECTORY_SEPARATOR . $destFilename3D;
+        $destFilename3D = resolve_safe_document_upload_name($cleanPartCode, 'drawing_3d', $origName, $unifiedPartDir);
+        $destPath3D = $unifiedPartDir . DIRECTORY_SEPARATOR . $destFilename3D;
         if (move_uploaded_file($_FILES['file_3d']['tmp_name'], $destPath3D)) {
-            $rel3D = str_replace($rootAppDir . DIRECTORY_SEPARATOR, '', $destPath3D);
-            $path3D = str_replace('\\', '/', $rel3D);
+            $path3D = 'uploads/parts/' . $cleanPartCode . '/' . $destFilename3D;
             $uploadedAny = true;
         }
     } else {
-        set_flash('warning', 'Berkas 3D harus berformat .STP atau .STEP!');
+        set_flash('warning', 'Berkas 3D harus berformat STP atau STEP!');
+    }
+}
+
+// Handle 4 QC Documents (PI, Q-Point, PAC, Standar Packing) -> Multi-Versi Cerdas & Tidak Menimpa Versi Lama
+$qcDocConfigs = [
+    'file_pi'              => ['type' => 'pi',              'label' => 'Process Inspection (PI)'],
+    'file_qpoint'          => ['type' => 'qpoint',          'label' => 'Quality Point (Q-Point)'],
+    'file_pac'             => ['type' => 'pac',             'label' => 'Part Approval Certificate (PAC)'],
+    'file_standar_packing' => ['type' => 'standar_packing', 'label' => 'Standar Packing']
+];
+
+foreach ($qcDocConfigs as $inputKey => $cfg) {
+    if (isset($_FILES[$inputKey]) && $_FILES[$inputKey]['error'] === UPLOAD_ERR_OK) {
+        $origName = $_FILES[$inputKey]['name'];
+        $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+        if ($ext === 'pdf') {
+            $safeDocName = resolve_safe_document_upload_name($cleanPartCode, $cfg['type'], $origName, $unifiedPartDir);
+            $destDocPath = $unifiedPartDir . DIRECTORY_SEPARATOR . $safeDocName;
+            if (move_uploaded_file($_FILES[$inputKey]['tmp_name'], $destDocPath)) {
+                $uploadedAny = true;
+            }
+        } else {
+            set_flash('warning', 'Berkas ' . $cfg['label'] . ' harus berformat PDF!');
+        }
     }
 }
 
@@ -194,7 +158,7 @@ if ($uploadedAny) {
             ':uploaded_by' => $createdById
         ]);
     }
-    set_flash('success', 'Berkas drawing berhasil disimpan ke dalam folder part!');
+    set_flash('success', 'Berkas drawing dan dokumen mutu berhasil disimpan!');
 } else {
     if (!isset($_SESSION['flash'])) {
         set_flash('warning', 'Tidak ada berkas yang dipilih untuk diunggah.');

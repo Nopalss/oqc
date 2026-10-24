@@ -54,6 +54,24 @@ if ($pdo) {
                     }
                 }
 
+                // Hapus berkas dan folder terpusat part di uploads/parts/{PartCode}/
+                $cleanPCode = trim($part['part_code']);
+                if ($cleanPCode !== '') {
+                    $rootAppDir = realpath(__DIR__ . '/../..');
+                    $unifiedPartDir = $rootAppDir ? ($rootAppDir . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'parts' . DIRECTORY_SEPARATOR . $cleanPCode) : null;
+                    if ($unifiedPartDir && is_dir($unifiedPartDir)) {
+                        $partFiles = glob($unifiedPartDir . DIRECTORY_SEPARATOR . '*');
+                        if ($partFiles) {
+                            foreach ($partFiles as $pf) {
+                                if (is_file($pf)) {
+                                    @unlink($pf);
+                                }
+                            }
+                        }
+                        @rmdir($unifiedPartDir);
+                    }
+                }
+
                 // Delete database record if exists
                 $stmtDel = $pdo->prepare("DELETE FROM master_drawings WHERE part_id = :part_id");
                 $stmtDel->execute([':part_id' => $part_id]);
