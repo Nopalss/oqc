@@ -23,6 +23,9 @@ $currentUserId = (int)$currentUser['id'];
 $currentUserRole = $currentUser['role'];
 $isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager'], true);
 
+// Release PHP session lock immediately so parallel AJAX / polling requests are not blocked
+session_write_close();
+
 $pdo = getDB();
 if (!$pdo) {
     echo json_encode(['success' => false, 'message' => 'Koneksi database gagal']);

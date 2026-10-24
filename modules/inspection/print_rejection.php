@@ -399,7 +399,76 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
             gap: 3px;
         }
         @media print {
-            .no-print-bar { display: none !important; }
+            .no-print-bar, .fab-print-wrap { display: none !important; }
+        }
+
+        /* Floating Print Button (kanan bawah) */
+        .fab-print-wrap {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+        }
+        .fab-print-tip {
+            background: #0f172a;
+            color: #f8fafc;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 5px 10px;
+            border-radius: 6px;
+            opacity: 0;
+            transform: translateY(4px);
+            transition: all 0.2s ease;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+        .fab-print-wrap:hover .fab-print-tip { opacity: 1; transform: translateY(0); }
+        .fab-print {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            padding: 14px 24px;
+            font-size: 15px;
+            font-weight: 800;
+            letter-spacing: 0.3px;
+            color: #ffffff;
+            background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+            border: none;
+            border-radius: 999px;
+            cursor: pointer;
+            box-shadow: 0 10px 25px -5px rgba(185, 28, 28, 0.55), 0 4px 10px rgba(0,0,0,0.15);
+            transition: transform 0.18s ease, box-shadow 0.18s ease;
+            animation: fabPulse 1.6s ease-out 3;
+        }
+        .fab-print:hover { transform: translateY(-2px) scale(1.04); box-shadow: 0 14px 30px -5px rgba(185, 28, 28, 0.65), 0 6px 14px rgba(0,0,0,0.18); }
+        .fab-print:active { transform: scale(0.97); }
+        .fab-print:disabled { opacity: 0.75; cursor: wait; }
+        .fab-print svg { width: 20px; height: 20px; }
+        .fab-print-dot {
+            position: absolute;
+            top: -3px;
+            right: -3px;
+            min-width: 20px;
+            height: 20px;
+            padding: 0 5px;
+            border-radius: 999px;
+            border: 2px solid #ffffff;
+            font-size: 11px;
+            line-height: 16px;
+            text-align: center;
+            font-weight: 900;
+        }
+        .fab-print-dot.ok { background: #16a34a; color: #fff; }
+        .fab-print-dot.warn { background: #f59e0b; color: #1f2937; }
+        @keyframes fabPulse {
+            0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6), 0 10px 25px -5px rgba(185, 28, 28, 0.55); }
+            70%  { box-shadow: 0 0 0 16px rgba(239, 68, 68, 0), 0 10px 25px -5px rgba(185, 28, 28, 0.55); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0), 0 10px 25px -5px rgba(185, 28, 28, 0.55); }
         }
 
         /* Table Grid Layouts */
@@ -462,8 +531,8 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
 
     <!-- Action Bar (Hidden on print) -->
     <div class="no-print-bar">
-        <a href="<?= base_url('modules/inspection/session.php?id=' . $session['id']) ?>" class="btn-action btn-back">
-            &larr; Kembali ke Workbench Inspeksi
+        <a href="<?= base_url('modules/inspection/session.php?id=' . $session['id']) ?>" onclick="return goBackUndo(event);" class="btn-action btn-back" id="btn-back-undo" title="Kembali ke halaman sebelumnya (Esc)">
+            &larr; Kembali
         </a>
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
             <!-- Dual-Workflow Chief Approval Controls -->
@@ -485,15 +554,21 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
                 <?php endif; ?>
             </div>
 
-            <button onclick="downloadPDF(this)" class="btn-action" style="background: #0284c7; color: #ffffff;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Download PDF
-            </button>
-            <button onclick="printCleanPDF(this)" class="btn-action btn-print">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-                Cetak PDF (Full A4)
-            </button>
         </div>
+    </div>
+
+    <!-- Floating Print Button (kanan bawah, tidak ikut tercetak) -->
+    <div class="fab-print-wrap">
+        
+        <button type="button" id="fab-print-btn" class="fab-print" onclick="downloadPDF(this)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+            <span>Cetak</span>
+            <?php if ($isApproved): ?>
+                <span class="fab-print-dot ok" title="Sudah ACC Chief QC">&#10003;</span>
+            <?php else: ?>
+                <span class="fab-print-dot warn" title="Belum ACC Chief QC">!</span>
+            <?php endif; ?>
+        </button>
     </div>
 
     <!-- Official Rejection Sheet Container -->
@@ -1107,10 +1182,57 @@ $chiefQrSvg = generate_qr_svg($chiefQrUrl, 38);
             }, 150);
         }
 
-        // Download PDF — sama dengan print (pilih "Save as PDF" di dialog)
-        function downloadPDF(btn) {
-            printCleanPDF(btn);
+        var IS_CHIEF_APPROVED = <?= $isApproved ? 'true' : 'false' ?>;
+        var FALLBACK_BACK_URL = '<?= base_url('modules/inspection/session.php?id=' . (int)$session['id']) ?>';
+
+        // Tombol Kembali = "undo": balik ke halaman sebelumnya persis (scroll/filter tetap),
+        // fallback ke Workbench jika halaman dibuka langsung / tab baru.
+        function goBackUndo(e) {
+            var sameOriginRef = document.referrer && document.referrer.indexOf(window.location.origin) === 0;
+            if (window.history.length > 1 && sameOriginRef) {
+                if (e) e.preventDefault();
+                window.history.back();
+                return false;
+            }
+            return true; // ikuti href fallback
         }
+
+        // Floating print: peringatkan bila belum ACC Chief
+        function handleFabPrint(btn) {
+            if (IS_CHIEF_APPROVED || typeof Swal === 'undefined') {
+                printCleanPDF(btn);
+                return;
+            }
+            Swal.fire({
+                title: 'Belum di-ACC Chief QC',
+                text: 'Kolom tanda tangan Chief akan kosong di lembar cetak. Tetap cetak sekarang?',
+                icon: 'warning',
+                showCancelButton: true,
+                showDenyButton: true,
+                confirmButtonColor: '#dc2626',
+                denyButtonColor: '#16a34a',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Tetap Cetak',
+                denyButtonText: 'ACC Dulu',
+                cancelButtonText: 'Batal'
+            }).then(function(r) {
+                if (r.isConfirmed) printCleanPDF(btn);
+                else if (r.isDenied) triggerChiefApprove();
+            });
+        }
+
+        // Kompatibilitas pemanggil lama
+        function downloadPDF(btn) { handleFabPrint(btn); }
+
+        // Shortcut: Ctrl+P pakai skala A4 yang sama, Esc = kembali
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 'P')) {
+                e.preventDefault();
+                handleFabPrint(document.getElementById('fab-print-btn'));
+            } else if (e.key === 'Escape' && !document.querySelector('.swal2-container')) {
+                if (goBackUndo(null)) window.location.href = FALLBACK_BACK_URL;
+            }
+        });
 
         <?php if ($isAutoPrint): ?>
         window.addEventListener('DOMContentLoaded', function() {

@@ -1210,7 +1210,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal: Catat NG per Lot (Per-Lot AQL) -->
-<div id="modal-lot-defect" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.7); backdrop-filter: blur(4px); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px;">
+<div id="modal-lot-defect" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px;">
     <div style="background-color: #ffffff; border-radius: 18px; max-width: 580px; width: 100%; border: 1px solid #cbd5e1; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2); overflow: visible; display: flex; flex-direction: column;">
         <!-- Header -->
         <div style="background-color: #fff1f2; border-bottom: 1px solid #fecdd3; padding: 14px 20px; border-top-left-radius: 18px; border-top-right-radius: 18px; display: flex; align-items: center; justify-content: space-between;">
@@ -1266,7 +1266,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal: Tindakan Re-Inspeksi Per-Lot (Opsi A) -->
-<div id="modal-lot-reinspection" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px;">
+<div id="modal-lot-reinspection" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); z-index: 9999; display: none; align-items: center; justify-content: center; padding: 16px;">
     <div style="background-color: #ffffff; border-radius: 20px; max-width: 560px; width: 100%; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); overflow: hidden; display: flex; flex-direction: column;">
         <!-- Header -->
         <div style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #ffffff; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;">
@@ -2241,7 +2241,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal Pop-up Rincian Detail Kanban / Planning -->
-<div id="kanban-detail-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
+<div id="kanban-detail-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
     
     <div style="background-color: #ffffff; border-radius: 24px; max-width: 560px; width: 100%; max-height: 85vh; padding: 20px; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); position: relative; margin: auto; display: flex; flex-direction: column; overflow: hidden;" class="animate-fadeIn space-y-2.5">
         
@@ -2453,7 +2453,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal Riwayat Inspeksi Sesi Terdahulu untuk Part Ini -->
-<div id="prev-history-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
+<div id="prev-history-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); z-index: 9999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
     <div style="background-color: #ffffff; border-radius: 20px; max-width: 620px; width: 100%; max-height: 88vh; display: flex; flex-direction: column; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); margin: auto; overflow: hidden;" class="animate-fadeIn">
         
         <!-- Modal Header -->
@@ -2570,7 +2570,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal Rincian Penggantian Lot & Ref No -->
-<div id="substitution-log-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); backdrop-filter: blur(4px); z-index: 99999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
+<div id="substitution-log-modal-overlay" style="position: fixed; inset: 0; background-color: rgba(15, 23, 42, 0.75); z-index: 99999; display: flex; align-items: center; justify-content: center; padding: 16px;" class="hidden">
     <div style="background-color: #ffffff; border-radius: 20px; max-width: 550px; width: 100%; max-height: 85vh; padding: 20px; border: 1px solid #cbd5e1; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); margin: auto; display: flex; flex-direction: column; overflow: hidden;" class="animate-fadeIn space-y-3">
         
         <!-- Modal Header -->
@@ -2602,7 +2602,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 </div>
 
 <!-- Modal Dialog Batch Re-Inspeksi Kanban (REJECTED) -->
-<div id="batch-reinspection-modal-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh; background-color: rgba(15, 23, 42, 0.85); backdrop-filter: blur(6px); z-index: 999999; display: flex; align-items: center; justify-content: center; padding: 16px; margin: 0; box-sizing: border-box;" class="hidden">
+<div id="batch-reinspection-modal-overlay" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh; background-color: rgba(15, 23, 42, 0.85); z-index: 999999; display: flex; align-items: center; justify-content: center; padding: 16px; margin: 0; box-sizing: border-box;" class="hidden">
     <div style="background-color: #ffffff; border-radius: 20px; max-width: 650px; width: 100%; max-height: 92vh; display: flex; flex-direction: column; border: 1px solid #cbd5e1; box-shadow: 0 25px 60px -12px rgba(0, 0, 0, 0.4); margin: auto; overflow: hidden; position: relative; z-index: 1000000;" class="animate-fadeIn">
         
         <!-- Modal Header -->
@@ -3302,14 +3302,18 @@ function showDuplicatePassedModal(data, fallbackInfo, onClosedCallback) {
         var mK = data.message.match(/Kanban\s+([^)]+)/i);
         if (mK) kanbanNo = mK[1].trim();
     }
-    var sessType = details.inspection_type || (kanbanNo ? 'kanban' : 'safety_stock');
+    var isSafetyStock = (data.is_safety_stock === true) || 
+                        (details.inspection_type === 'safety_stock') || 
+                        (kanbanNo && kanbanNo.indexOf('SS-') === 0) ||
+                        (data.message && data.message.toLowerCase().indexOf('safety stock') !== -1);
+
     var sessBadgeText = '';
-    if (origSessId) {
+    if (isSafetyStock) {
+        sessBadgeText = origSessId ? ('Safety Stock #' + origSessId) : 'Safety Stock Ready';
+    } else if (origSessId) {
         sessBadgeText = 'Sesi #' + origSessId;
         if (kanbanNo && kanbanNo !== '-') {
             sessBadgeText += ' (Kanban ' + kanbanNo + ')';
-        } else if (sessType === 'safety_stock') {
-            sessBadgeText += ' (Safety Stock Gudang)';
         }
     } else {
         sessBadgeText = (kanbanNo && kanbanNo !== '-') ? ('Kanban ' + kanbanNo) : 'Sesi Inspeksi Sebelumnya';
@@ -3328,39 +3332,47 @@ function showDuplicatePassedModal(data, fallbackInfo, onClosedCallback) {
     if (panel && neutralEl && successEl && rejectedEl) {
         neutralEl.classList.add('hidden');
         successEl.classList.add('hidden');
-        panel.style.backgroundColor = '#fff1f2';
-        panel.style.borderColor = '#f43f5e';
+        panel.style.backgroundColor = isSafetyStock ? '#fdf4ff' : '#fff1f2';
+        panel.style.borderColor = isSafetyStock ? '#d946ef' : '#f43f5e';
+
+        var titleText = isSafetyStock ? 'SUDAH SAFETY STOCK (PASSED)!' : 'DUPLIKASI DATA / LABEL SUDAH PASSED!';
+        var headerColor = isSafetyStock ? '#86198f' : '#be123c';
+        var iconBg = isSafetyStock ? '#a21caf' : '#e11d48';
+        var borderBottomColor = isSafetyStock ? '#f5d0fe' : '#fecdd3';
+        var descText = isSafetyStock 
+            ? 'Label box ini <span style="text-decoration: underline;">sudah Safety Stock (Lulus QC)</span>. Tidak perlu dicek lagi, gunakan langsung pada Jadwal Kanban bila dibutuhkan.'
+            : 'Label box ini <span style="text-decoration: underline;">sudah pernah diinspeksi & dinyatakan PASSED</span>. Tidak dapat digunakan/discan ulang.';
 
         rejectedEl.innerHTML = 
             '<!-- Header Status -->' +
-            '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid #fecdd3; padding-bottom: 5px; margin-bottom: 6px;">' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1.5px solid ' + borderBottomColor + '; padding-bottom: 5px; margin-bottom: 6px;">' +
                 '<div style="display: flex; align-items: center; gap: 6px;">' +
-                    '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: #e11d48; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(225,29,72,0.35);">✕</span>' +
-                    '<span style="font-size: 11.5px; font-weight: 900; color: #be123c; text-transform: uppercase; letter-spacing: 0.03em;">DUPLIKASI DATA / LABEL SUDAH PASSED!</span>' +
+                    '<span style="width: 20px; height: 20px; border-radius: 50%; background-color: ' + iconBg + '; color: #ffffff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 900; flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.2);">' + (isSafetyStock ? '📦' : '✕') + '</span>' +
+                    '<span style="font-size: 11.5px; font-weight: 900; color: ' + headerColor + '; text-transform: uppercase; letter-spacing: 0.03em;">' + titleText + '</span>' +
                 '</div>' +
                 '<span style="background-color: #0f172a; color: #34d399; border: 1px solid #334155; font-size: 9px; font-weight: 900; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">✓ ' + escapeHtml(sessBadgeText) + '</span>' +
             '</div>' +
-            '<!-- Keterangan -->' +
-            '<div style="font-size: 11px; font-weight: 700; color: #881337; margin-bottom: 6px; line-height: 1.35;">' +
-                'Label box ini <span style="text-decoration: underline;">sudah pernah diinspeksi & dinyatakan PASSED</span>. Tidak dapat digunakan/discan ulang.' +
+            '<!-- Keterangan Ringkas & Padat -->' +
+            '<div style="font-size: 11px; font-weight: 700; color: ' + (isSafetyStock ? '#701a75' : '#881337') + '; margin-bottom: 6px; line-height: 1.35;">' +
+                descText +
             '</div>' +
             '<!-- 3 Parameter Boxes: Lot No -> Ref No -> Qty Box (Urutan Standar OQC) -->' +
             '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px;">' +
-                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
-                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">LOT NUMBER</span>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid ' + borderBottomColor + '; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: ' + headerColor + '; text-transform: uppercase; display: block;">LOT NUMBER</span>' +
                     '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2; word-break: break-all;">#' + escapeHtml(lNum) + '</span>' +
                 '</div>' +
-                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
-                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">REF NUMBER</span>' +
-                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #be123c; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(rNum) + '</span>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid ' + borderBottomColor + '; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: ' + headerColor + '; text-transform: uppercase; display: block;">REF NUMBER</span>' +
+                    '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: ' + (isSafetyStock ? '#9333ea' : '#be123c') + '; display: block; line-height: 1.2; word-break: break-all;">' + escapeHtml(rNum) + '</span>' +
                 '</div>' +
-                '<div style="background-color: #ffffff; border: 1.5px solid #fecdd3; border-radius: 7px; padding: 4px 7px;">' +
-                    '<span style="font-size: 8px; font-weight: 800; color: #be123c; text-transform: uppercase; display: block;">QTY BOX</span>' +
+                '<div style="background-color: #ffffff; border: 1.5px solid ' + borderBottomColor + '; border-radius: 7px; padding: 4px 7px;">' +
+                    '<span style="font-size: 8px; font-weight: 800; color: ' + headerColor + '; text-transform: uppercase; display: block;">QTY BOX</span>' +
                     '<span style="font-family: monospace; font-size: 13.5px; font-weight: 900; color: #0f172a; display: block; line-height: 1.2;">' + (boxQty > 0 ? boxQty.toLocaleString() : '-') + ' <span style="font-size: 9.5px; font-weight: 700; color: #64748b;">pcs</span></span>' +
                 '</div>' +
             '</div>' +
             '<!-- Audit Info -->' +
-            '<div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: #9f1239; background-color: #ffe4e6; padding: 3px 8px; border-radius: 5px;">' +
+            '<div style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: ' + headerColor + '; background-color: ' + (isSafetyStock ? '#fae8ff' : '#ffe4e6') + '; padding: 3px 8px; border-radius: 5px;">' +
                 '<span>Part: <b>' + escapeHtml(pCode) + '</b> (' + escapeHtml(pName) + ')</span>' +
                 '<span>Inspector: <b>' + escapeHtml(inspector) + '</b></span>' +
             '</div>';
@@ -3760,10 +3772,11 @@ function showLiveScanAlert(type, title, message, extraData) {
                 historyTagHtml = '<span style="background-color: #f0fdf4; color: #15803d; border: 1.5px solid #86efac; font-size: 9.5px; font-weight: 800; padding: 2px 7px; border-radius: 5px; display: inline-flex; align-items: center; gap: 3px;">🔄 Box Refill ' + (rep.original_barcode_qty || 200) + ' pcs</span>';
                 
                 replenishBannerHtml = 
-                    '<div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 7px; padding: 6px 9px; margin-top: 6px; display: flex; align-items: flex-start; gap: 6px;">' +
-                        '<span style="font-size: 13px; line-height: 1;">ℹ️</span>' +
-                        '<div style="font-size: 10px; color: #1e40af; line-height: 1.35;">' +
-                            '<b>INFO REFILL GUDANG:</b> Box ini sebelumnya pernah diambil <b>' + (rep.previously_taken_qty || 0) + ' pcs</b> pada Kanban sebelumnya (' + (rep.parent_kanban_no || 'Sesi #' + rep.parent_session_id) + ') dan telah <b>digenapi kembali menjadi ' + (rep.original_barcode_qty || 200) + ' pcs</b> oleh Gudang.' +
+                    '<div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 8px 11px; margin-top: 6px; display: flex; align-items: flex-start; gap: 7px;">' +
+                        '<span style="font-size: 15px; line-height: 1.2;">ℹ️</span>' +
+                        '<div style="font-size: 11.5px; color: #1e40af; line-height: 1.4; font-weight: 500;">' +
+                            '<b>INFO:</b> Box ini sebelumnya pernah diambil <b>' + (rep.previously_taken_qty || 0) + ' pcs</b> pada Kanban sebelumnya (' + (rep.parent_kanban_no || 'Sesi #' + rep.parent_session_id) + ') dan telah <b>digenapi kembali menjadi ' + (rep.original_barcode_qty || 200) + ' pcs</b>. ' +
+                            '<br><br><b>PERHATIAN:</b> Tolong selalu cek jumlah stok pada box ini sebelum melakukan pengecekan.' +
                         '</div>' +
                     '</div>';
             } else if (extraData.is_safety_stock) {
@@ -4442,11 +4455,14 @@ function renderScannedLabelsTable() {
                                   (lbl.reinspection_notes && (lbl.reinspection_notes.toUpperCase().indexOf('RE-INSPEKSI') !== -1 || lbl.reinspection_notes.toUpperCase().indexOf('REINSPEKSI') !== -1));
             
             var historyBadgeHtml = '';
-            if (lbl.is_replenished_box) {
+            if (lbl.is_safety_stock_alloc) {
+                var ssTitle = (lbl.is_replenished_box && lbl.replenish_info) 
+                    ? ('Safety Stock (Refill Gudang ' + (lbl.replenish_info.previously_taken_qty || 100) + ' pcs)') 
+                    : 'Alokasi dari Gudang Safety Stock';
+                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;" title="' + ssTitle + '">📦 Asal: Safety Stock</span>';
+            } else if (lbl.is_replenished_box) {
                 var prevTaken = (lbl.replenish_info && lbl.replenish_info.previously_taken_qty) ? lbl.replenish_info.previously_taken_qty : '100';
                 historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #15803d; background-color: #f0fdf4; border: 1px solid #86efac; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;" title="Box ini sebelumnya pernah diambil ' + prevTaken + ' pcs dan telah digenapi kembali oleh Gudang">🔄 Refill (Eks-Potong ' + prevTaken + ' pcs)</span>';
-            } else if (lbl.is_safety_stock_alloc) {
-                historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #6d28d9; background-color: #f5f3ff; border: 1px solid #ddd6fe; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">📦 Asal: Safety Stock</span>';
             } else if (isLabelReinspect) {
                 historyBadgeHtml = '<span style="font-size: 9.5px; font-weight: 800; color: #92400e; background-color: #fffbeb; border: 1px solid #fde68a; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">⚠️ Riwayat: Eks-NG</span>';
             } else {
@@ -5372,7 +5388,7 @@ function renderModalBatchPills(todayBatches, pendingYesterdayCount) {
         var pyHover = isPyActive ? '' : 'hover:bg-amber-200 hover:border-amber-600 active:scale-95';
 
         html += '<button type="button" onclick="setModalBatchScope(\'pending_yesterday\', \'all\')" class="' + pyHover + '" style="' + pyClass + ' padding:5px 13px; border-radius:8px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:6px; flex-shrink:0; transition:all 0.15s ease;" title="Kanban dari hari-hari sebelumnya yang belum selesai diinspeksi atau rejected">' +
-                    '<span style="width:7px; height:7px; border-radius:50%; background:' + (isPyActive ? '#ffffff' : '#f59e0b') + ';" class="animate-pulse"></span>' +
+                    '<span style="width:7px; height:7px; border-radius:50%; background:' + (isPyActive ? '#ffffff' : '#f59e0b') + ';"></span>' +
                     '<span>Tunggakan Kemarin</span>' +
                     '<span style="' + (isPyActive ? 'background:rgba(255,255,255,0.25); color:#ffffff;' : 'background:#fde68a; color:#78350f;') + ' padding:1.5px 7px; border-radius:5px; font-size:10px; font-weight:900;">' + pendingYesterdayCount + ' Belum Selesai</span>' +
                 '</button>';
@@ -5439,7 +5455,7 @@ function renderPlanningTableRows(items) {
         var etaBadgeHtml = '';
         if (isOverdue) {
             etaBadgeHtml = '<div class="mt-1 flex items-center gap-1 flex-wrap">' +
-                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 inline-flex items-center gap-1 leading-tight"><span class="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span> OVERDUE</span>' +
+                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 inline-flex items-center gap-1 leading-tight"><span class="w-1.5 h-1.5 rounded-full bg-rose-600"></span> OVERDUE</span>' +
                 '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-bold bg-rose-50 text-rose-700 border border-rose-200 leading-tight">Lewat Jadwal</span>' +
             '</div>';
         } else if (k.eta) {
@@ -5499,7 +5515,7 @@ function renderPlanningTableRows(items) {
             rowStyle = 'background-color: #fef3c7; border-left: 4.5px solid #d97706;';
             var progressText = k.active_session_id ? 'Sedang Dikerjakan' : 'Parsial (' + progressPct + '%)';
             statusBadge = '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px;">' +
-                          '<span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #ffffff;" class="animate-pulse"></span>' +
+                          '<span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #ffffff;"></span>' +
                           progressText +
                           '</span>';
             if (k.active_inspector_name) {
@@ -8307,10 +8323,6 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                 dispNotes = dInfo.notes;
                 dispBy = dInfo.closed_by || 'Admin / Supervisor';
                 dispAt = dInfo.closed_at || '-';
-            } else if (lot.rejected_info && lot.rejected_info.chief_notes) {
-                dispNotes = lot.rejected_info.chief_notes;
-                dispBy = lot.rejected_info.chief_name || 'Chief QC';
-                dispAt = lot.rejected_info.chief_approved_at || '-';
             }
 
             if (dispNotes) {

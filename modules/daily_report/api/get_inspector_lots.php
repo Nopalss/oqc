@@ -129,21 +129,54 @@ try {
     }
 
     if (!empty($search)) {
-        $where[] = "(
-            isl.lot_number LIKE :s1 
-            OR isl.ref_number LIKE :s2 
-            OR did.part_code LIKE :s3 
-            OR did.part_name LIKE :s4 
-            OR ki.item_code LIKE :s5 
-            OR ki.item_description LIKE :s6 
-            OR ki.kanban_no LIKE :s7 
-            OR mp.part_code LIKE :s8 
-            OR mp.part_name LIKE :s9
-        )";
-        $like = '%' . $search . '%';
-        $params[':s1'] = $like; $params[':s2'] = $like; $params[':s3'] = $like;
-        $params[':s4'] = $like; $params[':s5'] = $like; $params[':s6'] = $like;
-        $params[':s7'] = $like; $params[':s8'] = $like; $params[':s9'] = $like;
+        // Deteksi & Parsing Barcode QR Label Scanner (Format: Z1partCode|Z2lotNumber|Z3qty|Z4line|Z5refNumber)
+        $qrPart = '';
+        $qrLot  = '';
+        $qrRef  = '';
+        if (strpos($search, '|') !== false || str_starts_with($search, 'Z1') || str_starts_with($search, 'Z2') || str_starts_with($search, 'Z5')) {
+            $parts = explode('|', $search);
+            foreach ($parts as $p) {
+                $p = trim($p);
+                if (str_starts_with($p, 'Z1')) $qrPart = substr($p, 2);
+                if (str_starts_with($p, 'Z2')) $qrLot  = substr($p, 2);
+                if (str_starts_with($p, 'Z5')) $qrRef  = substr($p, 2);
+            }
+        }
+
+        if (!empty($qrRef) || !empty($qrLot) || !empty($qrPart)) {
+            $qrConds = [];
+            if (!empty($qrRef)) {
+                $qrConds[] = "isl.ref_number LIKE :qr_ref";
+                $params[':qr_ref'] = '%' . $qrRef . '%';
+            }
+            if (!empty($qrLot)) {
+                $qrConds[] = "isl.lot_number LIKE :qr_lot";
+                $params[':qr_lot'] = '%' . $qrLot . '%';
+            }
+            if (!empty($qrPart)) {
+                $qrConds[] = "(did.part_code LIKE :qr_part OR ki.item_code LIKE :qr_part_ki OR mp.part_code LIKE :qr_part_mp)";
+                $params[':qr_part'] = '%' . $qrPart . '%';
+                $params[':qr_part_ki'] = '%' . $qrPart . '%';
+                $params[':qr_part_mp'] = '%' . $qrPart . '%';
+            }
+            $where[] = "(" . implode(' AND ', $qrConds) . ")";
+        } else {
+            $where[] = "(
+                isl.lot_number LIKE :s1 
+                OR isl.ref_number LIKE :s2 
+                OR did.part_code LIKE :s3 
+                OR did.part_name LIKE :s4 
+                OR ki.item_code LIKE :s5 
+                OR ki.item_description LIKE :s6 
+                OR ki.kanban_no LIKE :s7 
+                OR mp.part_code LIKE :s8 
+                OR mp.part_name LIKE :s9
+            )";
+            $like = '%' . $search . '%';
+            $params[':s1'] = $like; $params[':s2'] = $like; $params[':s3'] = $like;
+            $params[':s4'] = $like; $params[':s5'] = $like; $params[':s6'] = $like;
+            $params[':s7'] = $like; $params[':s8'] = $like; $params[':s9'] = $like;
+        }
     }
 
     $whereStr = implode(' AND ', $where);

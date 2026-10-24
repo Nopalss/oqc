@@ -463,7 +463,41 @@ if ($pdo) {
                         s_kanban.sample_size,
                         s_kanban.ng_count,
                         s_ss.id AS ss_session_id,
-                        s_ss.total_scanned_qty AS used_qty,
+                        -- Qty terpakai = qty fisik label lot kanban - kelebihan (excess) kanban,
+                        -- dibatasi maksimal saldo sesi SS tersebut.
+                        LEAST(
+                            s_ss.total_scanned_qty,
+                            GREATEST(0, COALESCE(isl_k.qty, s_kanban.total_scanned_qty) - COALESCE(s_kanban.excess_qty, 0))
+                        ) AS used_qty,
+                        COALESCE(
+                            (
+                                SELECT isl_k2.qty 
+                                FROM inspection_session_lots isl_k2
+                                WHERE isl_k2.inspection_session_id = s_kanban.id
+                                  AND isl_k2.ref_number = isl_ss.ref_number
+                                  AND isl_k2.ref_number IS NOT NULL
+                                  AND isl_k2.ref_number != ''
+                                  AND (isl_k2.lot_status IS NULL OR isl_k2.lot_status != 'replaced')
+                                ORDER BY isl_k2.id ASC
+                                LIMIT 1
+                            ),
+                            -- Priority 2: Fallback via remarks (path use_safety_stock_qty)
+                            (
+                                SELECT isl_k3.qty
+                                FROM inspection_session_lots isl_k3
+                                WHERE isl_k3.inspection_session_id = s_kanban.id
+                                  AND isl_k3.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
+                                  AND (isl_k3.lot_status IS NULL OR isl_k3.lot_status != 'replaced')
+                                ORDER BY isl_k3.id ASC
+                                LIMIT 1
+                            ),
+                            -- Priority 3: Fallback ke kalkulasi lama (untuk data historis)
+                            CASE 
+                                WHEN s_kanban.excess_qty > 0 AND s_ss.total_scanned_qty >= (s_kanban.total_scanned_qty - s_kanban.excess_qty)
+                                THEN GREATEST(0, s_kanban.total_scanned_qty - s_kanban.excess_qty)
+                                ELSE s_ss.total_scanned_qty
+                            END
+                        ) AS label_qty_legacy,
                         COALESCE(isl_k.ref_number, isl_ss.ref_number, '-') AS ref_number,
                         COALESCE(isl_k.lot_number, isl_ss.lot_number, '-') AS lot_number,
                         ki.kanban_no,

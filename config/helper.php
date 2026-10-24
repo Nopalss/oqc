@@ -526,12 +526,12 @@ function syncKanbanStatus($pdo, $kanbanItemId) {
                 
                 $sessPassed = 0;
                 if ((int)$s['lot_count'] > 0) {
-                    $sessPassed = max(0, (int)$s['lot_passed_qty'] - (int)($s['excess_qty'] ?? 0));
+                    $sessPassed = (int)$s['lot_passed_qty'];
                     if ((int)$s['lot_rejected_count'] > 0 || $s['status'] === 'rejected') {
                         $hasRejected = true;
                     }
                 } elseif ($s['status'] === 'passed') {
-                    $sessPassed = max(0, (int)$s['total_scanned_qty'] - (int)($s['excess_qty'] ?? 0));
+                    $sessPassed = (int)$s['total_scanned_qty'];
                 } elseif ($s['status'] === 'rejected') {
                     $hasRejected = true;
                 }

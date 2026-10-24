@@ -462,10 +462,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         }
 
                         if ($matchedSsLot) {
-                            $ssMaxQty = (int)$matchedSsLot['available_qty'];
-                            if ($lQty > $ssMaxQty) {
-                                $lQty = $ssMaxQty; // Sesuaikan dengan sisa kuota Safety Stock
-                            }
+                            // PENTING: $lQty (qty lot di sesi Kanban) HARUS TETAP UTUH sesuai fisik label box.
+                            // Jangan dipotong ke sisa saldo SS — qty fisik label tidak berubah hanya karena
+                            // label pernah dipakai di Kanban sebelumnya dan saldo SS-nya berkurang.
+                            // Deduksi saldo SS dilakukan di bawah menggunakan $takeFromSS.
                             if (empty($lRem)) {
                                 $lRem = "Alokasi Safety Stock Fisik (Sesi #{$matchedSsLot['session_id']})";
                             }
@@ -503,19 +503,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 ':rem'      => $lRem ?: null
                             ]);
 
-                            // Jika berasal dari Safety Stock, kurangi atau tandai terpakai pada sesi Safety Stock asal
+                            // Jika berasal dari Safety Stock, kurangi atau tandai terpakai pada sesi Safety Stock asal.
+                            // $takeFromSS = qty yang benar-benar diambil dari saldo SS (bisa < $lQty jika saldo SS < qty fisik label).
+                            // $lQty (qty lot kanban) tetap utuh = qty fisik label asli.
                             if ($matchedSsLot) {
-                                $matchedSsLotId = (int)$matchedSsLot['lot_id'];
+                                $matchedSsLotId  = (int)$matchedSsLot['lot_id'];
                                 $matchedSsSessId = (int)$matchedSsLot['session_id'];
-                                $ssAvail = (int)$matchedSsLot['available_qty'];
+                                $ssAvail         = (int)$matchedSsLot['available_qty'];
 
-                                if ($lQty >= $ssAvail) {
-                                    // Habis terpakai seluruhnya
+                                // Qty yang dikurangi dari saldo SS = min(qty fisik label, saldo SS)
+                                $takeFromSS = min($lQty, $ssAvail);
+
+                                if ($takeFromSS >= $ssAvail) {
+                                    // Saldo SS habis terpakai seluruhnya → tandai fulfilled
                                     $stmtUpdSSFull = $pdo->prepare("UPDATE inspection_sessions SET auto_fulfilled_by_session_id = :ksid WHERE id = :ssid");
                                     $stmtUpdSSFull->execute([':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
                                 } else {
-                                    // Terpakai sebagian -> kurangi qty di lot SS asal
-                                    $newLeftoverQty = $ssAvail - $lQty;
+                                    // Saldo SS terpakai sebagian → kurangi saldo SS yang tersisa
+                                    $newLeftoverQty = $ssAvail - $takeFromSS;
                                     $stmtUpdSSPartLot = $pdo->prepare("UPDATE inspection_session_lots SET qty = :nqty WHERE id = :lid");
                                     $stmtUpdSSPartLot->execute([':nqty' => $newLeftoverQty, ':lid' => $matchedSsLotId]);
 

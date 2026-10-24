@@ -1566,6 +1566,23 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                     </svg>
                                                     <span><?= $rLot['is_abolished'] ? 'Edit Abolish' : 'Edit Action' ?></span>
                                                 </button>
+
+                                                <?php if (!empty($rLot['closure_info'])): 
+                                                    $cancelLotId   = (int)($rLot['closure_info']['session_lot_id'] ?? $rLot['lot_id']);
+                                                    $cancelType    = strtolower($rLot['closure_info']['closure_type'] ?? ($rLot['is_abolished'] ? 'abolish' : 'action'));
+                                                    $cancelLabel   = ($cancelType === 'abolish') ? 'Batal Abolish' : 'Batal Action';
+                                                ?>
+                                                    <!-- Tombol Batal Abolish / Batal Action -->
+                                                    <button type="button" 
+                                                            onclick="cancelClosure(<?= $cancelLotId ?>, '<?= $cancelType ?>', '<?= htmlspecialchars(addslashes($rLot['lot_number'] ?: '-')) ?>')"
+                                                            style="background-color: #f59e0b; color: #ffffff; padding: 6px 9px; border-radius: 8px; font-weight: 800; font-size: 11px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(245,158,11,0.25);"
+                                                            title="Batalkan penutupan <?= $cancelType === 'abolish' ? 'Abolish' : 'Action' ?> dan kembalikan lot ke karantina">
+                                                        <svg style="width: 12px; height: 12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a4 4 0 010 8H8m-5-8l4-4m-4 4l4 4" />
+                                                        </svg>
+                                                        <span><?= $cancelLabel ?></span>
+                                                    </button>
+                                                <?php endif; ?>
                                             <?php endif; ?>
 
                                             <a href="<?= base_url('modules/inspection/print_rejection.php?id=' . ($rLot['rejected_session_id'] ?? $rLot['inspection_session_id']) . '&session_lot_id=' . ($rLot['rejected_lot_id'] ?? $rLot['lot_id'])) ?>" 
@@ -1787,6 +1804,85 @@ function openActionModal(lotId, lotNumber, partInfo, closureType, existingNotes)
                 });
             });
         }
+    });
+}
+
+/**
+ * Konfirmasi & proses pembatalan penutupan karantina (Abolish / Action)
+ */
+function cancelClosure(lotId, closureType, lotNumber) {
+    const isAbolish = (closureType === 'abolish');
+    const label = isAbolish ? 'Abolish' : 'Action';
+
+    Swal.fire({
+        title: `Batalkan ${label}?`,
+        html: `
+            <div class="text-left text-xs space-y-2 pt-1">
+                <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                    <div class="flex justify-between">
+                        <span class="text-slate-500 font-bold">Lot Number:</span>
+                        <span class="font-mono font-extrabold text-slate-800">${lotNumber}</span>
+                    </div>
+                </div>
+                <div class="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800 font-medium">
+                    Status <b>${label}</b> akan dihapus dan lot dikembalikan ke karantina (OPEN) sehingga dapat ditangani ulang.
+                </div>
+            </div>
+        `,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: `Ya, Batalkan ${label}`,
+        cancelButtonText: 'Kembali',
+        confirmButtonColor: '#d97706',
+        cancelButtonColor: '#64748b',
+        focusCancel: true
+    }).then((result) => {
+        if (!result.isConfirmed) return;
+
+        Swal.fire({
+            title: 'Memproses...',
+            text: 'Membatalkan penutupan karantina',
+            allowOutsideClick: false,
+            didOpen: () => {
+                Swal.showLoading();
+            }
+        });
+
+        const formData = new FormData();
+        formData.append('lot_id', lotId);
+        formData.append('closure_type', closureType);
+
+        fetch('<?= base_url('modules/ng_quarantine/cancel_action.php') ?>', {
+            method: 'POST',
+            body: formData
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                Swal.fire({
+                    icon: 'success',
+                    title: 'Berhasil Dibatalkan',
+                    text: data.message,
+                    timer: 1800,
+                    showConfirmButton: false
+                }).then(() => {
+                    window.location.reload();
+                });
+            } else {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Gagal Membatalkan',
+                    text: data.message || 'Terjadi kesalahan pada sistem.'
+                });
+            }
+        })
+        .catch(err => {
+            Swal.fire({
+                icon: 'error',
+                title: 'Kesalahan Jaringan',
+                text: 'Tidak dapat menghubungi server: ' + err.message
+            });
+        });
     });
 }
 

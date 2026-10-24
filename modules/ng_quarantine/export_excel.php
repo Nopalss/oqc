@@ -554,7 +554,7 @@ foreach ($processedNgLots as $lot) {
     $timeOnly    = date('H:i', $startTimeTs) . ' WIB';
     $shift       = getShiftName($lot['session_started_at']);
 
-    $notes = !empty($lot['closure_info']['notes']) ? $lot['closure_info']['notes'] : (!empty($lot['action_notes']) ? $lot['action_notes'] : '-');
+    $notes = !empty($lot['closure_info']['notes']) ? $lot['closure_info']['notes'] : '-';
 
     $agingText = !$lot['is_closed'] ? "Hari ke-" . $lot['aging_days'] : "Selesai";
     $agingKat  = "";

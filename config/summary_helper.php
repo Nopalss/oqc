@@ -23,12 +23,16 @@ if (!function_exists('syncDailySummaryForDate')) {
         $lockKey = "oqc_sync_summary_{$targetDate}";
         $lockAcquired = false;
         try {
-            $stmtLock = $pdo->prepare("SELECT GET_LOCK(:key, 10)");
+            $stmtLock = $pdo->prepare("SELECT GET_LOCK(:key, 3)");
             $stmtLock->execute([':key' => $lockKey]);
             $lockAcquired = ($stmtLock->fetchColumn() == 1);
         } catch (Exception $eLock) {
             // Non-critical if GET_LOCK fails, proceed with execution
         }
+
+        // Boundary tanggal untuk memaksa penggunaan B-Tree index (idx_sess_status_started)
+        $sdMin = date('Y-m-d 00:00:00', strtotime($targetDate . ' -1 day'));
+        $sdMax = date('Y-m-d 23:59:59', strtotime($targetDate . ' +1 day'));
 
         $maxRetries = 3;
         $attempt = 0;
@@ -51,6 +55,7 @@ if (!function_exists('syncDailySummaryForDate')) {
                 $stmtDel2->execute([':dt' => $targetDate]);
 
                 // 2. Fetch all finished inspection sessions for this operational date
+                // Memakai pre-filter index range (sd_min & sd_max) agar tidak full table scan
                 $sqlSess = "SELECT ss.id, ss.started_at, ss.closed_at, ss.inspection_type, ss.sample_size, ss.total_scanned_qty, ss.use_safety_stock_qty, ss.auto_fulfilled_by_session_id, ss.batch_sample_size, ss.status,
                                    ss.ng_count, ss.part_id, mp.model_id, mp.aql_level,
                                    COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name
@@ -58,6 +63,7 @@ if (!function_exists('syncDailySummaryForDate')) {
                             LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
                             LEFT JOIN master_parts mp ON ss.part_id = mp.id
                             WHERE ss.status IN ('passed', 'rejected')
+                              AND ss.started_at >= :sd_min AND ss.started_at <= :sd_max
                               AND NOT (ki.remark LIKE '%AUTO-SS-SESS-%' OR ki.remark LIKE '%Auto Safety Stock Sisa Excess%' OR ki.remark LIKE '%Sisa Excess Kanban%')
                               AND (ki.remark IS NULL OR ki.remark NOT LIKE '%Split%')
                               AND (
@@ -68,7 +74,11 @@ if (!function_exists('syncDailySummaryForDate')) {
                                   END = :sd
                               )";
                 $stmtSess = $pdo->prepare($sqlSess);
-                $stmtSess->execute([':sd' => $targetDate]);
+                $stmtSess->execute([
+                    ':sd_min' => $sdMin,
+                    ':sd_max' => $sdMax,
+                    ':sd'     => $targetDate
+                ]);
                 $sessions = $stmtSess->fetchAll(PDO::FETCH_ASSOC);
 
                 if (empty($sessions)) {

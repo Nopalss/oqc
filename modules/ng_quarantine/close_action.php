@@ -106,14 +106,11 @@ try {
     $stmtUpdateLot = $pdo->prepare("
         UPDATE inspection_session_lots
         SET lot_status = :new_status,
-            closed_at = NOW(),
-            chief_notes = CONCAT(COALESCE(chief_notes, ''), '\n[', UPPER(:ctype), ']: ', :notes)
+            closed_at = NOW()
         WHERE id = :lot_id
     ");
     $stmtUpdateLot->execute([
         ':new_status' => $newStatus,
-        ':ctype'      => $closureType,
-        ':notes'      => $notes,
         ':lot_id'     => $lotId
     ]);
 

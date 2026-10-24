@@ -724,6 +724,13 @@ try {
     $stmtSess->execute([':sd' => $startDate, ':ed_next' => $edNext]);
     $rSess = $stmtSess->fetch(PDO::FETCH_ASSOC);
 
+    // Get target PPM setting
+    $targetPpm = 0;
+    try {
+        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
+        $targetPpm = (float)($stmtTgt->fetchColumn() ?: 0);
+    } catch (Exception $e) {}
+
     $rawToken = implode('|', [
         $rSum['max_sum_id'] ?? 0,
         $rSum['last_sum_update'] ?? '',
@@ -732,16 +739,10 @@ try {
         $rSess['sess_count'] ?? 0,
         $startDate,
         $endDate,
-        $selectedCustomer
+        $selectedCustomer,
+        $targetPpm
     ]);
     $currentVersion = md5($rawToken);
-
-    // Get target PPM setting
-    $targetPpm = 0;
-    try {
-        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
-        $targetPpm = (float)($stmtTgt->fetchColumn() ?: 0);
-    } catch (Exception $e) {}
 
     // Return complete payload
     echo json_encode([

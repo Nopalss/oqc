@@ -22,6 +22,9 @@ if (empty($user['id'])) {
     exit;
 }
 
+// Release PHP session lock immediately so parallel AJAX / polling requests are not blocked
+session_write_close();
+
 $pdo = getDB();
 if (!$pdo) {
     echo json_encode(['success' => false, 'message' => 'Gagal koneksi database']);

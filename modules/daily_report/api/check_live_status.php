@@ -20,6 +20,9 @@ if (!is_logged_in()) {
     exit;
 }
 
+// Release session lock immediately so parallel requests/tabs are not blocked
+session_write_close();
+
 $rawIds = $_GET['ids'] ?? '';
 if (empty($rawIds)) {
     echo json_encode(['success' => true, 'sessions' => []]);

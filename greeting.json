@@ -1,0 +1,239 @@
+{
+  "info": {
+    "id": "ses_e9a17f603ffeF7u4g9dX73YUN7",
+    "projectID": "aa3e2151d6fdd2cf9e07be809ee756ffc0da29e7",
+    "agent": "build",
+    "model": {
+      "id": "deepseek-v4.1-flash-free",
+      "providerID": "opencode",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 2345,
+      "output": 66,
+      "reasoning": 98,
+      "cache": {
+        "read": 6584,
+        "write": 0
+      }
+    },
+    "outcome": "succeeded",
+    "time": {
+      "created": 1792711068165,
+      "updated": 1792721586729,
+      "idle": 1792721586736,
+      "viewed": 1792721586736
+    },
+    "title": "Greeting",
+    "permissions": [
+      {
+        "action": "browser",
+        "resource": "*",
+        "effect": "allow"
+      }
+    ],
+    "location": {
+      "directory": "C:\\Users\\user\\Documents\\Default Project"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_165e809fb001F3kCMuatqSLZ3u",
+      "metadata": {
+        "displayText": "halo bro",
+        "comments": [],
+        "attachments": [],
+        "agent": "build",
+        "model": {
+          "modelID": "qwen2.5-coder:7b",
+          "providerID": "ollama"
+        }
+      },
+      "time": {
+        "created": 1792711068410
+      },
+      "text": "halo bro",
+      "files": [],
+      "agents": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_165e80b0d001CjO39GQhlkGY0n",
+      "time": {
+        "created": 1792711068453,
+        "streamed": 1792711248970,
+        "completed": 1792711248974
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen2.5-coder:7b",
+        "providerID": "ollama",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"name\": \"skill\", \"arguments\": {\"id\": \"general\"}}"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 2046,
+        "output": 16,
+        "reasoning": 0,
+        "cache": {
+          "read": 4,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_165eacc57001XOVgajN3aZQZhy",
+      "time": {
+        "created": 1792711248983
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_166884fa0001mzE57RCsq5JWQ6",
+      "metadata": {
+        "displayText": "HAI BRO",
+        "comments": [],
+        "attachments": [],
+        "agent": "build",
+        "model": {
+          "modelID": "qwen2.5-coder:7b",
+          "providerID": "ollama"
+        }
+      },
+      "time": {
+        "created": 1792721571818
+      },
+      "text": "HAI BRO",
+      "files": [],
+      "agents": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_166884ff20012VResgV6VPjkZE",
+      "time": {
+        "created": 1792721571841,
+        "completed": 1792721581502
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen2.5-coder:7b",
+        "providerID": "ollama",
+        "variant": "default"
+      },
+      "content": [],
+      "finish": "error",
+      "error": {
+        "type": "aborted",
+        "message": "Step interrupted"
+      }
+    },
+    {
+      "id": "msg_1668875c2001IZipZO48tAeXhj",
+      "time": {
+        "created": 1792721581506
+      },
+      "type": "idle",
+      "outcome": "interrupted"
+    },
+    {
+      "id": "msg_166887c660012J0zBiUFwv1Hb8",
+      "time": {
+        "created": 1792721583206
+      },
+      "type": "model-switched",
+      "model": {
+        "id": "deepseek-v4.1-flash-free",
+        "providerID": "opencode"
+      },
+      "previous": {
+        "id": "qwen2.5-coder:7b",
+        "providerID": "ollama",
+        "variant": "default"
+      }
+    },
+    {
+      "id": "msg_166887c3e001uvH5cADzJdWHAz",
+      "metadata": {
+        "displayText": "HALO",
+        "comments": [],
+        "attachments": [],
+        "agent": "build",
+        "model": {
+          "modelID": "deepseek-v4.1-flash-free",
+          "providerID": "opencode"
+        }
+      },
+      "time": {
+        "created": 1792721583252
+      },
+      "text": "HALO",
+      "files": [],
+      "agents": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_166887c9b001ZGetVUN0EAM7Xx",
+      "time": {
+        "created": 1792721583284,
+        "streamed": 1792721586726,
+        "completed": 1792721586729
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "deepseek-v4.1-flash-free",
+        "providerID": "opencode",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The user is just greeting me casually in Indonesian. I should respond in a friendly, natural way. No need for tools.\n\n\"halo bro\" then \"HAI BRO HALO\" — just respond casually.\n\nMaybe ask what they want to do. Keep it short.\n\nThe previous turn seems to have had a weird artifact where I emitted a skill call for \"general\" which doesn't exist. I should ignore that and just respond.\n\nLet me respond in Indonesian, friendly, brief.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1792721585787,
+            "completed": 1792721586719
+          }
+        },
+        {
+          "type": "text",
+          "text": "Halo bro! 👋 Ada yang bisa gue bantu hari ini?\n\nMau ngoding, benerin bug, bikin project baru, atau sekadar ngobrol dulu? Kasih tau aja."
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 283,
+        "output": 47,
+        "reasoning": 98,
+        "cache": {
+          "read": 6144,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_166888a30001kaG25ltczjbG7n",
+      "time": {
+        "created": 1792721586736
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

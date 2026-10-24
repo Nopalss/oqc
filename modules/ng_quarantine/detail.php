@@ -22,30 +22,35 @@ if (!$lotId) {
 }
 
 // -----------------------------------------------------------------------------
-// POST Handler: Update Supervisor Action / Disposition Notes
+// POST Handler: Update Catatan Penanganan (lot_quarantine_closures.notes)
 // -----------------------------------------------------------------------------
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST' && isset($_POST['action_type']) && $_POST['action_type'] === 'update_disposition') {
-    $actionNotes = trim(sanitize($_POST['action_notes'] ?? ''));
-    $userId      = $_SESSION['user_id'] ?? null;
+    $actionNotes = trim($_POST['action_notes'] ?? '');
+    $closureId   = (int)($_POST['closure_id'] ?? 0);
 
-    if (!empty($actionNotes)) {
+    if ($closureId <= 0) {
+        set_flash('error', 'Catatan penanganan tidak ditemukan. Pastikan lot sudah memiliki keputusan Action/Abolish.');
+    } elseif ($actionNotes === '') {
+        set_flash('error', 'Catatan penanganan wajib diisi.');
+    } else {
         try {
             $stmtUpd = $pdo->prepare("
-                UPDATE inspection_session_lots 
-                SET chief_notes = :notes,
-                    chief_approved_at = NOW(),
-                    chief_approved_by = :user_id
+                UPDATE lot_quarantine_closures
+                SET notes = :notes
                 WHERE id = :id
             ");
             $stmtUpd->execute([
-                ':notes'   => $actionNotes,
-                ':user_id' => $userId,
-                ':id'      => $lotId
+                ':notes' => $actionNotes,
+                ':id'    => $closureId
             ]);
 
-            set_flash('success', 'Catatan disposisi penanganan berhasil diperbarui.');
+            if ($stmtUpd->rowCount() > 0) {
+                set_flash('success', 'Catatan penanganan berhasil diperbarui.');
+            } else {
+                set_flash('error', 'Catatan penanganan tidak ditemukan atau tidak berubah.');
+            }
         } catch (PDOException $e) {
-            set_flash('error', 'Gagal memperbarui catatan: ' . $e->getMessage());
+            set_flash('error', 'Gagal memperbarui catatan penanganan: ' . $e->getMessage());
         }
     }
     redirect("modules/ng_quarantine/detail.php?id={$lotId}");
@@ -400,9 +405,9 @@ if ($latestResult === 'passed') {
     $displayLotStatus      = 'Lulus Re-Inspeksi';
     $displayLotStatusClass = 'bg-emerald-100 text-emerald-800 border-emerald-200';
 } elseif ($quarantineClosure) {
-    $displayLotStatus      = 'Disposisi Selesai (Divisi)';
+    $displayLotStatus      = 'Penanganan Selesai (Divisi)';
     $displayLotStatusClass = 'bg-sky-100 text-sky-800 border-sky-300';
-    $handlingLabel         = 'Disposisi Selesai (Divisi)';
+    $handlingLabel         = 'Penanganan Selesai (Divisi)';
     $handlingBadgeClass    = 'bg-sky-100 text-sky-800 border-sky-300';
 } elseif ($latestResult === 'rejected' && $totalRoundsCount > 1) {
     $displayLotStatus      = 'Re-Inspeksi (Masih NG)';
@@ -414,6 +419,100 @@ if ($latestResult === 'passed') {
     $displayLotStatus      = ucwords(str_replace('_', ' ', $lotData['lot_status']));
     $displayLotStatusClass = 'bg-slate-100 text-slate-800 border-slate-200';
 }
+
+// -----------------------------------------------------------------------------
+// Data ringkas untuk tampilan ramah pengguna (istilah sederhana)
+// -----------------------------------------------------------------------------
+$closureIsAbolish = $quarantineClosure ? (($quarantineClosure['closure_type'] ?? 'action') === 'abolish') : false;
+$isClosed         = (bool)$quarantineClosure;
+$isPassed         = ($latestResult === 'passed');
+$totalInspections = count($allRoundsLots);
+$lastRound        = $totalInspections > 0 ? $allRoundsLots[$totalInspections - 1] : null;
+
+// Ringkas produk tidak sesuai per jenis
+$defectSummary = [];
+foreach ($defectsList as $df) {
+    if (!empty($df['is_cancelled'])) {
+        continue;
+    }
+    $name = trim($df['defect_name'] ?? '');
+    if ($name === '') {
+        $name = 'Tanpa Nama';
+    }
+    $key = strtolower($name);
+    if (!isset($defectSummary[$key])) {
+        $defectSummary[$key] = [
+            'name' => $name,
+            'code' => $df['defect_code'] ?? '',
+            'qty'  => 0,
+        ];
+    }
+    $defectSummary[$key]['qty'] += (int)($df['qty_ng'] ?? 0);
+}
+uasort($defectSummary, function ($a, $b) {
+    return $b['qty'] <=> $a['qty'];
+});
+
+// Status dalam bahasa sederhana
+if ($isClosed) {
+    if ($closureIsAbolish) {
+        $statusHeadline = 'SUDAH DIBUANG (ABOLISH)';
+        $statusSubline  = 'Lot ini sudah dibuang dan tidak dapat dipakai lagi.';
+        $statusTone     = '#be123c';
+        $statusBg       = '#fff1f2';
+        $statusBorder   = '#fecdd3';
+        $statusIcon     = 'trash';
+    } else {
+        $statusHeadline = 'SUDAH DITANGANI (ACTION)';
+        $statusSubline  = 'Lot ini sudah ditangani oleh divisi terkait.';
+        $statusTone     = '#0369a1';
+        $statusBg       = '#f0f9ff';
+        $statusBorder   = '#bae6fd';
+        $statusIcon     = 'check';
+    }
+} elseif ($isPassed) {
+    $statusHeadline = 'SELESAI - LULUS PEMERIKSAAN ULANG';
+    $statusSubline  = 'Lot ini sudah lulus dan tidak termasuk karantina.';
+    $statusTone     = '#047857';
+    $statusBg       = '#ecfdf5';
+    $statusBorder   = '#a7f3d0';
+    $statusIcon     = 'check';
+} elseif ($latestResult === 'rejected' && $totalRoundsCount > 1) {
+    $statusHeadline = 'MASIH BERMASALAH';
+    $statusSubline  = 'Pemeriksaan ulang masih menemukan defect.';
+    $statusTone     = '#be123c';
+    $statusBg       = '#fff1f2';
+    $statusBorder   = '#fecdd3';
+    $statusIcon     = 'alert';
+} elseif ($totalRoundsCount > 1 || $latestResult === 'in_progress') {
+    $statusHeadline = 'SEDANG DIPERIKSA ULANG';
+    $statusSubline  = 'Lot ini sedang dalam proses pemeriksaan ulang.';
+    $statusTone     = '#b45309';
+    $statusBg       = '#fffbeb';
+    $statusBorder   = '#fde68a';
+    $statusIcon     = 'clock';
+} else {
+    $statusHeadline = 'MASIH DALAM KARANTINA';
+    $statusSubline  = 'Lot ini belum boleh dipakai dan menunggu keputusan penanganan.';
+    $statusTone     = '#be123c';
+    $statusBg       = '#fff1f2';
+    $statusBorder   = '#fecdd3';
+    $statusIcon     = 'alert';
+}
+
+$statusSummary = ($isClosed || $isPassed)
+    ? $statusSubline
+    : 'Ada ' . number_format($activeQtyNG) . ' defect dari ' . number_format((float)$lotData['qty_lot']) . ' produk yang diperiksa.';
+
+$primaryActionUrl   = ($isClosed || $isPassed) ? '#riwayat' : base_url('modules/ng_quarantine/index.php');
+$primaryActionLabel = ($isClosed || $isPassed) ? 'Lihat Riwayat' : 'Tindak Lanjuti Lot Ini';
+
+$closureTone   = $closureIsAbolish ? '#be123c' : '#0369a1';
+$closureBg     = $closureIsAbolish ? '#fff1f2' : '#f0f9ff';
+$closureBorder = $closureIsAbolish ? '#fecdd3' : '#bae6fd';
+$closureLabel  = $closureIsAbolish ? 'ABOLISH' : 'ACTION';
+$closureDesc   = $closureIsAbolish ? 'Dibuang / Scrap' : 'Ditangani';
+$closureNotesLabel = $closureIsAbolish ? 'Alasan Abolish' : 'Catatan Penanganan';
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
@@ -427,54 +526,276 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
     <main class="flex-1 p-4 sm:p-6 lg:p-8 space-y-6 min-w-0 w-full overflow-x-hidden">
         <div class="max-w-7xl mx-auto space-y-6">
 
-        <!-- Top Breadcrumb & Header Section -->
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-               
-                <h1 class="text-xl sm:text-2xl font-bold text-slate-900 flex items-center gap-3">
-                    Traceability Lot NG: <?= sanitize($lotData['lot_number']) ?>
-                    <span class="px-3 py-1 text-xs sm:text-sm font-semibold rounded-full border <?= $handlingBadgeClass ?>">
-                        <?= $handlingLabel ?>
-                    </span>
-                </h1>
-                <p class="text-xs sm:text-sm text-slate-500 mt-1">
-                    Ref No: <span class="font-mono font-medium text-slate-700"><?= sanitize($lotData['ref_number'] ?? '-') ?></span> 
-                    | Part: <span class="font-medium text-slate-700"><?= sanitize($lotData['part_number'] ?? '-') ?></span> - <?= sanitize($lotData['part_name'] ?? '-') ?>
-                </p>
+        <!-- Header Ringkas -->
+        <div class="card" style="padding:1.5rem;">
+            <a href="<?= base_url('modules/ng_quarantine/index.php') ?>" style="display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:#475569; text-decoration:none;">
+                <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                </svg>
+                Kembali ke Daftar Lot
+            </a>
+
+            <div style="margin-top:14px;">
+                <div style="font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#94a3b8;">Lot Bermasalah</div>
+                <h1 style="font-size:30px; line-height:1.1; font-weight:800; color:#0f172a; margin-top:4px;">Lot <?= sanitize($lotData['lot_number']) ?></h1>
+                <p style="font-size:16px; font-weight:600; color:#334155; margin-top:6px;"><?= sanitize($lotData['part_name'] ?? '-') ?></p>
+                <p style="font-size:13px; color:#64748b; margin-top:2px;">Nomor Referensi: <span style="font-family:monospace; color:#334155;"><?= sanitize($lotData['ref_number'] ?? '-') ?></span></p>
             </div>
 
-            <!-- Header Action Buttons -->
-            <div class="flex flex-wrap items-center gap-2">
-                <a href="<?= base_url('modules/ng_quarantine/index.php') ?>" 
-                   class="inline-flex items-center px-3.5 py-2 text-xs sm:text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition shadow-sm">
-                    <svg class="w-4 h-4 mr-1.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
-                    </svg>
-                    Kembali
+            <div style="margin-top:16px; display:flex; gap:12px; align-items:flex-start; background:<?= $statusBg ?>; border:1px solid <?= $statusBorder ?>; border-radius:14px; padding:14px 16px;">
+                <div style="flex-shrink:0; width:40px; height:40px; border-radius:50%; background:<?= $statusTone ?>; color:#ffffff; display:flex; align-items:center; justify-content:center;">
+                    <?php if ($statusIcon === 'trash'): ?>
+                        <svg style="width:20px; height:20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    <?php elseif ($statusIcon === 'check'): ?>
+                        <svg style="width:20px; height:20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    <?php elseif ($statusIcon === 'clock'): ?>
+                        <svg style="width:20px; height:20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    <?php else: ?>
+                        <svg style="width:20px; height:20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                    <?php endif; ?>
+                </div>
+                <div>
+                    <div style="font-size:18px; font-weight:800; color:<?= $statusTone ?>; line-height:1.2;"><?= $statusHeadline ?></div>
+                    <div style="font-size:14px; color:#475569; margin-top:3px; line-height:1.5;"><?= $statusSummary ?></div>
+                </div>
+            </div>
+
+            <div style="margin-top:16px; display:flex; gap:10px; flex-wrap:wrap;">
+                <a href="<?= $primaryActionUrl ?>" class="btn-primary" style="font-size:14px; padding:12px 20px; background-color:#0284c7;">
+                    <?= $primaryActionLabel ?>
                 </a>
 
                 <?php if (!empty($lotData['inspection_session_id'])): ?>
-                    <a href="<?= base_url('modules/inspection/print_rejection.php?id=' . $lotData['inspection_session_id']) ?>" 
-                       target="_blank"
-                       class="inline-flex items-center px-3.5 py-2 text-xs sm:text-sm font-medium text-amber-700 bg-amber-50 border border-amber-300 rounded-lg hover:bg-amber-100 transition shadow-sm">
-                        <svg class="w-4 h-4 mr-1.5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 000-4H9a2 2 0 000 4zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
-                        </svg>
-                        Cetak Rejection Sheet
+                    <a href="<?= base_url('modules/inspection/print_rejection.php?id=' . $lotData['inspection_session_id']) ?>" target="_blank" class="btn-secondary" style="font-size:14px; padding:12px 20px;">
+                        Cetak Surat Penolakan
                     </a>
                 <?php endif; ?>
 
-                <?php if ($handlingKey !== 'resolved_passed' && $latestResult !== 'passed'): ?>
-                    <a href="<?= base_url('modules/inspection/session.php?scan_new=1&plan_type=safety_stock&part_code=' . urlencode($lotData['part_number'] ?? '') . '&scanned_lot=' . urlencode($lotData['lot_number'] ?? '') . '&scanned_ref=' . urlencode($lotData['ref_number'] ?? '')) ?>" 
-                       class="inline-flex items-center px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition">
-                        <svg class="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                        </svg>
-                        Proses Re-Inspeksi
+                <?php if (!$isClosed && !$isPassed): ?>
+                    <a href="<?= base_url('modules/inspection/session.php?scan_new=1&plan_type=safety_stock&part_code=' . urlencode($lotData['part_number'] ?? '') . '&scanned_lot=' . urlencode($lotData['lot_number'] ?? '') . '&scanned_ref=' . urlencode($lotData['ref_number'] ?? '')) ?>" class="btn-secondary" style="font-size:14px; padding:12px 20px;">
+                        Mulai Pemeriksaan Ulang
                     </a>
                 <?php endif; ?>
             </div>
         </div>
+
+        <!-- Ringkasan Angka -->
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:16px;">
+            <div class="card" style="padding:18px;">
+                <div style="font-size:12px; font-weight:700; color:#64748b;">Jumlah Produk</div>
+                <div style="font-size:30px; font-weight:800; color:#0f172a; line-height:1.1; margin-top:4px;">
+                    <?= number_format((float)$lotData['qty_lot']) ?> <span style="font-size:14px; font-weight:600; color:#64748b;">pcs</span>
+                </div>
+            </div>
+            <div class="card" style="padding:18px;">
+                <div style="font-size:12px; font-weight:700; color:#64748b;">Defect</div>
+                <div style="font-size:30px; font-weight:800; color:#be123c; line-height:1.1; margin-top:4px;">
+                    <?= number_format($activeQtyNG) ?> <span style="font-size:14px; font-weight:600; color:#9f1239;">pcs</span>
+                </div>
+                <div style="font-size:11px; color:#94a3b8; margin-top:2px;">Part defect</div>
+            </div>
+            <div class="card" style="padding:18px;">
+                <div style="font-size:12px; font-weight:700; color:#64748b;">Sudah Diperiksa</div>
+                <div style="font-size:30px; font-weight:800; color:#0369a1; line-height:1.1; margin-top:4px;">
+                    <?= number_format($totalInspections) ?> <span style="font-size:14px; font-weight:600; color:#64748b;">kali</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Temuan Pemeriksaan -->
+        <div class="card" style="padding:1.5rem;">
+            <h2 style="font-size:18px; font-weight:800; color:#0f172a;">Temuan Pemeriksaan</h2>
+            <p style="font-size:13px; color:#64748b; margin-top:2px;">Jenis  defect yang ditemukan pada lot ini.</p>
+
+            <?php if (empty($defectSummary)): ?>
+                <div style="margin-top:14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px; font-size:14px; color:#475569;">
+                    Tidak ada rincian defect yang tercatat.
+                </div>
+            <?php else: ?>
+                <div style="margin-top:14px; display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:10px;">
+                    <?php foreach ($defectSummary as $ds): ?>
+                        <div style="background:#fff1f2; border:1px solid #fecdd3; border-radius:12px; padding:12px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                            <div style="display:flex; align-items:center; gap:10px; min-width:0;">
+                                <div style="flex-shrink:0; width:32px; height:32px; border-radius:50%; background:#ffe4e6; color:#be123c; display:flex; align-items:center; justify-content:center; font-weight:800;">!</div>
+                                <div style="min-width:0;">
+                                    <div style="font-size:14px; font-weight:700; color:#881337;"><?= sanitize($ds['name']) ?></div>
+                                    <?php if (!empty($ds['code'])): ?>
+                                        <div style="font-size:11px; color:#9f1239; font-family:monospace;">Kode: <?= sanitize($ds['code']) ?></div>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            <div style="font-size:18px; font-weight:800; color:#be123c; white-space:nowrap;"><?= number_format($ds['qty']) ?> pcs</div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+
+            <div style="margin-top:12px; font-size:12px; color:#64748b;">Rincian lengkap per pemeriksaan tersedia di bagian <b>Informasi Lengkap</b> di bawah.</div>
+        </div>
+
+        <!-- Riwayat Pemeriksaan -->
+        <div id="riwayat" class="card" style="padding:1.5rem;">
+            <h2 style="font-size:18px; font-weight:800; color:#0f172a;">Riwayat Pemeriksaan</h2>
+            <p style="font-size:13px; color:#64748b; margin-top:2px;">Urutan pemeriksaan dan keputusan untuk lot ini.</p>
+
+            <div style="margin-top:10px;">
+                <?php foreach ($allRoundsLots as $rIdx => $rRound): ?>
+                    <?php
+                    $rNum    = $rIdx + 1;
+                    $rResult = strtolower($rRound['lot_result'] ?? '');
+                    $rQty    = 0;
+                    foreach (($activeDefectsByRoundLotId[$rRound['session_lot_id']] ?? []) as $rdf) {
+                        $rQty += (int)($rdf['qty_ng'] ?? 0);
+                    }
+                    $rTone = ($rResult === 'passed') ? '#047857' : (($rQty > 0 || $rResult === 'rejected') ? '#be123c' : '#b45309');
+                    $rBg   = ($rResult === 'passed') ? '#ecfdf5' : (($rQty > 0 || $rResult === 'rejected') ? '#fff1f2' : '#fffbeb');
+                    ?>
+                    <div style="display:flex; gap:14px; padding:12px 0; border-bottom:1px solid #f1f5f9;">
+                        <div style="flex-shrink:0; width:38px; height:38px; border-radius:50%; background:<?= $rBg ?>; border:1px solid <?= $rTone ?>33; color:<?= $rTone ?>; display:flex; align-items:center; justify-content:center; font-weight:800;">
+                            <?= $rNum ?>
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px; flex-wrap:wrap;">
+                                <div style="font-size:15px; font-weight:800; color:#0f172a;">Pemeriksaan ke-<?= $rNum ?><?= $rNum === 1 ? ' (pertama)' : ' (ulang)' ?></div>
+                                <div style="font-size:12px; color:#64748b; font-family:monospace;"><?= !empty($rRound['session_started_at']) ? date('d M Y H:i', strtotime($rRound['session_started_at'])) . ' WIB' : '-' ?></div>
+                            </div>
+                            <div style="font-size:13px; color:#475569; margin-top:2px;">
+                                Petugas: <b><?= sanitize($rRound['inspector_name'] ?? 'Petugas Pemeriksa') ?></b>
+                                <?php if (!empty($rRound['session_started_at'])): ?>
+                                    &middot; Shift <?= sanitize(getShiftName($rRound['session_started_at'])) ?>
+                                <?php endif; ?>
+                            </div>
+                            <div style="font-size:14px; font-weight:700; color:<?= $rTone ?>; margin-top:4px;">
+                                <?php if ($rResult === 'passed'): ?>
+                                    Lulus &mdash; tidak ditemukan defect.
+                                <?php elseif ($rQty > 0): ?>
+                                    Ditemukan <?= number_format($rQty) ?> defect.
+                                <?php elseif ($rResult === 'in_progress'): ?>
+                                    Sedang diperiksa.
+                                <?php else: ?>
+                                    Pemeriksaan selesai.
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+
+                <div style="display:flex; gap:14px; padding:12px 0;">
+                    <div style="flex-shrink:0; width:38px; height:38px; border-radius:50%; background:<?= $isClosed ? $closureBg : ($isPassed ? '#ecfdf5' : '#f8fafc') ?>; border:1px solid <?= $isClosed ? $closureBorder : ($isPassed ? '#a7f3d0' : '#cbd5e1') ?>; color:<?= $isClosed ? $closureTone : ($isPassed ? '#047857' : '#64748b') ?>; display:flex; align-items:center; justify-content:center; font-weight:800;">
+                        <?= $isClosed ? ($closureIsAbolish ? 'X' : '&#10003;') : ($isPassed ? '&#10003;' : '...') ?>
+                    </div>
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-size:15px; font-weight:800; color:#0f172a;">Keputusan Penanganan</div>
+                        <div style="font-size:14px; color:#475569; margin-top:2px; line-height:1.5;">
+                            <?php if ($isClosed): ?>
+                                <b style="color:<?= $closureTone ?>;"><?= $closureLabel ?></b> oleh <?= sanitize($quarantineClosure['closed_by_name'] ?? 'Admin QC') ?> pada <?= date('d M Y H:i', strtotime($quarantineClosure['closed_at'])) ?> WIB.
+                            <?php elseif ($isPassed): ?>
+                                Selesai &mdash; lot sudah lulus pemeriksaan ulang.
+                            <?php else: ?>
+                                Belum ada keputusan. Lot masih menunggu tindak lanjut.
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Keputusan Penanganan -->
+        <div id="keputusan" class="card" style="padding:0; overflow:hidden;">
+            <div style="height:6px; background:<?= $isClosed ? $closureTone : ($isPassed ? '#059669' : '#f59e0b') ?>;"></div>
+            <div style="padding:1.5rem;">
+                <h2 style="font-size:18px; font-weight:800; color:#0f172a;">Keputusan Penanganan</h2>
+
+                <?php if ($isClosed): ?>
+                    <div style="margin-top:14px; display:flex; align-items:flex-start; gap:12px; background:<?= $closureBg ?>; border:1px solid <?= $closureBorder ?>; border-radius:14px; padding:16px;">
+                        <div style="flex-shrink:0; width:42px; height:42px; border-radius:50%; background:<?= $closureTone ?>; color:#ffffff; display:flex; align-items:center; justify-content:center;">
+                            <?php if ($closureIsAbolish): ?>
+                                <svg style="width:21px; height:21px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                            <?php else: ?>
+                                <svg style="width:21px; height:21px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <?php endif; ?>
+                        </div>
+                        <div>
+                            <div style="font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:<?= $closureTone ?>;">Keputusan Divisi</div>
+                            <div style="font-size:26px; font-weight:900; line-height:1.1; color:<?= $closureTone ?>; margin-top:2px;"><?= $closureLabel ?></div>
+                            <div style="font-size:14px; font-weight:600; color:#475569; margin-top:2px;"><?= $closureDesc ?></div>
+                        </div>
+                    </div>
+
+                    <?php if ($closureIsAbolish): ?>
+                        <div style="margin-top:12px; display:flex; align-items:flex-start; gap:8px; background:#fff1f2; border:1px solid #fecdd3; border-radius:10px; padding:10px 12px; font-size:12px; color:#9f1239;">
+                            <svg style="width:16px; height:16px; flex-shrink:0; margin-top:1px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                            <span><b>Lot ditutup permanen.</b> Lot tidak dapat di-scan ulang pada inspeksi berikutnya.</span>
+                        </div>
+                    <?php endif; ?>
+
+                    <div style="margin-top:14px;">
+                        <div style="font-size:11px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:#64748b; margin-bottom:6px;"><?= $closureNotesLabel ?></div>
+                        <div style="background:#ffffff; border:1px solid <?= $closureBorder ?>; border-radius:10px; padding:12px; font-size:14px; line-height:1.6; color:#334155;">
+                            <?= nl2br(sanitize($quarantineClosure['notes'])) ?>
+                        </div>
+                    </div>
+
+                    <div style="margin-top:14px; padding-top:12px; border-top:1px solid #e2e8f0; display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; font-size:12px; color:#64748b;">
+                        <span>Diselesaikan oleh <b style="color:#334155;"><?= sanitize($quarantineClosure['closed_by_name'] ?? 'Admin QC') ?></b></span>
+                        <span style="font-family:monospace;"><?= date('d M Y H:i', strtotime($quarantineClosure['closed_at'])) ?> WIB</span>
+                    </div>
+
+                    <details style="margin-top:16px;">
+                        <summary style="cursor:pointer; font-size:13px; font-weight:700; color:#0369a1;">Ubah Catatan Penanganan</summary>
+                        <form action="<?= base_url('modules/ng_quarantine/detail.php?id=' . $lotId) ?>" method="POST" style="margin-top:12px; display:flex; flex-direction:column; gap:10px;">
+                            <input type="hidden" name="action_type" value="update_disposition">
+                            <input type="hidden" name="closure_id" value="<?= (int)$quarantineClosure['id'] ?>">
+                            <textarea name="action_notes" rows="4" class="form-input" style="font-size:14px;" placeholder="Tulis catatan penanganan..." required><?= sanitize($quarantineClosure['notes'] ?? '') ?></textarea>
+                            <button type="submit" class="btn-primary" style="font-size:14px; align-self:flex-start; background-color:#0284c7;">Simpan Catatan</button>
+                        </form>
+                    </details>
+
+                <?php elseif ($isPassed): ?>
+                    <div style="margin-top:14px; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:14px; padding:16px; display:flex; gap:12px; align-items:flex-start;">
+                        <div style="flex-shrink:0; width:40px; height:40px; border-radius:50%; background:#047857; color:#ffffff; display:flex; align-items:center; justify-content:center;">
+                            <svg style="width:20px; height:20px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </div>
+                        <div>
+                            <div style="font-size:18px; font-weight:800; color:#047857;">Lot Sudah Lulus</div>
+                            <div style="font-size:14px; color:#475569; margin-top:3px; line-height:1.5;">Lot ini sudah lulus pemeriksaan ulang, sehingga tidak memerlukan keputusan penanganan tambahan.</div>
+                        </div>
+                    </div>
+
+                <?php else: ?>
+                    <div style="margin-top:14px; background:#fffbeb; border:1px solid #fde68a; border-radius:14px; padding:16px;">
+                        <div style="font-size:16px; font-weight:800; color:#92400e;">Belum Ada Keputusan Penanganan</div>
+                        <div style="font-size:14px; color:#78350f; margin-top:3px; line-height:1.5;">Lot ini masih menunggu keputusan apakah akan ditangani (Action) atau dibuang (Abolish).</div>
+                    </div>
+
+                    <div style="margin-top:12px; display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px;">
+                        <div style="background:#f0f9ff; border:1px solid #bae6fd; border-radius:10px; padding:12px;">
+                            <div style="font-size:14px; font-weight:800; color:#0369a1;">ACTION</div>
+                            <div style="font-size:12px; color:#475569; margin-top:2px;">Lot ditangani atau diperiksa ulang.</div>
+                        </div>
+                        <div style="background:#fff1f2; border:1px solid #fecdd3; border-radius:10px; padding:12px;">
+                            <div style="font-size:14px; font-weight:800; color:#be123c;">ABOLISH</div>
+                            <div style="font-size:12px; color:#475569; margin-top:2px;">Lot dibuang dan tidak dipakai lagi.</div>
+                        </div>
+                    </div>
+
+                    <a href="<?= base_url('modules/ng_quarantine/index.php') ?>" class="btn-primary" style="margin-top:14px; font-size:14px; padding:12px 20px; background-color:#0284c7; display:inline-flex;">
+                        Catat Keputusan Penanganan
+                    </a>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- Informasi Lengkap (disembunyikan) -->
+        <details id="informasi-lengkap" class="card" style="padding:0; overflow:hidden;">
+            <summary style="cursor:pointer; list-style:none; padding:1.25rem 1.5rem; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                <div>
+                    <div style="font-size:17px; font-weight:800; color:#0f172a;">Informasi Lengkap</div>
+                    <div style="font-size:13px; color:#64748b; margin-top:2px;">Klik untuk melihat data teknis, rincian tiap pemeriksaan, dan riwayat persetujuan.</div>
+                </div>
+                <div style="font-size:13px; font-weight:700; color:#0369a1; white-space:nowrap;">Buka / Tutup</div>
+            </summary>
+            <div style="border-top:1px solid #e2e8f0; padding:1.5rem; display:flex; flex-direction:column; gap:1.5rem;">
 
         <!-- Section 1: Top 3 Information Cards Grid -->
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem;" class="w-full">
@@ -704,7 +1025,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
             <!-- Left 2 Cols: Timeline Steps -->
-            <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-5 sm:p-6 space-y-6">
+            <div class="lg:col-span-3 bg-white rounded-xl shadow-sm border border-slate-200 p-5 sm:p-6 space-y-6">
                 <div class="border-b border-slate-200 pb-4">
                     <h3 class="text-base font-bold text-slate-800 flex items-center gap-2">
                         <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -810,18 +1131,6 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 </p>
                             <?php endif; ?>
 
-                            <!-- Catatan Disposisi Tambahan Supervisor -->
-                            <?php if (!empty($initialRoundLot['chief_notes']) || !empty($lotData['action_notes'])): ?>
-                                <div class="text-xs text-blue-900 bg-blue-50 p-2.5 rounded-lg border border-blue-200 mt-2">
-                                    <div class="flex justify-between items-center mb-1">
-                                        <span class="font-bold">Instruksi / Catatan Disposisi Penanganan:</span>
-                                        <span class="text-[10px] text-blue-600 font-mono">
-                                            <?= !empty($initialRoundLot['chief_approved_at']) ? date('d/m/Y H:i', strtotime($initialRoundLot['chief_approved_at'])) : '' ?>
-                                        </span>
-                                    </div>
-                                    <p><?= sanitize($initialRoundLot['chief_notes'] ?: $lotData['action_notes']) ?></p>
-                                </div>
-                            <?php endif; ?>
                         </div>
                     </div>
 
@@ -995,79 +1304,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
             </div>
 
-            <!-- Card Penutupan Karantina Administratif (Divisi Lain) -->
-            <?php if ($quarantineClosure): ?>
-            <div class="bg-sky-50 rounded-xl shadow-sm border border-sky-200 p-5 space-y-3 h-fit">
-                <div class="border-b border-sky-200 pb-3 flex items-center justify-between">
-                    <h3 class="text-sm font-bold text-sky-950 flex items-center gap-2 uppercase tracking-wider">
-                        <svg class="w-4 h-4 text-sky-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        Disposisi Selesai (Divisi)
-                    </h3>
-                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-200 text-sky-900 border border-sky-300">
-                        MEMO / SELESAI
-                    </span>
-                </div>
-                <div class="text-xs space-y-2 text-sky-900">
-                    <p class="leading-relaxed bg-white p-3 rounded-lg border border-sky-200 font-medium">
-                        <?= nl2br(sanitize($quarantineClosure['notes'])) ?>
-                    </p>
-                    <div class="pt-2 border-t border-sky-200/70 text-[11px] text-sky-800 flex justify-between">
-                        <span>Ditutup Oleh: <b><?= sanitize($quarantineClosure['closed_by_name'] ?? 'Admin QC') ?></b></span>
-                        <span class="font-mono"><?= date('d M Y H:i', strtotime($quarantineClosure['closed_at'])) ?> WIB</span>
-                    </div>
-                </div>
-            </div>
-            <?php endif; ?>
-
-            <!-- Right 1 Col: Supervisor Action Form / Quick Notes -->
-            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4 h-fit">
-                <div class="border-b border-slate-200 pb-3">
-                    <h3 class="text-sm font-bold text-slate-800 flex items-center gap-2 uppercase tracking-wider">
-                        <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                        </svg>
-                        Disposisi / Catatan SPV
-                    </h3>
-                    <p class="text-xs text-slate-500 mt-0.5">Input instruksi penanganan lot karantina untuk tim inspeksi / produksi</p>
-                </div>
-
-                <form action="<?= base_url('modules/ng_quarantine/detail.php?id=' . $lotId) ?>" method="POST" class="space-y-4">
-                    <input type="hidden" name="action_type" value="update_disposition">
-
-                    <div>
-                        <label class="block text-xs font-semibold text-slate-700 mb-1">
-                            Instruksi Disposisi Penanganan:
-                        </label>
-                        <textarea 
-                            name="action_notes" 
-                            rows="5" 
-                            class="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition placeholder-slate-400"
-                            placeholder="Contoh: Lakukankan sortir 100% pada area defect permukaan. Lot di-reinspeksi ulang dengan sample 2x normal..."
-                            required><?= sanitize($lotData['action_notes'] ?? '') ?></textarea>
-                    </div>
-
-                    <button 
-                        type="submit" 
-                        class="w-full py-2.5 px-4 bg-blue-600 text-white font-semibold text-xs rounded-lg hover:bg-blue-700 transition shadow-sm flex items-center justify-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
-                        </svg>
-                        Simpan Catatan Disposisi
-                    </button>
-                </form>
-
-                <div class="pt-4 border-t border-slate-100 space-y-2 text-xs text-slate-500">
-                    <span class="font-bold text-slate-700 block">Panduan Penanganan Lot NG:</span>
-                    <ul class="list-disc pl-4 space-y-1 text-[11px] text-slate-600">
-                        <li><strong>Re-Inspeksi 100%:</strong> Inspector melakukan verifikasi ulang per unit pada lot yang disortir.</li>
-                        <li><strong>Penggantian Lot:</strong> Jika lot di-scrap/return ke supplier, buat lot pengganti baru via sistem.</li>
-                    </ul>
-                </div>
-            </div>
-
         </div>
+
+            </div>
+        </details>
 
     </div>
 </main>

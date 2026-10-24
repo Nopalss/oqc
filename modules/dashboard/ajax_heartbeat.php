@@ -95,6 +95,13 @@ try {
     $stmtSess->execute([':sd' => $startDate, ':ed_next' => $edNext]);
     $rSess = $stmtSess->fetch(PDO::FETCH_ASSOC);
 
+    // 2b. Check global target PPM setting
+    $targetPpmVal = '';
+    try {
+        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
+        $targetPpmVal = (string)($stmtTgt->fetchColumn() ?: '');
+    } catch (Exception $eT) {}
+
     // 3. Compute concise fingerprint hash
     $rawToken = implode('|', [
         $rSum['max_sum_id'] ?? 0,
@@ -104,7 +111,8 @@ try {
         $rSess['sess_count'] ?? 0,
         $startDate,
         $endDate,
-        $selectedCustomer
+        $selectedCustomer,
+        $targetPpmVal
     ]);
 
     $currentVersion = md5($rawToken);

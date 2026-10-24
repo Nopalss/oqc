@@ -20,6 +20,9 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../config/helper.php';
 require_once __DIR__ . '/../../../config/summary_helper.php';
 
+// Release PHP session lock immediately so parallel page unloads / beacons don't block subsequent requests
+session_write_close();
+
 // Mendukung POST biasa (FormData / JSON) maupun sendBeacon (POST raw / form-urlencoded)
 $rawInput = file_get_contents('php://input');
 $jsonBody = json_decode($rawInput, true) ?: [];

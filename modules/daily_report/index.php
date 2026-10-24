@@ -257,26 +257,64 @@ if ($pdo) {
         }
 
         if (!empty($search)) {
-            $where[] = "(
-                did.part_code LIKE :s1 
-                OR did.lot_number LIKE :s2 
-                OR did.part_name LIKE :s3 
-                OR ki.item_code LIKE :s4 
-                OR ki.item_description LIKE :s5 
-                OR ki.kanban_no LIKE :s6 
-                OR mp.part_code LIKE :s7 
-                OR mp.part_name LIKE :s8 
-                OR EXISTS (
+            // Deteksi & Parsing Barcode QR Label Scanner (Format: Z1partCode|Z2lotNumber|Z3qty|Z4line|Z5refNumber)
+            $qrPart = '';
+            $qrLot  = '';
+            $qrRef  = '';
+            if (strpos($search, '|') !== false || str_starts_with($search, 'Z1') || str_starts_with($search, 'Z2') || str_starts_with($search, 'Z5')) {
+                $parts = explode('|', $search);
+                foreach ($parts as $p) {
+                    $p = trim($p);
+                    if (str_starts_with($p, 'Z1')) $qrPart = substr($p, 2);
+                    if (str_starts_with($p, 'Z2')) $qrLot  = substr($p, 2);
+                    if (str_starts_with($p, 'Z5')) $qrRef  = substr($p, 2);
+                }
+            }
+
+            if (!empty($qrRef) || !empty($qrLot) || !empty($qrPart)) {
+                $qrConds = [];
+                if (!empty($qrRef)) {
+                    $qrConds[] = "isl_s.ref_number LIKE :qr_ref";
+                    $params[':qr_ref'] = '%' . $qrRef . '%';
+                }
+                if (!empty($qrLot)) {
+                    $qrConds[] = "(isl_s.lot_number LIKE :qr_lot OR did.lot_number LIKE :qr_lot_did)";
+                    $params[':qr_lot'] = '%' . $qrLot . '%';
+                    $params[':qr_lot_did'] = '%' . $qrLot . '%';
+                }
+                if (!empty($qrPart)) {
+                    $qrConds[] = "(did.part_code LIKE :qr_part OR ki.item_code LIKE :qr_part_ki OR mp.part_code LIKE :qr_part_mp)";
+                    $params[':qr_part'] = '%' . $qrPart . '%';
+                    $params[':qr_part_ki'] = '%' . $qrPart . '%';
+                    $params[':qr_part_mp'] = '%' . $qrPart . '%';
+                }
+                $where[] = "(" . implode(' AND ', $qrConds) . " OR EXISTS (
                     SELECT 1 FROM inspection_session_lots isl_s 
                     WHERE isl_s.inspection_session_id = ss.id 
-                      AND (isl_s.ref_number LIKE :s9 OR isl_s.lot_number LIKE :s10)
-                )
-            )";
-            $like = '%' . $search . '%';
-            $params[':s1'] = $like; $params[':s2'] = $like; $params[':s3'] = $like;
-            $params[':s4'] = $like; $params[':s5'] = $like; $params[':s6'] = $like;
-            $params[':s7'] = $like; $params[':s8'] = $like; $params[':s9'] = $like;
-            $params[':s10'] = $like;
+                      AND (" . implode(' AND ', $qrConds) . ")
+                ))";
+            } else {
+                $where[] = "(
+                    did.part_code LIKE :s1 
+                    OR did.lot_number LIKE :s2 
+                    OR did.part_name LIKE :s3 
+                    OR ki.item_code LIKE :s4 
+                    OR ki.item_description LIKE :s5 
+                    OR ki.kanban_no LIKE :s6 
+                    OR mp.part_code LIKE :s7 
+                    OR mp.part_name LIKE :s8 
+                    OR EXISTS (
+                        SELECT 1 FROM inspection_session_lots isl_s 
+                        WHERE isl_s.inspection_session_id = ss.id 
+                          AND (isl_s.ref_number LIKE :s9 OR isl_s.lot_number LIKE :s10)
+                    )
+                )";
+                $like = '%' . $search . '%';
+                $params[':s1'] = $like; $params[':s2'] = $like; $params[':s3'] = $like;
+                $params[':s4'] = $like; $params[':s5'] = $like; $params[':s6'] = $like;
+                $params[':s7'] = $like; $params[':s8'] = $like; $params[':s9'] = $like;
+                $params[':s10'] = $like;
+            }
         }
 
         $whereStr = implode(' AND ', $where);
@@ -582,31 +620,41 @@ if ($pdo) {
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // 1B. GROUPING TAB AKTIVITAS INSPEKTUR (RINCIAN LOT PER INSPEKTUR)
+        // 1B. GROUPING TAB AKTIVITAS INSPEKTUR (HARI INI SAJA / CURDATE)
         // ═══════════════════════════════════════════════════════════════════
         $inspectorSummary = [];
+        $todayDateStr = date('Y-m-d');
+
         foreach ($sessionTimeline as $sess) {
+            // Tab Inspektur murni menghitung sesi yang berlangsung HARI INI saja
+            $sessDate = !empty($sess['started_at']) ? date('Y-m-d', strtotime($sess['started_at'])) : '';
+            if ($sessDate !== $todayDateStr) {
+                continue;
+            }
+
             $inspName = trim($sess['inspector_name'] ?: 'System');
             if (!isset($inspectorSummary[$inspName])) {
                 $inspectorSummary[$inspName] = [
-                    'name'           => $inspName,
-                    'is_live'        => false,
-                    'live_lines'     => [],
-                    'total_sessions' => 0,
-                    'passed_sessions'=> 0,
+                    'name'              => $inspName,
+                    'is_live'           => false,
+                    'live_lines'        => [],
+                    'live_session_ids'  => [],
+                    'total_sessions'    => 0,
+                    'passed_sessions'   => 0,
                     'rejected_sessions' => 0,
                     'in_prog_sessions'  => 0,
-                    'total_lots'     => 0,
-                    'total_qty'      => 0,
-                    'total_sample'   => 0,
-                    'total_ng'       => 0,
-                    'lots'           => []
+                    'total_lots'        => 0,
+                    'total_qty'         => 0,
+                    'total_sample'      => 0,
+                    'total_ng'          => 0,
+                    'lots'              => []
                 ];
             }
 
             $isSessLive = ($sess['session_status'] === 'in_progress' || empty($sess['closed_at']));
             if ($isSessLive) {
                 $inspectorSummary[$inspName]['is_live'] = true;
+                $inspectorSummary[$inspName]['live_session_ids'][] = (int)$sess['session_id'];
                 $lName = $sess['line_name'] ?: 'Line 1';
                 if (!in_array($lName, $inspectorSummary[$inspName]['live_lines'])) {
                     $inspectorSummary[$inspName]['live_lines'][] = $lName;
@@ -1179,7 +1227,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <label style="font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.4px; display: block; margin-bottom: 4px;">Cari</label>
                         <div style="position: relative;">
                             <svg style="position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; color: #94a3b8;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/></svg>
-                            <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Part Code, Lot No, Ref No, Kanban..."
+                            <input type="text" id="mainSearchInput" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Part Code, Lot No, Ref No, Scan QR..."
+                                   onkeydown="handleMainSearchScan(event)"
                                    style="width: 100%; padding: 7px 10px 7px 30px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #1e293b; font-weight: 500; outline: none; box-sizing: border-box;">
                         </div>
                     </div>
@@ -1234,7 +1283,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
                         </svg>
                         Berdasarkan Sesi Inspeksi
-                        <span style="background: <?= $activeTab === 'session' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'session' ? '#fff' : '#475569' ?>; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
+                        <span id="tab-badge-session" style="background: <?= $activeTab === 'session' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'session' ? '#ffffff' : '#334155' ?>; padding: 1.5px 7px; border-radius: 9999px; font-size: 10px; font-weight: 800;">
                             <?= count($sessionTimeline) ?> Sesi
                         </span>
                     </button>
@@ -1247,7 +1296,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
                         </svg>
                         Ringkasan Per Hari
-                        <span style="background: <?= $activeTab === 'daily' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'daily' ? '#fff' : '#475569' ?>; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
+                        <span id="tab-badge-daily" style="background: <?= $activeTab === 'daily' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'daily' ? '#ffffff' : '#334155' ?>; padding: 1.5px 7px; border-radius: 9999px; font-size: 10px; font-weight: 800;">
                             <?= $totalItems ?> Hari
                         </span>
                     </button>
@@ -1260,16 +1309,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
                         </svg>
                         Aktivitas Inspektur
-                        <span style="background: <?= $activeTab === 'inspector' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'inspector' ? '#fff' : '#475569' ?>; padding: 1px 7px; border-radius: 9999px; font-size: 10px;">
+                        <span id="tab-badge-inspector" style="background: <?= $activeTab === 'inspector' ? 'rgba(255,255,255,0.25)' : '#e2e8f0' ?>; color: <?= $activeTab === 'inspector' ? '#ffffff' : '#334155' ?>; padding: 1.5px 7px; border-radius: 9999px; font-size: 10px; font-weight: 800;">
                             <?= count($inspectorSummary) ?> Inspektur
                         </span>
                         <?php 
                         $hasLiveInsp = false;
                         foreach ($inspectorSummary as $insChk) { if ($insChk['is_live']) { $hasLiveInsp = true; break; } }
-                        if ($hasLiveInsp):
                         ?>
-                            <span class="oqc-rec-dot" style="width: 7px; height: 7px;" title="Ada inspektur yang sedang aktif merekam inspeksi"></span>
-                        <?php endif; ?>
+                        <span id="tab-inspector-live-dot" class="oqc-rec-dot" style="width: 7px; height: 7px; display: <?= $hasLiveInsp ? 'inline-block' : 'none' ?>;" title="Ada inspektur yang sedang aktif merekam inspeksi"></span>
                     </button>
                 </div>
 
@@ -2136,13 +2183,23 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         $inspIdx++;
                         $inspIdSafe = 'insp-' . md5($inspName);
                         $isLive = !empty($iData['is_live']);
+                        $liveSessIdsStr = implode(',', $iData['live_session_ids'] ?? []);
                     ?>
-                        <div class="card p-0 bg-white border <?= $isLive ? 'border-red-300 ring-1 ring-red-200' : 'border-slate-200/90' ?> rounded-xl overflow-hidden shadow-xs" style="transition: all 0.2s;">
+                        <div id="card-<?= $inspIdSafe ?>" 
+                             data-inspector-safe="<?= $inspIdSafe ?>"
+                             data-live-session-ids="<?= $liveSessIdsStr ?>"
+                             data-passed-sessions="<?= (int)$iData['passed_sessions'] ?>"
+                             data-rejected-sessions="<?= (int)$iData['rejected_sessions'] ?>"
+                             data-inprog-sessions="<?= (int)$iData['in_prog_sessions'] ?>"
+                             data-total-sessions="<?= (int)$iData['total_sessions'] ?>"
+                             class="inspector-card card p-0 bg-white border <?= $isLive ? 'border-red-300 ring-1 ring-red-200' : 'border-slate-200/90' ?> rounded-xl overflow-hidden shadow-xs" style="transition: all 0.2s;">
                             <!-- Header Inspektur Card -->
-                            <div style="padding: 14px 18px; background: <?= $isLive ? '#fff8f8' : '#fafafa' ?>; border-bottom: 1px solid <?= $isLive ? '#fecaca' : '#e2e8f0' ?>; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; cursor: pointer;"
+                            <div id="card-header-<?= $inspIdSafe ?>" 
+                                 style="padding: 14px 18px; background: <?= $isLive ? '#fff8f8' : '#fafafa' ?>; border-bottom: 1px solid <?= $isLive ? '#fecaca' : '#e2e8f0' ?>; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; cursor: pointer;"
                                  onclick="toggleInspectorAccordion('<?= $inspIdSafe ?>', '<?= htmlspecialchars(addslashes($inspName)) ?>')">
                                 <div style="display: flex; align-items: center; gap: 12px;">
-                                    <div style="width: 40px; height: 40px; border-radius: 10px; background: <?= $isLive ? '#fee2e2' : '#e2e8f0' ?>; color: <?= $isLive ? '#dc2626' : '#1e293b' ?>; font-weight: 900; font-size: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1.5px solid <?= $isLive ? '#fca5a5' : '#cbd5e1' ?>;">
+                                    <div id="avatar-<?= $inspIdSafe ?>" 
+                                         style="width: 40px; height: 40px; border-radius: 10px; background: <?= $isLive ? '#fee2e2' : '#e2e8f0' ?>; color: <?= $isLive ? '#dc2626' : '#1e293b' ?>; font-weight: 900; font-size: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1.5px solid <?= $isLive ? '#fca5a5' : '#cbd5e1' ?>;">
                                         <?= strtoupper(substr($inspName, 0, 2)) ?>
                                     </div>
                                     <div>
@@ -2150,18 +2207,20 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             <h3 style="font-size: 13.5px; font-weight: 900; color: #0f172a; margin: 0; letter-spacing: -0.2px;">
                                                 <?= htmlspecialchars($inspName) ?>
                                             </h3>
-                                            <?php if ($isLive): ?>
-                                                <span class="oqc-rec-badge" title="Inspektur sedang aktif menginspeksi di line">
-                                                    <span class="oqc-rec-dot"></span>
-                                                    <span>LIVE INSPEKSI (<?= htmlspecialchars(implode(', ', $iData['live_lines']) ?: 'Line 1') ?>)</span>
-                                                </span>
-                                            <?php else: ?>
-                                                <span style="font-size: 10px; font-weight: 800; background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; padding: 2px 7px; border-radius: 9999px;">
-                                                    STANDBY / SELESAI
-                                                </span>
-                                            <?php endif; ?>
+                                            <div id="badge-container-<?= $inspIdSafe ?>" style="display: inline-flex; align-items: center;">
+                                                <?php if ($isLive): ?>
+                                                    <span class="oqc-rec-badge" title="Inspektur sedang aktif menginspeksi di line">
+                                                        <span class="oqc-rec-dot"></span>
+                                                        <span>LIVE INSPEKSI (<?= htmlspecialchars(implode(', ', $iData['live_lines']) ?: 'Line 1') ?>)</span>
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span style="font-size: 10px; font-weight: 800; background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; padding: 2px 7px; border-radius: 9999px;">
+                                                        STANDBY / SELESAI
+                                                    </span>
+                                                <?php endif; ?>
+                                            </div>
                                         </div>
-                                        <div style="font-size: 11px; color: #64748b; margin-top: 3px; font-weight: 600;">
+                                        <div id="summary-sess-<?= $inspIdSafe ?>" style="font-size: 11px; color: #64748b; margin-top: 3px; font-weight: 600;">
                                             <?= $iData['total_sessions'] ?> Sesi Inspeksi &bull; <?= $iData['passed_sessions'] ?> Passed &bull; <?= $iData['rejected_sessions'] ?> Rejected &bull; <?= $iData['in_prog_sessions'] ?> In Progress
                                         </div>
                                     </div>
@@ -2319,17 +2378,40 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         if (paneDaily) paneDaily.style.display = 'none';
         if (paneInspector) paneInspector.style.display = 'none';
 
+        const badgeSession   = document.getElementById('tab-badge-session');
+        const badgeDaily     = document.getElementById('tab-badge-daily');
+        const badgeInspector = document.getElementById('tab-badge-inspector');
+
+        // Reset badge styles to inactive state
+        const resetBadge = function(badge) {
+            if (!badge) return;
+            badge.style.background = '#e2e8f0';
+            badge.style.color = '#334155';
+        };
+        const activateBadge = function(badge) {
+            if (!badge) return;
+            badge.style.background = 'rgba(255,255,255,0.25)';
+            badge.style.color = '#ffffff';
+        };
+
+        resetBadge(badgeSession);
+        resetBadge(badgeDaily);
+        resetBadge(badgeInspector);
+
         if (tabKey === 'session') {
             if (paneSession) paneSession.style.display = 'block';
             if (btnSession) btnSession.className = activeClass;
+            activateBadge(badgeSession);
             if (descText) descText.textContent = 'Menampilkan kronologi seluruh sesi inspeksi secara langsung';
         } else if (tabKey === 'daily') {
             if (paneDaily) paneDaily.style.display = 'block';
             if (btnDaily) btnDaily.className = activeClass;
+            activateBadge(badgeDaily);
             if (descText) descText.textContent = 'Menampilkan rekapitulasi performa inspeksi dikelompokkan per hari';
         } else if (tabKey === 'inspector') {
             if (paneInspector) paneInspector.style.display = 'block';
             if (btnInspector) btnInspector.className = activeClass;
+            activateBadge(badgeInspector);
             if (descText) descText.textContent = 'Daftar aktivitas dan performa kerja per inspektur QC (klik untuk melihat rincian per lot)';
         }
 
@@ -2363,9 +2445,60 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         }
     }
 
+    // ── Helper: Parser QR Code Scanner Label Pabrik ─────────────────────────
+    function parseDailyReportQR(raw) {
+        var obj = {};
+        if (!raw) return obj;
+        var parts = raw.split('|');
+        parts.forEach(function(p) {
+            p = p.trim();
+            if (p.startsWith('Z1')) obj.Z1 = p.substring(2);
+            if (p.startsWith('Z2')) obj.Z2 = p.substring(2);
+            if (p.startsWith('Z3')) {
+                var valZ3 = parseInt(p.substring(2), 10);
+                if (!isNaN(valZ3) && valZ3 > 0) obj.Z3 = valZ3;
+            }
+            if (p.startsWith('Z4')) obj.Z4 = p.substring(2);
+            if (p.startsWith('Z5')) obj.Z5 = p.substring(2);
+        });
+        return obj;
+    }
+
+    // Handler untuk Scanner Barcode pada Kotak Pencarian Utama
+    function handleMainSearchScan(e) {
+        if (e.key === 'Enter') {
+            var input = document.getElementById('mainSearchInput');
+            if (!input) return;
+            var val = input.value.trim();
+            if (val.includes('|') || val.startsWith('Z1') || val.startsWith('Z2') || val.startsWith('Z5')) {
+                var qr = parseDailyReportQR(val);
+                // Utamakan Ref No (Z5), jika tidak ada pakai Lot No (Z2), atau Part Code (Z1)
+                if (qr.Z5) {
+                    input.value = qr.Z5;
+                } else if (qr.Z2) {
+                    input.value = qr.Z2;
+                } else if (qr.Z1) {
+                    input.value = qr.Z1;
+                }
+            }
+            // Biarkan browser men-submit formDailyFilter secara natural
+        }
+    }
+
     function searchInspectorLots(inspIdSafe, inspName) {
         const searchInput = document.getElementById('search-insp-' + inspIdSafe);
-        const query = searchInput ? searchInput.value.trim() : '';
+        let query = searchInput ? searchInput.value.trim() : '';
+        if (query.includes('|') || query.startsWith('Z1') || query.startsWith('Z2') || query.startsWith('Z5')) {
+            var qr = parseDailyReportQR(query);
+            if (qr.Z5) {
+                query = qr.Z5;
+            } else if (qr.Z2) {
+                query = qr.Z2;
+            } else if (qr.Z1) {
+                query = qr.Z1;
+            }
+            if (searchInput) searchInput.value = query;
+        }
         loadInspectorLots(inspIdSafe, inspName, 1, query);
     }
 
@@ -2385,8 +2518,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             '<span>Mengambil data rincian lot...</span>' +
             '</div></td></tr>';
 
-        const sDate = '<?= htmlspecialchars($startDate) ?>';
-        const eDate = '<?= htmlspecialchars($endDate) ?>';
+        const sDate = '<?= htmlspecialchars($todayDateStr) ?>';
+        const eDate = '<?= htmlspecialchars($todayDateStr) ?>';
 
         const url = '<?= base_url("modules/daily_report/api/get_inspector_lots.php") ?>' +
             '?inspector_name=' + encodeURIComponent(inspName) +
@@ -3236,7 +3369,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         var pollTimer = null;
         var isPollingActive = false;
         var inFlight = false;
-        var pollInterval = 6500; // 6.5 detik: responsif tapi sangat ramah server
+        var pollInterval = 12000; // 12 detik: responsif dan sangat ramah server/multi-PC
 
         function getLiveSessionIds() {
             var liveRows = document.querySelectorAll('tr.session-data-row.session-row-live');
@@ -3263,17 +3396,25 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             inFlight = true;
             var endpoint = '<?= base_url("modules/daily_report/api/check_live_status.php") ?>?ids=' + encodeURIComponent(ids.join(','));
 
+            var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            var fetchTimeout = null;
+            if (controller) {
+                fetchTimeout = setTimeout(function() {
+                    controller.abort();
+                }, 5000); // 5 detik max timeout
+            }
+
             fetch(endpoint, {
                 method: 'GET',
                 headers: {
                     'X-Requested-With': 'XMLHttpRequest'
-                }
+                },
+                signal: controller ? controller.signal : undefined
             })
             .then(function(res) {
                 return res.json();
             })
             .then(function(data) {
-                inFlight = false;
                 if (!data || !data.success || !data.sessions) return;
 
                 var sessions = data.sessions;
@@ -3313,6 +3454,83 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             timeContainer.innerHTML = '<span>' + (sInfo.time_text || '') + '</span>';
                         }
                     }
+
+                    // ═══════════════════════════════════════════════════════════════
+                    // 3. Update Real-Time Pada Kartu Tab Inspektur (#pane-tab-inspector)
+                    // ═══════════════════════════════════════════════════════════════
+                    if (!sInfo.is_in_progress && sInfo.status !== 'in_progress') {
+                        var inspCards = document.querySelectorAll('.inspector-card');
+                        inspCards.forEach(function(card) {
+                            var liveIdsAttr = card.getAttribute('data-live-session-ids') || '';
+                            var arrIds = liveIdsAttr.split(',').filter(function(x) { return x.trim() !== ''; });
+                            var idxSid = arrIds.indexOf(String(sid));
+                            if (idxSid !== -1) {
+                                // Hapus sid ini dari daftar sesi live inspektur
+                                arrIds.splice(idxSid, 1);
+                                card.setAttribute('data-live-session-ids', arrIds.join(','));
+
+                                var safeId = card.getAttribute('data-inspector-safe');
+                                
+                                // Update hitungan sesi di teks info inspektur
+                                var totalSess = parseInt(card.getAttribute('data-total-sessions') || '0', 10);
+                                var passSess = parseInt(card.getAttribute('data-passed-sessions') || '0', 10);
+                                var rejSess = parseInt(card.getAttribute('data-rejected-sessions') || '0', 10);
+                                var inprogSess = Math.max(0, parseInt(card.getAttribute('data-inprog-sessions') || '0', 10) - 1);
+                                if (sInfo.status === 'passed') {
+                                    passSess++;
+                                } else if (sInfo.status === 'rejected') {
+                                    rejSess++;
+                                }
+                                card.setAttribute('data-passed-sessions', passSess);
+                                card.setAttribute('data-rejected-sessions', rejSess);
+                                card.setAttribute('data-inprog-sessions', inprogSess);
+
+                                var summaryText = document.getElementById('summary-sess-' + safeId);
+                                if (summaryText) {
+                                    summaryText.innerHTML = totalSess + ' Sesi Inspeksi &bull; ' + passSess + ' Passed &bull; ' + rejSess + ' Rejected &bull; ' + inprogSess + ' In Progress';
+                                }
+
+                                // Jika inspektur ini sudah TIDAK memiliki sesi live lain
+                                if (arrIds.length === 0) {
+                                    // 1. Ubah badge LIVE menjadi STANDBY / SELESAI
+                                    var badgeBox = document.getElementById('badge-container-' + safeId);
+                                    if (badgeBox) {
+                                        badgeBox.innerHTML = '<span style="font-size: 10px; font-weight: 800; background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; padding: 2px 7px; border-radius: 9999px;">STANDBY / SELESAI</span>';
+                                    }
+
+                                    // 2. Kembalikan Border Card dari Merah ke Netral
+                                    card.classList.remove('border-red-300', 'ring-1', 'ring-red-200');
+                                    card.classList.add('border-slate-200/90');
+
+                                    // 3. Kembalikan Header Card Background
+                                    var cardHeader = document.getElementById('card-header-' + safeId);
+                                    if (cardHeader) {
+                                        cardHeader.style.background = '#fafafa';
+                                        cardHeader.style.borderBottomColor = '#e2e8f0';
+                                    }
+
+                                    // 4. Kembalikan Avatar Warna
+                                    var avatarBox = document.getElementById('avatar-' + safeId);
+                                    if (avatarBox) {
+                                        avatarBox.style.background = '#e2e8f0';
+                                        avatarBox.style.color = '#1e293b';
+                                        avatarBox.style.borderColor = '#cbd5e1';
+                                    }
+                                }
+                            }
+                        });
+
+                        // Periksa apakah masih ada inspektur yang LIVE sama sekali
+                        var stillAnyInspLive = false;
+                        document.querySelectorAll('.inspector-card').forEach(function(c) {
+                            var idsLeft = (c.getAttribute('data-live-session-ids') || '').trim();
+                            if (idsLeft !== '') stillAnyInspLive = true;
+                        });
+                        var tabLiveDot = document.getElementById('tab-inspector-live-dot');
+                        if (tabLiveDot) {
+                            tabLiveDot.style.display = stillAnyInspLive ? 'inline-block' : 'none';
+                        }
+                    }
                 }
 
                 // Jika ada status yang berubah, cek apakah masih ada sesi live tersisa
@@ -3327,8 +3545,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 }
             })
             .catch(function(err) {
+                // Silent fail agar tidak mengganggu UX pengguna saat ada fluktuasi jaringan / timeout
+            })
+            .finally(function() {
+                if (fetchTimeout) clearTimeout(fetchTimeout);
                 inFlight = false;
-                // Silent fail agar tidak mengganggu UX pengguna saat ada fluktuasi jaringan
             });
         }
 

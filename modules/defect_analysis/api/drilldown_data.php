@@ -833,6 +833,32 @@ try {
         $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'part', $defectId, $modelId, $unit, $paletteParts);
         $res['success'] = true;
         $res['modelName'] = $modelName;
+
+        // Attach threshold targets for parts in table
+        $stmtGlobPart = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'global_part' AND reference_id IS NULL LIMIT 1");
+        $stmtGlobPart->execute();
+        $globPartVal = $stmtGlobPart->fetchColumn();
+        $globPartVal = ($globPartVal !== false) ? (float)$globPartVal : null;
+
+        $stmtSpecPart = $pdo->prepare("SELECT reference_id, threshold_val FROM defect_threshold_targets WHERE target_type = 'specific_part'");
+        $stmtSpecPart->execute();
+        $specPartMap = $stmtSpecPart->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        foreach ($res['items'] as &$it) {
+            $itemId = $it['item_id'] ?? null;
+            if ($itemId && isset($specPartMap[$itemId])) {
+                $it['threshold_val'] = (float)$specPartMap[$itemId];
+                $it['is_specific_threshold'] = true;
+            } elseif ($globPartVal !== null) {
+                $it['threshold_val'] = $globPartVal;
+                $it['is_specific_threshold'] = false;
+            } else {
+                $it['threshold_val'] = null;
+                $it['is_specific_threshold'] = false;
+            }
+        }
+        unset($it);
+
         echo json_encode($res);
         exit;
 
@@ -954,11 +980,6 @@ try {
                     <td style="padding:10px 14px;">
                         <span style="display:inline-block;padding:2px 7px;border-radius:5px;background:#f1f5f9;color:#334155;border:1px solid #e2e8f0;font-size:11px;font-weight:700;">
                             <?= htmlspecialchars($row['model_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800;background:#fff1f2;color:#be123c;border:1px solid #ffe4e6;">
-                            <?= htmlspecialchars($row['defect_name']) ?>
                         </span>
                     </td>
                     <td style="padding:10px 14px;text-align:center;">
@@ -1138,6 +1159,9 @@ try {
             }
             $wSumTSql = implode(' AND ', $wSumT);
 
+            $trendInterval = isset($_GET['trend_interval']) ? trim($_GET['trend_interval']) : 'daily';
+            $weeklyMode    = isset($_GET['weekly_mode']) ? trim($_GET['weekly_mode']) : 'cutoff';
+
             if ($filterType === 'all_years' || ($filterType === 'custom' && $daysDiff > 730)) {
                 $intervalType = 'tahun';
                 $minY = (int)date('Y', strtotime($startDate));
@@ -1146,6 +1170,150 @@ try {
                     $trendMap[(string)$yr] = ['label' => (string)$yr, 'pcs' => 0, 'lot' => 0];
                 }
                 $dateFormat = '%Y';
+            } elseif ($trendInterval === 'weekly' && $daysDiff <= 35) {
+                // Mingguan Hybrid 6 Hari Kerja (Senin - Sabtu, Minggu Off)
+                $intervalType = 'minggu';
+                $mCode = date('M', strtotime($startDate));
+                $monthStart = date('Y-m-01', strtotime($startDate));
+                $monthEnd   = date('Y-m-t', strtotime($startDate));
+
+                // Hitung awal W1
+                $firstDayDt = new DateTime($monthStart);
+                $firstDayDow = (int)$firstDayDt->format('N'); // 1 = Mon, ..., 7 = Sun
+
+                if ($weeklyMode === 'full_week') {
+                    // Tarik ke hari Senin terdekat (bisa di akhir bulan sebelumnya)
+                    $w1StartDt = clone $firstDayDt;
+                    if ($firstDayDow > 1) {
+                        $w1StartDt->modify('-' . ($firstDayDow - 1) . ' days');
+                    }
+                } else {
+                    // Cut-off: mulai tepat di tgl 1 (kecuali tgl 1 hari Minggu, mulai Senin tgl 2)
+                    $w1StartDt = clone $firstDayDt;
+                    if ($firstDayDow === 7) {
+                        $w1StartDt->modify('+1 day');
+                    }
+                }
+
+                // Susun bucket mingguan (Senin - Sabtu)
+                $weeklyBuckets = [];
+                $curStart = clone $w1StartDt;
+                $wIdx = 1;
+
+                while ($curStart->format('Y-m-d') <= $monthEnd && $wIdx <= 6) {
+                    $curDow = (int)$curStart->format('N');
+                    if ($curDow === 7) {
+                        $curStart->modify('+1 day');
+                        continue;
+                    }
+
+                    // Akhir minggu adalah Sabtu (atau akhir bulan jika mode cutoff)
+                    $curEnd = clone $curStart;
+                    $daysToSat = 6 - (int)$curEnd->format('N');
+                    if ($daysToSat > 0) {
+                        $curEnd->modify("+{$daysToSat} days");
+                    }
+
+                    if ($weeklyMode === 'cutoff' && $curEnd->format('Y-m-d') > $monthEnd) {
+                        $curEnd = new DateTime($monthEnd);
+                        // Jika tgl akhir bulan adalah hari Minggu, mundurkan ke Sabtu
+                        if ((int)$curEnd->format('N') === 7) {
+                            $curEnd->modify('-1 day');
+                        }
+                    }
+
+                    $sStr = $curStart->format('Y-m-d');
+                    $eStr = $curEnd->format('Y-m-d');
+
+                    if ($sStr <= $eStr) {
+                        $sLabel = $curStart->format('d');
+                        $eLabel = $curEnd->format('d');
+                        $sMonth = $curStart->format('M');
+                        $eMonth = $curEnd->format('M');
+
+                        if ($sMonth === $eMonth) {
+                            $lblText = "W{$wIdx} ({$sLabel}-{$eLabel} {$sMonth})";
+                        } else {
+                            $lblText = "W{$wIdx} ({$sLabel} {$sMonth} - {$eLabel} {$eMonth})";
+                        }
+
+                        $weeklyBuckets["W{$wIdx}"] = [
+                            'key'        => "W{$wIdx}",
+                            'label'      => $lblText,
+                            'start_date' => $sStr,
+                            'end_date'   => $eStr
+                        ];
+                        $trendMap["W{$wIdx}"] = ['label' => $lblText, 'pcs' => 0, 'lot' => 0];
+                        $wIdx++;
+                    }
+
+                    // Lanjut ke hari Senin berikutnya
+                    $nextMon = clone $curStart;
+                    $nextMon->modify('+7 days');
+                    // Pastikan jatuh pada hari Senin
+                    $nDow = (int)$nextMon->format('N');
+                    if ($nDow > 1) {
+                        $nextMon->modify('-' . ($nDow - 1) . ' days');
+                    }
+                    $curStart = $nextMon;
+                }
+
+                // Query summary table
+                $effectiveStart = ($weeklyMode === 'full_week' && !empty($weeklyBuckets['W1'])) ? $weeklyBuckets['W1']['start_date'] : $startDate;
+                $effectiveEnd   = $endDate;
+
+                $wSumTWeekly = [
+                    "dds.summary_date >= :w_sd AND dds.summary_date <= :w_ed"
+                ];
+                $pSumTWeekly = [
+                    ':w_sd' => $effectiveStart,
+                    ':w_ed' => $effectiveEnd
+                ];
+                if ($defectId > 0) {
+                    $wSumTWeekly[] = "dds.defect_type_id = :w_defId";
+                    $pSumTWeekly[':w_defId'] = $defectId;
+                }
+                if ($partId !== null && $partId > 0) {
+                    $wSumTWeekly[] = "dds.part_id = :w_pId";
+                    $pSumTWeekly[':w_pId'] = $partId;
+                } elseif ($modelId !== null) {
+                    if ($modelId > 0) {
+                        $wSumTWeekly[] = "dds.model_id = :w_mId";
+                        $pSumTWeekly[':w_mId'] = $modelId;
+                    } else {
+                        $wSumTWeekly[] = "(dds.model_id IS NULL OR dds.model_id = 0)";
+                    }
+                }
+                if ($customer !== '') {
+                    $wSumTWeekly[] = "dds.customer = :w_cust";
+                    $pSumTWeekly[':w_cust'] = $customer;
+                }
+                $wSumTWeeklySql = implode(' AND ', $wSumTWeekly);
+
+                $sqlSumT = "SELECT 
+                                dds.summary_date,
+                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                COALESCE(SUM(dds.lot_count), 0) as total_lots
+                            FROM oqc_daily_defect_summary dds
+                            WHERE {$wSumTWeeklySql}
+                            GROUP BY dds.summary_date";
+                $stmtSumT = $pdo->prepare($sqlSumT);
+                $stmtSumT->execute($pSumTWeekly);
+                foreach ($stmtSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $sDate = $r['summary_date'];
+                    $dow = (int)date('N', strtotime($sDate));
+                    if ($dow === 7) continue; // Abaikan hari Minggu (6 hari kerja)
+
+                    foreach ($weeklyBuckets as $wbKey => $wb) {
+                        if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
+                            $trendMap[$wbKey]['pcs'] += (int)$r['total_pcs'];
+                            $trendMap[$wbKey]['lot'] += (int)$r['total_lots'];
+                            break;
+                        }
+                    }
+                }
+
+                $dateFormat = 'weekly_bucket';
             } elseif ($daysDiff <= 90) {
                 $intervalType = 'hari';
                 $startPeriod = new DateTime($startDate);
@@ -1181,20 +1349,22 @@ try {
                 $dateFormat = '%Y-%m';
             }
 
-            $sqlSumT = "SELECT 
-                            DATE_FORMAT(dds.summary_date, '{$dateFormat}') as time_key,
-                            COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
-                            COALESCE(SUM(dds.lot_count), 0) as total_lots
-                        FROM oqc_daily_defect_summary dds
-                        WHERE {$wSumTSql}
-                        GROUP BY time_key";
-            $stmtSumT = $pdo->prepare($sqlSumT);
-            $stmtSumT->execute($pSumT);
-            foreach ($stmtSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                $tk = $r['time_key'];
-                if (isset($trendMap[$tk])) {
-                    $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
-                    $trendMap[$tk]['lot'] = (int)$r['total_lots'];
+            if ($dateFormat !== 'weekly_bucket') {
+                $sqlSumT = "SELECT 
+                                DATE_FORMAT(dds.summary_date, '{$dateFormat}') as time_key,
+                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
+                                COALESCE(SUM(dds.lot_count), 0) as total_lots
+                            FROM oqc_daily_defect_summary dds
+                            WHERE {$wSumTSql}
+                            GROUP BY time_key";
+                $stmtSumT = $pdo->prepare($sqlSumT);
+                $stmtSumT->execute($pSumT);
+                foreach ($stmtSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $tk = $r['time_key'];
+                    if (isset($trendMap[$tk])) {
+                        $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
+                        $trendMap[$tk]['lot'] = (int)$r['total_lots'];
+                    }
                 }
             }
 
@@ -1226,8 +1396,9 @@ try {
                 }
                 $wActTSql = implode(' AND ', $wActT);
 
+                $dateActFormat = ($dateFormat === 'weekly_bucket') ? '%Y-%m-%d' : $dateFormat;
                 $sqlActT = "SELECT 
-                                DATE_FORMAT(s.started_at, '{$dateFormat}') as time_key,
+                                DATE_FORMAT(s.started_at, '{$dateActFormat}') as time_key,
                                 COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
                                 COUNT(DISTINCT s.id) as total_lots
                             FROM inspection_ng_records ngr
@@ -1239,10 +1410,24 @@ try {
                 $stActT = $pdo->prepare($sqlActT);
                 $stActT->execute($pActT);
                 foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $tk = $r['time_key'];
-                    if (isset($trendMap[$tk])) {
-                        $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                        $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                    if ($dateFormat === 'weekly_bucket') {
+                        $sDate = $r['time_key'];
+                        $dow = (int)date('N', strtotime($sDate));
+                        if ($dow === 7) continue; // Abaikan hari Minggu
+
+                        foreach ($weeklyBuckets as $wbKey => $wb) {
+                            if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
+                                $trendMap[$wbKey]['pcs'] += (int)$r['total_pcs'];
+                                $trendMap[$wbKey]['lot'] += (int)$r['total_lots'];
+                                break;
+                            }
+                        }
+                    } else {
+                        $tk = $r['time_key'];
+                        if (isset($trendMap[$tk])) {
+                            $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
+                            $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                        }
                     }
                 }
             }
@@ -1787,6 +1972,32 @@ try {
         $res['part_code'] = $partMeta['part_code'];
         $res['part_name'] = $partMeta['part_name'];
         $res['model_name'] = $partMeta['model_name'] ?: 'General Model';
+
+        // Attach threshold targets for defects in table
+        $stmtGlobDef = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'global_defect' AND reference_id IS NULL LIMIT 1");
+        $stmtGlobDef->execute();
+        $globDefVal = $stmtGlobDef->fetchColumn();
+        $globDefVal = ($globDefVal !== false) ? (float)$globDefVal : null;
+
+        $stmtSpecDef = $pdo->prepare("SELECT reference_id, threshold_val FROM defect_threshold_targets WHERE target_type = 'specific_defect'");
+        $stmtSpecDef->execute();
+        $specDefMap = $stmtSpecDef->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        foreach ($res['items'] as &$it) {
+            $itemId = $it['item_id'] ?? null;
+            if ($itemId && isset($specDefMap[$itemId])) {
+                $it['threshold_val'] = (float)$specDefMap[$itemId];
+                $it['is_specific_threshold'] = true;
+            } elseif ($globDefVal !== null) {
+                $it['threshold_val'] = $globDefVal;
+                $it['is_specific_threshold'] = false;
+            } else {
+                $it['threshold_val'] = null;
+                $it['is_specific_threshold'] = false;
+            }
+        }
+        unset($it);
+
         echo json_encode($res);
         exit;
 
@@ -2206,14 +2417,6 @@ try {
                         </span>
                     </td>
                     <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:12px;font-family:monospace;">
-                            <?= htmlspecialchars($row['part_code']) ?>
-                        </div>
-                        <span style="font-size:11px;color:#64748b;">
-                            <?= htmlspecialchars($row['part_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
                         <span style="display:inline-block;padding:2px 7px;border-radius:5px;background:#f1f5f9;color:#334155;border:1px solid #e2e8f0;font-size:11px;font-weight:700;">
                             <?= htmlspecialchars($row['model_name']) ?>
                         </span>
@@ -2270,6 +2473,235 @@ try {
             'count'              => count($rows),
             'html'               => $html,
             'filteredDefectName' => $filteredDefectName
+        ]);
+        exit;
+    } elseif ($action === 'get_threshold') {
+        $mode   = sanitize($_GET['mode'] ?? 'overview');
+        $itemId = isset($_GET['item_id']) && is_numeric($_GET['item_id']) ? (int)$_GET['item_id'] : 0;
+
+        $globalType   = ($mode === 'overview') ? 'global_defect' : 'global_part';
+        $specificType = ($mode === 'overview') ? 'specific_defect' : 'specific_part';
+
+        // Check specific threshold
+        $specificVal = null;
+        if ($itemId > 0) {
+            $stmtSpec = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = :tt AND reference_id = :refId LIMIT 1");
+            $stmtSpec->execute([':tt' => $specificType, ':refId' => $itemId]);
+            $specificRow = $stmtSpec->fetch(PDO::FETCH_ASSOC);
+            if ($specificRow !== false) {
+                $specificVal = (float)$specificRow['threshold_val'];
+            }
+        }
+
+        // Check global threshold
+        $globalVal = null;
+        $stmtGlob = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = :tt AND reference_id IS NULL LIMIT 1");
+        $stmtGlob->execute([':tt' => $globalType]);
+        $globalRow = $stmtGlob->fetch(PDO::FETCH_ASSOC);
+        if ($globalRow !== false) {
+            $globalVal = (float)$globalRow['threshold_val'];
+        }
+
+        $effectiveThreshold = null;
+        $isSpecific = false;
+
+        if ($specificVal !== null) {
+            $effectiveThreshold = $specificVal;
+            $isSpecific = true;
+        } elseif ($globalVal !== null) {
+            $effectiveThreshold = $globalVal;
+            $isSpecific = false;
+        }
+
+        echo json_encode([
+            'success'          => true,
+            'threshold'        => $effectiveThreshold,
+            'is_specific'      => $isSpecific,
+            'specific_val'     => $specificVal,
+            'global_val'       => $globalVal
+        ]);
+        exit;
+
+    } elseif ($action === 'get_all_item_thresholds') {
+        $mode = sanitize($_GET['mode'] ?? 'overview');
+        $globalType   = ($mode === 'overview') ? 'global_defect' : 'global_part';
+        $specificType = ($mode === 'overview') ? 'specific_defect' : 'specific_part';
+
+        // 1. Fetch global value
+        $stmtGlob = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = :tt AND reference_id IS NULL LIMIT 1");
+        $stmtGlob->execute([':tt' => $globalType]);
+        $globalRow = $stmtGlob->fetch(PDO::FETCH_ASSOC);
+        $globalVal = ($globalRow !== false) ? (float)$globalRow['threshold_val'] : null;
+
+        // 2. Fetch all items with their specific threshold
+        $items = [];
+        if ($mode === 'overview') {
+            $sql = "SELECT dt.id, dt.name, dtt.threshold_val AS specific_val
+                    FROM defect_types dt
+                    LEFT JOIN defect_threshold_targets dtt 
+                           ON dtt.target_type = :tt AND dtt.reference_id = dt.id
+                    ORDER BY dt.name ASC";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([':tt' => $specificType]);
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $hasSpec = ($row['specific_val'] !== null);
+                $currVal = $hasSpec ? (float)$row['specific_val'] : $globalVal;
+                $items[] = [
+                    'id'          => (int)$row['id'],
+                    'name'        => $row['name'],
+                    'code'        => '',
+                    'current_val' => $currVal,
+                    'is_specific' => $hasSpec,
+                    'has_target'  => ($currVal !== null)
+                ];
+            }
+        } else {
+            $sql = "SELECT mp.id, mp.part_code, mp.part_name, dtt.threshold_val AS specific_val
+                    FROM master_parts mp
+                    LEFT JOIN defect_threshold_targets dtt 
+                           ON dtt.target_type = :tt AND dtt.reference_id = mp.id
+                    ORDER BY mp.part_code ASC, mp.part_name ASC";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([':tt' => $specificType]);
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                $hasSpec = ($row['specific_val'] !== null);
+                $currVal = $hasSpec ? (float)$row['specific_val'] : $globalVal;
+                $items[] = [
+                    'id'          => (int)$row['id'],
+                    'name'        => $row['part_name'],
+                    'code'        => $row['part_code'],
+                    'current_val' => $currVal,
+                    'is_specific' => $hasSpec,
+                    'has_target'  => ($currVal !== null)
+                ];
+            }
+        }
+
+        echo json_encode([
+            'success'    => true,
+            'mode'       => $mode,
+            'global_val' => $globalVal,
+            'items'      => $items
+        ]);
+        exit;
+
+    } elseif ($action === 'save_threshold') {
+        // Enforce POST method for mutation
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            echo json_encode(['success' => false, 'message' => 'Metode request harus POST']);
+            exit;
+        }
+
+        $inputData = json_decode(file_get_contents('php://input'), true) ?? $_POST;
+
+        $mode    = sanitize($inputData['mode'] ?? 'overview');
+        $itemId  = isset($inputData['item_id']) && is_numeric($inputData['item_id']) ? (int)$inputData['item_id'] : 0;
+        $scope   = sanitize($inputData['scope'] ?? 'specific'); // 'specific' | 'all' | 'batch'
+        $itemIds = isset($inputData['item_ids']) && is_array($inputData['item_ids']) ? array_map('intval', $inputData['item_ids']) : [];
+        $doClear = !empty($inputData['clear']);
+        $rawVal  = isset($inputData['value']) ? (float)$inputData['value'] : 0;
+
+        $targetType = ($mode === 'overview') ? 'specific_defect' : 'specific_part';
+        $globalTargetType = ($mode === 'overview') ? 'global_defect' : 'global_part';
+
+        $userId = $_SESSION['user']['id'] ?? null;
+
+        // CASE 1: BATCH ITEMS SAVE / CLEAR
+        if ($scope === 'batch') {
+            if (empty($itemIds)) {
+                echo json_encode(['success' => false, 'message' => 'Tidak ada item yang dipilih untuk batch target']);
+                exit;
+            }
+
+            if ($doClear || $rawVal <= 0) {
+                // Delete specific target for all selected item_ids
+                $placeholders = implode(',', array_fill(0, count($itemIds), '?'));
+                $stmtDel = $pdo->prepare("DELETE FROM defect_threshold_targets WHERE target_type = ? AND reference_id IN ($placeholders)");
+                $params = array_merge([$targetType], $itemIds);
+                $stmtDel->execute($params);
+
+                echo json_encode(['success' => true, 'message' => count($itemIds) . ' item batas target berhasil dihapus / dikembalikan ke default']);
+                exit;
+            } else {
+                // Batch Upsert
+                $stmtUpsert = $pdo->prepare("INSERT INTO defect_threshold_targets (target_type, reference_id, threshold_val, created_by, updated_at)
+                                             VALUES (?, ?, ?, ?, NOW())
+                                             ON DUPLICATE KEY UPDATE threshold_val = ?, updated_at = NOW()");
+                $pdo->beginTransaction();
+                try {
+                    foreach ($itemIds as $bId) {
+                        if ($bId > 0) {
+                            $stmtUpsert->execute([$targetType, $bId, $rawVal, $userId, $rawVal]);
+                        }
+                    }
+                    $pdo->commit();
+                } catch (Exception $eBatch) {
+                    $pdo->rollBack();
+                    throw $eBatch;
+                }
+
+                echo json_encode([
+                    'success'   => true,
+                    'message'   => count($itemIds) . ' item berhasil disetel ke target: ' . $rawVal,
+                    'threshold' => $rawVal,
+                    'count'     => count($itemIds)
+                ]);
+                exit;
+            }
+        }
+
+        // CASE 2: SINGLE SPECIFIC OR ALL (GLOBAL)
+        if ($scope === 'all') {
+            $targetType  = $globalTargetType;
+            $referenceId = null;
+        } else {
+            $referenceId = $itemId;
+            if (!$referenceId || $referenceId <= 0) {
+                echo json_encode(['success' => false, 'message' => 'Item ID tidak valid untuk target spesifik']);
+                exit;
+            }
+        }
+
+        if ($doClear || $rawVal <= 0) {
+            if ($referenceId === null) {
+                $stmtDel = $pdo->prepare("DELETE FROM defect_threshold_targets WHERE target_type = :tt AND reference_id IS NULL");
+                $stmtDel->execute([':tt' => $targetType]);
+            } else {
+                $stmtDel = $pdo->prepare("DELETE FROM defect_threshold_targets WHERE target_type = :tt AND reference_id = :refId");
+                $stmtDel->execute([':tt' => $targetType, ':refId' => $referenceId]);
+            }
+            echo json_encode(['success' => true, 'message' => 'Batas target berhasil dihapus', 'threshold' => null]);
+            exit;
+        }
+
+        if ($referenceId === null) {
+            $stmtSave = $pdo->prepare("INSERT INTO defect_threshold_targets (target_type, reference_id, threshold_val, created_by, updated_at) 
+                                       VALUES (:tt, NULL, :val, :uid, NOW())
+                                       ON DUPLICATE KEY UPDATE threshold_val = :val2, updated_at = NOW()");
+            $stmtSave->execute([
+                ':tt'   => $targetType,
+                ':val'  => $rawVal,
+                ':uid'  => $userId,
+                ':val2' => $rawVal
+            ]);
+        } else {
+            $stmtSave = $pdo->prepare("INSERT INTO defect_threshold_targets (target_type, reference_id, threshold_val, created_by, updated_at) 
+                                       VALUES (:tt, :refId, :val, :uid, NOW())
+                                       ON DUPLICATE KEY UPDATE threshold_val = :val2, updated_at = NOW()");
+            $stmtSave->execute([
+                ':tt'    => $targetType,
+                ':refId' => $referenceId,
+                ':val'   => $rawVal,
+                ':uid'   => $userId,
+                ':val2'  => $rawVal
+            ]);
+        }
+
+        echo json_encode([
+            'success'   => true, 
+            'message'   => 'Batas target berhasil disimpan', 
+            'threshold' => $rawVal,
+            'scope'     => $scope
         ]);
         exit;
     }

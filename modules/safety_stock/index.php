@@ -62,11 +62,65 @@ if ($pdo) {
         }
 
         if (!empty($search)) {
-            $where[] = "(did.part_code LIKE :s1 OR did.part_name LIKE :s2 OR ki.item_code LIKE :s3 OR ki.item_description LIKE :s4)";
-            $params[':s1'] = '%' . $search . '%';
-            $params[':s2'] = '%' . $search . '%';
-            $params[':s3'] = '%' . $search . '%';
-            $params[':s4'] = '%' . $search . '%';
+            // Deteksi & Parsing Barcode QR Label Scanner (Format: Z1partCode|Z2lotNumber|Z3qty|Z4line|Z5refNumber)
+            $qrPart = '';
+            $qrLot  = '';
+            $qrRef  = '';
+            if (strpos($search, '|') !== false || str_starts_with($search, 'Z1') || str_starts_with($search, 'Z2') || str_starts_with($search, 'Z5')) {
+                $parts = explode('|', $search);
+                foreach ($parts as $p) {
+                    $p = trim($p);
+                    if (str_starts_with($p, 'Z1')) $qrPart = substr($p, 2);
+                    if (str_starts_with($p, 'Z2')) $qrLot  = substr($p, 2);
+                    if (str_starts_with($p, 'Z5')) $qrRef  = substr($p, 2);
+                }
+            }
+
+            if (!empty($qrRef) || !empty($qrLot) || !empty($qrPart)) {
+                $qrConds = [];
+                if (!empty($qrPart)) {
+                    $qrConds[] = "(did.part_code LIKE :qr_part OR ki.item_code LIKE :qr_part_ki)";
+                    $params[':qr_part'] = '%' . $qrPart . '%';
+                    $params[':qr_part_ki'] = '%' . $qrPart . '%';
+                }
+                if (!empty($qrLot)) {
+                    $qrConds[] = "(did.lot_number LIKE :qr_lot OR EXISTS (
+                        SELECT 1 FROM inspection_session_lots isl_qr 
+                        WHERE isl_qr.inspection_session_id = ss.id 
+                          AND isl_qr.lot_number LIKE :qr_lot_isl
+                    ))";
+                    $params[':qr_lot'] = '%' . $qrLot . '%';
+                    $params[':qr_lot_isl'] = '%' . $qrLot . '%';
+                }
+                if (!empty($qrRef)) {
+                    $qrConds[] = "EXISTS (
+                        SELECT 1 FROM inspection_session_lots isl_ref 
+                        WHERE isl_ref.inspection_session_id = ss.id 
+                          AND isl_ref.ref_number LIKE :qr_ref
+                    )";
+                    $params[':qr_ref'] = '%' . $qrRef . '%';
+                }
+                $where[] = "(" . implode(' AND ', $qrConds) . ")";
+            } else {
+                $where[] = "(
+                    did.part_code LIKE :s1 
+                    OR did.part_name LIKE :s2 
+                    OR ki.item_code LIKE :s3 
+                    OR ki.item_description LIKE :s4
+                    OR EXISTS (
+                        SELECT 1 FROM inspection_session_lots isl_s 
+                        WHERE isl_s.inspection_session_id = ss.id 
+                          AND (isl_s.ref_number LIKE :s5 OR isl_s.lot_number LIKE :s6)
+                    )
+                )";
+                $like = '%' . $search . '%';
+                $params[':s1'] = $like;
+                $params[':s2'] = $like;
+                $params[':s3'] = $like;
+                $params[':s4'] = $like;
+                $params[':s5'] = $like;
+                $params[':s6'] = $like;
+            }
         }
 
         if (!empty($customer)) {
@@ -294,9 +348,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; overflow-x: auto; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
             <form action="<?= base_url('modules/safety_stock/index.php') ?>" method="GET" style="display: flex; align-items: center; gap: 8px; min-width: 880px;">
                 
-                <!-- Search Input -->
-                <div style="width: 230px; flex-shrink: 0;">
-                    <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Cari Kode atau Nama Part..." style="width: 100%; padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #1e293b; font-weight: 500; outline: none;">
+                <!-- Search Input with Barcode/QR Scanner support -->
+                <div style="width: 260px; flex-shrink: 0; position: relative;">
+                    <input type="text" id="safetyStockSearchInput" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Scan QR atau Cari Part, Lot, Ref..." 
+                           onkeydown="handleSafetyStockSearchScan(event)"
+                           style="width: 100%; padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #1e293b; font-weight: 500; outline: none;">
                 </div>
 
                 <!-- Customer Filter -->
@@ -557,5 +613,48 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         </div>
 
     </main>
+
+    <script>
+    // ── Helper: Parser QR Code Scanner Label Pabrik ─────────────────────────
+    function parseSafetyStockQR(raw) {
+        var obj = {};
+        if (!raw) return obj;
+        var parts = raw.split('|');
+        parts.forEach(function(p) {
+            p = p.trim();
+            if (p.startsWith('Z1')) obj.Z1 = p.substring(2);
+            if (p.startsWith('Z2')) obj.Z2 = p.substring(2);
+            if (p.startsWith('Z3')) {
+                var valZ3 = parseInt(p.substring(2), 10);
+                if (!isNaN(valZ3) && valZ3 > 0) obj.Z3 = valZ3;
+            }
+            if (p.startsWith('Z4')) obj.Z4 = p.substring(2);
+            if (p.startsWith('Z5')) obj.Z5 = p.substring(2);
+        });
+        return obj;
+    }
+
+    // Handler untuk Scanner Barcode pada Kotak Pencarian Safety Stock
+    function handleSafetyStockSearchScan(e) {
+        if (e.key === 'Enter') {
+            var input = document.getElementById('safetyStockSearchInput');
+            if (!input) return;
+            var val = input.value.trim();
+            if (val.includes('|') || val.startsWith('Z1') || val.startsWith('Z2') || val.startsWith('Z5')) {
+                var qr = parseSafetyStockQR(val);
+                // Utamakan Part Code (Z1) karena halaman ini mengelompokkan safety stock per part,
+                // atau Ref No (Z5) / Lot No (Z2)
+                if (qr.Z1) {
+                    input.value = qr.Z1;
+                } else if (qr.Z5) {
+                    input.value = qr.Z5;
+                } else if (qr.Z2) {
+                    input.value = qr.Z2;
+                }
+            }
+            // Biarkan form di-submit secara otomatis
+        }
+    }
+    </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

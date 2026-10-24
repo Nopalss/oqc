@@ -513,9 +513,12 @@ $itemPositionInBatch = [];
 // Stats default
 $stats = [
     'total_kanban'         => 0,
+    'uncompleted_count'    => 0,
     'uninspected_count'    => 0,
+    'partial_count'        => 0,
     'in_progress_count'    => 0,
     'completed_count'      => 0,
+    'remain_count'         => 0,
     'rejected_count'       => 0,
     'in_progress_sessions' => 0,
     // Safety Stock specific stats
@@ -931,6 +934,26 @@ if ($pdo) {
                         SELECT 1 FROM inspection_sessions s_chk WHERE s_chk.kanban_item_id = k.id AND s_chk.status IN ('in_progress', 'rejected')
                     ) THEN 1 ELSE 0 END) as uninspected_count,
                     SUM(CASE 
+                        WHEN (k.status = 'partial' OR (COALESCE((
+                            SELECT SUM(CASE 
+                                WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                    COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                              FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                ELSE 0
+                            END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                        ), 0) > 0 AND COALESCE((
+                            SELECT SUM(CASE 
+                                WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                    COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                              FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                ELSE 0
+                            END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                        ), 0) < k.qty))
+                        AND k.status != 'completed'
+                        THEN 1 ELSE 0 END) as partial_count,
+                    SUM(CASE 
                         WHEN (k.status != 'completed')
                              AND NOT (COALESCE((
                                  SELECT SUM(CASE 
@@ -995,13 +1018,37 @@ if ($pdo) {
             if ($statRow) {
                 $stats['total_kanban']            = (int)($statRow['total_kanban'] ?? 0);
                 $stats['uninspected_count']       = (int)($statRow['uninspected_count'] ?? 0);
+                $stats['partial_count']           = (int)($statRow['partial_count'] ?? 0);
+                $stats['uncompleted_count']       = $stats['uninspected_count'] + $stats['partial_count'];
                 $stats['in_progress_count']       = (int)($statRow['in_progress_count'] ?? 0);
                 $stats['completed_count']         = (int)($statRow['completed_count'] ?? 0);
+                $stats['remain_count']            = (int)$pendingYesterdayCount;
                 $stats['rejected_count']          = (int)($statRow['rejected_count'] ?? 0);
                 $stats['kanban_today_count']      = (int)($statRow['kanban_today_count'] ?? 0);
                 $stats['kanban_carryover_count']  = (int)($statRow['kanban_carryover_count'] ?? 0);
                 $stats['kanban_today_uninspected']= (int)($statRow['kanban_today_uninspected'] ?? 0);
                 $stats['kanban_today_completed']  = (int)($statRow['kanban_today_completed'] ?? 0);
+            }
+
+            // Hitung sesi in_progress global (termasuk kanban remain/kemarin) agar kartu Sedang Dikerjakan selalu akurat
+            try {
+                $stmtGlobalInProgress = $pdo->prepare("
+                    SELECT COUNT(DISTINCT k.id)
+                    FROM kanban_items k
+                    JOIN inspection_sessions s_act ON s_act.kanban_item_id = k.id AND s_act.status = 'in_progress'
+                    WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
+                      AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+                      AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+                      AND (k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))
+                      AND k.status != 'completed'
+                ");
+                $stmtGlobalInProgress->execute();
+                $globalInProgressCount = (int)$stmtGlobalInProgress->fetchColumn();
+                if ($globalInProgressCount > $stats['in_progress_count']) {
+                    $stats['in_progress_count'] = $globalInProgressCount;
+                }
+            } catch (Exception $eGip) {
+                // fallback to $stats['in_progress_count']
             }
 
             // Hitung total Lot NG pada Kanban yang terfilter
@@ -1077,7 +1124,11 @@ if ($pdo) {
             $tableParams = [];
 
             // Scope filter: today vs pending_yesterday berdasarkan $selectedDate
-            if ($scopeFilter === 'today') {
+            // Pengecualian: jika filter status 'in_progress', sertakan juga sesi yang sedang aktif berjalan lintas tanggal
+            if ($statusFilter === 'in_progress') {
+                $tableWhere[] = "(DATE(COALESCE(b.imported_at, k.created_at)) = :kb_filter_sel_date OR EXISTS (SELECT 1 FROM inspection_sessions s_act2 WHERE s_act2.kanban_item_id = k.id AND s_act2.status = 'in_progress'))";
+                $tableParams[':kb_filter_sel_date'] = $selectedDate;
+            } elseif ($scopeFilter === 'today') {
                 $tableWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kb_filter_sel_date";
                 $tableParams[':kb_filter_sel_date'] = $selectedDate;
             } elseif ($scopeFilter === 'pending_yesterday') {
@@ -1085,13 +1136,28 @@ if ($pdo) {
                 $tableParams[':kb_filter_py_date'] = $selectedDate;
             }
 
-            // Batch ID Filter
+            // Batch ID Filter (jika filter in_progress dan batchFilter spesifik, jangan hilangkan kanban yang sedang aktif dikerjakan)
             if ($batchFilter !== 'all' && (int)$batchFilter > 0) {
-                $tableWhere[] = "k.batch_id = :kb_filter_batch_id";
+                if ($statusFilter === 'in_progress') {
+                    $tableWhere[] = "(k.batch_id = :kb_filter_batch_id OR EXISTS (SELECT 1 FROM inspection_sessions s_act3 WHERE s_act3.kanban_item_id = k.id AND s_act3.status = 'in_progress'))";
+                } else {
+                    $tableWhere[] = "k.batch_id = :kb_filter_batch_id";
+                }
                 $tableParams[':kb_filter_batch_id'] = (int)$batchFilter;
             }
 
-            if ($statusFilter === 'uninspected') {
+            if ($statusFilter === 'uncompleted') {
+                $tableWhere[] = "k.status != 'completed' 
+                    AND NOT (COALESCE((
+                        SELECT SUM(CASE 
+                            WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                          FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                            WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                            ELSE 0
+                        END) FROM inspection_sessions s2 WHERE s2.kanban_item_id = k.id
+                    ), 0) >= k.qty AND k.qty > 0)";
+            } elseif ($statusFilter === 'uninspected') {
                 $tableWhere[] = "k.status = 'uninspected' AND NOT EXISTS (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = k.id AND s_act.status = 'in_progress')";
             } elseif ($statusFilter === 'in_progress') {
                 $tableWhere[] = "k.status != 'completed' 
@@ -1211,9 +1277,9 @@ if ($pdo) {
                                CASE 
                                    WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
                                        COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
-                                                 FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                                 FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0)
                                    WHEN s2.status = 'passed' THEN
-                                       (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                       s2.total_scanned_qty
                                    ELSE 0
                                END
                            )
@@ -1558,6 +1624,12 @@ if ($pdo) {
                     LEFT JOIN users u ON u.id = s.inspector_id
                     WHERE s.kanban_item_id IN ($inKanbanIds)
                       AND s.inspector_id = {$currentUserId}
+                      -- Sembunyikan sesi virtual (sisa split / alokasi) agar hanya inspeksi fisik asli yang tampil
+                      AND (isl.remarks IS NULL OR (
+                          isl.remarks NOT LIKE '%Sisa Split Safety Stock%'
+                          AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%'
+                          AND isl.remarks NOT LIKE '%Alokasi Safety Stock%'
+                      ))
                       {$sessWherePeriod}
                     ORDER BY isl.id DESC
                 ";
@@ -1665,7 +1737,12 @@ if ($pdo) {
                     isl.id AS lot_id,
                     isl.lot_number,
                     isl.ref_number,
-                    isl.qty AS qty_used,
+                    -- Qty yang benar-benar diambil dari SS (bukan qty fisik label box)
+                    CASE
+                        WHEN COALESCE(s.use_safety_stock_qty, 0) > 0 THEN s.use_safety_stock_qty
+                        ELSE GREATEST(0, isl.qty - COALESCE(s.excess_qty, 0))
+                    END AS qty_used,
+                    isl.qty AS label_qty,
                     isl.remarks,
                     isl.lot_result,
                     isl.lot_status,
@@ -2797,9 +2874,26 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             margin-top: 2px !important;
             margin-bottom: 2px !important;
         }
+        .kpi-grid-6cols {
+            display: grid !important;
+            grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+            gap: 8px !important;
+            margin-top: 2px !important;
+            margin-bottom: 2px !important;
+        }
+        @media (max-width: 1280px) {
+            .kpi-grid-6cols {
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            }
+        }
         @media (max-width: 1024px) {
             .kpi-grid-5cols {
                 grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) !important;
+            }
+        }
+        @media (max-width: 640px) {
+            .kpi-grid-6cols {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
             }
         }
         .kpi-card {
@@ -2833,6 +2927,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             background: linear-gradient(135deg, #dcfce7 0%, #d1fae5 100%) !important;
             border: 1px solid #86efac !important;
             border-left: 4.5px solid #10b981 !important;
+        }
+        .kpi-card-remain {
+            background: linear-gradient(135deg, #ede9fe 0%, #e0e7ff 100%) !important;
+            border: 1px solid #c7d2fe !important;
+            border-left: 4.5px solid #6366f1 !important;
         }
         .kpi-card-rejected {
             background: linear-gradient(135deg, #ffe4e6 0%, #fecdd3 100%) !important;
@@ -3844,23 +3943,26 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <?php else: ?>
             <!-- KPI KANBAN DELIVERY (RICH CARDS) -->
             <?php
-            $buildKpiUrl = function($targetStatus) use ($activeTab, $period, $selectedDate, $scopeFilter, $batchFilter, $orderFilter, $sourceFilter, $search) {
+            $buildKpiUrl = function($targetStatus, $customScope = null) use ($activeTab, $period, $selectedDate, $scopeFilter, $batchFilter, $orderFilter, $sourceFilter, $search) {
                 $params = [
                     'tab'           => 'kanban',
                     'status'        => $targetStatus,
                     'period'        => $period,
                     'selected_date' => $selectedDate,
-                    'scope'         => $scopeFilter,
+                    'scope'         => $customScope !== null ? $customScope : $scopeFilter,
                     'batch_id'      => $batchFilter,
                     'order_by'      => $orderFilter,
                 ];
+                if ($customScope === 'pending_yesterday') {
+                    $params['batch_id'] = 'all';
+                }
                 if ($sourceFilter !== 'all') $params['source'] = $sourceFilter;
                 if (!empty($search)) $params['search'] = $search;
                 return '?' . http_build_query($params);
             };
             ?>
-            <div class="kpi-grid-5cols">
-                <!-- Stat 1: Total -->
+            <div class="kpi-grid-6cols">
+                <!-- Stat 1: Total Kanban (Blue Gradient) -->
                 <a href="<?= $buildKpiUrl('all') ?>" 
                    class="kpi-card kpi-card-total"
                    title="Klik untuk tampilkan semua status">
@@ -3876,28 +3978,31 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </a>
 
-                <!-- Stat 2: Belum Mulai -->
-                <a href="<?= $buildKpiUrl('uninspected') ?>" 
+                <!-- Stat 2: Belum Selesai (Slate Gradient) -->
+                <a href="<?= $buildKpiUrl('uncompleted') ?>" 
                    class="kpi-card kpi-card-uninspected"
-                   title="Klik untuk filter Belum Mulai">
+                   title="Klik untuk filter Belum Selesai (Total Belum Mulai + Parsial)">
                     <div class="flex items-center justify-between gap-1">
-                        <div class="text-[9px] font-extrabold text-slate-700 uppercase tracking-wider">BELUM MULAI</div>
+                        <div class="text-[9px] font-extrabold text-slate-700 uppercase tracking-wider">BELUM SELESAI</div>
                         <span class="w-5 h-5 rounded bg-slate-200 text-slate-700 flex items-center justify-center flex-shrink-0">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                         </span>
                     </div>
                     <div class="mt-1 flex items-baseline">
-                        <span class="kpi-stat-value text-slate-800"><?= number_format($stats['uninspected_count']) ?></span>
+                        <span class="kpi-stat-value text-slate-800"><?= number_format($stats['uncompleted_count']) ?></span>
                         <span class="kpi-stat-unit text-slate-600">Kanban</span>
+                    </div>
+                    <div class="text-[8.5px] text-slate-500 font-semibold mt-0.5 leading-tight truncate">
+                        <?= number_format($stats['uninspected_count']) ?> Belum Mulai &bull; <?= number_format($stats['partial_count']) ?> Parsial
                     </div>
                 </a>
 
-                <!-- Stat 3: Berjalan -->
+                <!-- Stat 3: Sedang Dikerjakan (Amber Gradient) -->
                 <a href="<?= $buildKpiUrl('in_progress') ?>" 
                    class="kpi-card kpi-card-progress"
-                   title="Klik untuk filter Sedang Berjalan">
+                   title="Klik untuk filter Sedang Dikerjakan">
                     <div class="flex items-center justify-between gap-1">
-                        <div class="text-[9px] font-extrabold text-amber-900 uppercase tracking-wider">BERJALAN</div>
+                        <div class="text-[9px] font-extrabold text-amber-900 uppercase tracking-wider">SEDANG DIKERJAKAN</div>
                         <span class="w-5 h-5 rounded bg-amber-200/80 text-amber-800 flex items-center justify-center flex-shrink-0 relative">
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping absolute"></span>
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-600"></span>
@@ -3909,7 +4014,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </a>
 
-                <!-- Stat 4: Selesai -->
+                <!-- Stat 4: Selesai (Emerald Gradient) -->
                 <a href="<?= $buildKpiUrl('completed') ?>" 
                    class="kpi-card kpi-card-completed"
                    title="Klik untuk filter Selesai">
@@ -3925,7 +4030,23 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </a>
 
-                <!-- Stat 5: Lot NG / Butuh Tindakan -->
+                <!-- Stat 5: Remain (Tunggakan / Sisa Kemarin - Indigo Gradient) -->
+                <a href="<?= $buildKpiUrl('all', 'pending_yesterday') ?>" 
+                   class="kpi-card kpi-card-remain"
+                   title="Klik untuk melihat Kanban jadwal kemarin yang belum selesai / parsial">
+                    <div class="flex items-center justify-between gap-1">
+                        <div class="text-[9px] font-extrabold text-indigo-900 uppercase tracking-wider">REMAIN</div>
+                        <span class="w-5 h-5 rounded bg-indigo-200/80 text-indigo-800 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                    </div>
+                    <div class="mt-1 flex items-baseline">
+                        <span class="kpi-stat-value text-indigo-950"><?= number_format($pendingYesterdayCount) ?></span>
+                        <span class="kpi-stat-unit text-indigo-700">Kanban</span>
+                    </div>
+                </a>
+
+                <!-- Stat 6: Lot NG / Butuh Tindakan (Rose Gradient) -->
                 <a href="<?= $buildKpiUrl('rejected') ?>" 
                    class="kpi-card kpi-card-rejected"
                    title="Klik untuk filter Kanban yang terdapat Lot NG / Butuh Tindakan">
@@ -6098,6 +6219,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     $passedQty = (int)$k['total_passed_qty'];
                                     
                                     // Hitung passedQty dan deteksi reject dari data lot riil
+                                    // Catatan: $passedQty dari SQL (total_passed_qty) sudah menghitung
+                                    // lot passed+skipped tanpa excess, dan selaras dengan live status API.
+                                    // Loop ini hanya untuk mendeteksi lot rejected.
                                     $calcPassedQty = 0;
                                     $hasAnyRejLot = false;
                                     foreach ($kSessions as $ks) {
@@ -6108,21 +6232,24 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             foreach ($sLotsList as $sl) {
                                                 $slRes = $sl['lot_result'] ?? '';
                                                 $slSt = $sl['lot_status'] ?? '';
-                                                if ($slRes === 'passed' && $slSt !== 'replaced') {
+                                                // Sama persis dengan query SQL: passed OR skipped, bukan replaced
+                                                if (($slRes === 'passed' || $slRes === 'skipped') && $slSt !== 'replaced') {
                                                     $sessLotPass += (int)($sl['qty'] ?? 0);
                                                 }
                                                 if ($slRes === 'rejected' || $slSt === 'rejected' || $slSt === 'ng_found') {
                                                     $hasAnyRejLot = true;
                                                 }
                                             }
-                                            $calcPassedQty += max(0, $sessLotPass - (int)($ks['excess_qty'] ?? 0));
+                                            $calcPassedQty += $sessLotPass;
                                         } elseif (($ks['status'] ?? '') === 'passed') {
-                                            $calcPassedQty += max(0, (int)$ks['total_scanned_qty'] - (int)($ks['excess_qty'] ?? 0));
+                                            $calcPassedQty += (int)$ks['total_scanned_qty'];
                                         }
                                         if (($ks['status'] ?? '') === 'rejected') {
                                             $hasAnyRejLot = true;
                                         }
                                     }
+                                    // Gunakan nilai terbesar antara SQL query (akurat) dan loop PHP (backup)
+                                    // SQL query (total_passed_qty) adalah primary source of truth
                                     if ($calcPassedQty > 0 || !empty($kSessions)) {
                                         $passedQty = max($passedQty, $calcPassedQty);
                                     }
@@ -7017,7 +7144,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
         var lastLiveHash = '';
         var isPolling = false;
-        var pollIntervalMs = 8000;
+        var pollIntervalMs = 12000;
         var syncTimeElem = document.getElementById('live-sync-time');
         var syncIndicator = document.getElementById('live-sync-indicator');
         var baseUrl = '<?= base_url('modules/inspection/') ?>';
@@ -7040,10 +7167,20 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             isPolling = true;
             var url = baseUrl + 'api/get_live_status.php?kanban_ids=' + encodeURIComponent(visibleIds.join(',')) + '&last_hash=' + encodeURIComponent(lastLiveHash);
 
-            fetch(url, { credentials: 'same-origin' })
+            var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+            var fetchTimeout = null;
+            if (controller) {
+                fetchTimeout = setTimeout(function() {
+                    controller.abort();
+                }, 5000); // Batalkan request jika server tidak merespons dalam 5 detik
+            }
+
+            fetch(url, { 
+                credentials: 'same-origin',
+                signal: controller ? controller.signal : undefined
+            })
                 .then(function(res) { return res.json(); })
                 .then(function(data) {
-                    isPolling = false;
                     if (!data || !data.success) return;
 
                     if (syncTimeElem && data.server_time) {
@@ -7258,6 +7395,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     });
                 })
                 .catch(function(err) {
+                    // Timeout atau network error tertangani di finally
+                })
+                .finally(function() {
+                    if (fetchTimeout) clearTimeout(fetchTimeout);
                     isPolling = false;
                 });
         }

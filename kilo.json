@@ -1,0 +1,12 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "model": "ollama/qwen2.5-coder:7b",
+  "provider": {
+    "ollama": {
+      "options": {
+        "baseURL": "http://localhost:11434",
+        "timeout": 300000
+      }
+    }
+  }
+}

@@ -358,6 +358,7 @@ try {
                 echo json_encode([
                     'success' => false,
                     'error_type' => 'already_passed_duplicate',
+                    'is_safety_stock' => true,
                     'message' => "Label Box Ref Number \"{$matchedRef}\" (Part: {$partCode}, Lot: {$lotNumber}) SUDAH PERNAH diinspeksi & dinyatakan PASSED pada {$sessDesc}. Label ini tidak dapat diinspeksi ulang di Safety Stock Gudang!",
                     'session' => $latestRecord,
                     'details' => $latestRecord
@@ -729,13 +730,6 @@ try {
                         'notes'           => $closureRow['notes'],
                         'closed_by'       => $closureRow['closed_by_name'] ?: 'Admin / Supervisor',
                         'closed_at'       => !empty($closureRow['closed_at']) ? date('d M Y, H:i', strtotime($closureRow['closed_at'])) . ' WIB' : '-'
-                    ];
-                } elseif (!empty($latestRecord['chief_notes'])) {
-                    $dispositionInfo = [
-                        'has_disposition' => true,
-                        'notes'           => $latestRecord['chief_notes'],
-                        'closed_by'       => $latestRecord['chief_name'] ?: 'Chief QC / Supervisor',
-                        'closed_at'       => !empty($latestRecord['closed_at']) ? date('d M Y, H:i', strtotime($latestRecord['closed_at'])) . ' WIB' : '-'
                     ];
                 }
             }

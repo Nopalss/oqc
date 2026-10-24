@@ -911,13 +911,15 @@ $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)
 
 // Compute initial dashboard version fingerprint for realtime sync & caching
 $initialDashboardVersion = md5(implode('|', [
-    $rowKpi['total_lots'] ?? 0,
-    $rowKpi['total_sample_size'] ?? 0,
-    $rowKpi['total_ng_samples'] ?? 0,
+    $rSumV['max_sum_id'] ?? 0,
+    $rSumV['last_sum_update'] ?? '',
+    $rSumV['sum_count'] ?? 0,
+    $rSessV['max_sess_id'] ?? 0,
+    $rSessV['sess_count'] ?? 0,
     $startDate,
     $endDate,
     $selectedCustomer,
-    date('YmdH')
+    $dashboardTargetPpm
 ]));
 ?>
 
@@ -2075,6 +2077,17 @@ $initialDashboardVersion = md5(implode('|', [
         }
     }
 
+    function clearDashboardCache() {
+        try {
+            for (var i = localStorage.length - 1; i >= 0; i--) {
+                var k = localStorage.key(i);
+                if (k && k.indexOf('oqc_dash_cache_') === 0) {
+                    localStorage.removeItem(k);
+                }
+            }
+        } catch (e) {}
+    }
+
     function loadDashboardCache() {
         try {
             var key = getDashboardCacheKey();
@@ -2302,7 +2315,11 @@ $initialDashboardVersion = md5(implode('|', [
                     lbl.textContent = (globalTargetPpm > 0) ? Number(globalTargetPpm).toLocaleString() : 'Belum Diatur';
                 }
                 closeTargetPpmModal();
+                clearDashboardCache();
                 initTrendChart(currentChartType, currentMetricScale);
+                if (typeof checkLiveHeartbeat === 'function') {
+                    checkLiveHeartbeat();
+                }
             } else {
                 alert((data && data.message) ? data.message : 'Gagal menyimpan target');
             }
@@ -3769,9 +3786,10 @@ $initialDashboardVersion = md5(implode('|', [
     // ── OQC DASHBOARD REALTIME LIVE ENGINE (SMART HEARTBEAT) ──────────────────
     // ══════════════════════════════════════════════════════════════════════════
     var isLiveSyncActive   = true;
-    var liveSyncIntervalMs = 5000;
+    var liveSyncIntervalMs = 10000; // 10 detik: sangat hemat resource & jaringan
     var liveSyncTimer      = null;
     var isFetchingLiveSync = false;
+    var isCheckingHeartbeat = false;
 
     function animateValue(elemId, endVal) {
         var el = document.getElementById(elemId);
@@ -3796,14 +3814,24 @@ $initialDashboardVersion = md5(implode('|', [
     }
 
     function checkLiveHeartbeat() {
-        if (!isLiveSyncActive || isFetchingLiveSync) return;
+        if (!isLiveSyncActive || isFetchingLiveSync || isCheckingHeartbeat) return;
         if (document.hidden) return; // Tab sedang di background, hemat resource
 
+        isCheckingHeartbeat = true;
         var q = new URLSearchParams(filterParams);
         q.set('v', currentDashboardVersion);
 
+        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var fetchTimeout = null;
+        if (controller) {
+            fetchTimeout = setTimeout(function() {
+                controller.abort();
+            }, 5000); // 5s timeout
+        }
+
         fetch('ajax_heartbeat.php?' + q.toString(), {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            signal: controller ? controller.signal : undefined
         })
         .then(function(res) { return res.json(); })
         .then(function(res) {
@@ -3819,7 +3847,11 @@ $initialDashboardVersion = md5(implode('|', [
             }
         })
         .catch(function(err) {
-            console.warn('[OQC Live Sync] Heartbeat error:', err);
+            // Error atau abort tertangani di finally
+        })
+        .finally(function() {
+            if (fetchTimeout) clearTimeout(fetchTimeout);
+            isCheckingHeartbeat = false;
         });
     }
 
@@ -3836,8 +3868,17 @@ $initialDashboardVersion = md5(implode('|', [
             q.set('_t', Date.now());
         }
 
+        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        var fetchTimeout = null;
+        if (controller) {
+            fetchTimeout = setTimeout(function() {
+                controller.abort();
+            }, 8000); // 8s timeout
+        }
+
         fetch('ajax_get_data.php?' + q.toString(), {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            signal: controller ? controller.signal : undefined
         })
         .then(function(res) { return res.json(); })
         .then(function(data) {
@@ -3850,6 +3891,7 @@ $initialDashboardVersion = md5(implode('|', [
             console.error('[OQC Live Sync] Data refresh failed:', err);
         })
         .finally(function() {
+            if (fetchTimeout) clearTimeout(fetchTimeout);
             isFetchingLiveSync = false;
             if (spinIcon) spinIcon.classList.remove('animate-spin');
         });
