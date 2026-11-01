@@ -395,7 +395,11 @@ try {
             WHERE ss.inspection_type = 'safety_stock'
               AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
               AND (UPPER(did.part_code) = UPPER(:pcode) OR UPPER(ki.item_code) = UPPER(:pcode2))
-              AND UPPER(isl_ss.ref_number) = UPPER(:ref)
+              AND UPPER(isl_ss.lot_number) = UPPER(:lot)
+              AND (
+                  (isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND UPPER(isl_ss.ref_number) = UPPER(:ref))
+                  OR ((isl_ss.ref_number IS NULL OR isl_ss.ref_number = '') AND (:ref_empty IS NULL OR :ref_empty2 = ''))
+              )
             ORDER BY ss.id DESC
             LIMIT 1
         ");
@@ -420,11 +424,15 @@ try {
         ");
 
         foreach ($kPassedLots as $kpLot) {
-            if (empty($kpLot['ref_number']) || empty($kpLot['part_code'])) continue;
+            if (empty($kpLot['lot_number']) || empty($kpLot['part_code'])) continue;
+            $kpRef = $kpLot['ref_number'] ?? '';
             $stmtFindSS->execute([
-                ':pcode'  => $kpLot['part_code'],
-                ':pcode2' => $kpLot['part_code'],
-                ':ref'    => $kpLot['ref_number']
+                ':pcode'      => $kpLot['part_code'],
+                ':pcode2'     => $kpLot['part_code'],
+                ':lot'        => $kpLot['lot_number'],
+                ':ref'        => $kpRef ?: '',
+                ':ref_empty'  => $kpRef ?: null,
+                ':ref_empty2' => $kpRef ?: ''
             ]);
             $ssMatched = $stmtFindSS->fetch(PDO::FETCH_ASSOC);
             if ($ssMatched) {

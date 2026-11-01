@@ -10,6 +10,7 @@ header('Content-Type: application/json; charset=utf-8');
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+require_once __DIR__ . '/../../config/summary_helper.php';
 
 // Release PHP session lock immediately so other tabs/requests are not blocked
 $hasAccess = can_access('dashboard');
@@ -36,13 +37,27 @@ $filterType       = sanitize($_GET['filter_type'] ?? '');
 $selectedMonth    = isset($_GET['month']) && is_numeric($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
 $selectedYear     = isset($_GET['year']) && is_numeric($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
 
-// Resolve date boundaries
+// Resolve date boundaries (Identik 100% dengan index.php)
 if ($filterType === 'all_years') {
-    $startDate = '1970-01-01';
-    $endDate   = '2099-12-31';
+    $dbYears = [];
+    try {
+        $stmtYears = $pdo->query("SELECT DISTINCT YEAR(summary_date) AS y FROM oqc_daily_summary ORDER BY y ASC");
+        $dbYears = array_values(array_filter(array_map('intval', $stmtYears->fetchAll(PDO::FETCH_COLUMN))));
+    } catch (Exception $e) {}
+    if (empty($dbYears)) {
+        $dbYears = [(int)date('Y')];
+    }
+    $minYear = min($dbYears);
+    $maxYear = max($dbYears);
+    if ($minYear === $maxYear) {
+        $minYear = $maxYear - 1;
+    }
+    $startDate = sprintf('%04d-01-01', $minYear);
+    $endDate   = sprintf('%04d-12-31', $maxYear);
 } elseif ($filterType === 'month_year') {
-    $startDate = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
-    $endDate   = date('Y-m-t', strtotime($startDate));
+    // Sunday Anchor: Minggu pertama di bulan terpilih
+    $startDate = getWorkCycleMonthStartDate($selectedYear, $selectedMonth);
+    $endDate   = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth)));
 } elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
     $startDate = sanitize($_GET['start_date'] ?? date('Y-m-01'));
     $endDate   = sanitize($_GET['end_date'] ?? date('Y-m-d'));
@@ -54,7 +69,7 @@ if ($filterType === 'all_years') {
             $endDate   = date('Y-m-d');
             break;
         case 'mingguan':
-            $startDate = date('Y-m-d', strtotime('monday this week'));
+            $startDate = getWorkCycleWeekStartDate();
             $endDate   = date('Y-m-d');
             break;
         case 'tahunan':
@@ -62,7 +77,10 @@ if ($filterType === 'all_years') {
             $endDate   = date('Y-m-d');
             break;
         default:
-            $startDate = date('Y-m-01');
+            // Preset bulanan: Sunday Anchor hari Minggu pertama bulan ini
+            $curY = (int)date('Y');
+            $curM = (int)date('n');
+            $startDate = getWorkCycleMonthStartDate($curY, $curM);
             $endDate   = date('Y-m-d');
     }
 }
@@ -102,6 +120,8 @@ try {
         $targetPpmVal = (string)($stmtTgt->fetchColumn() ?: '');
     } catch (Exception $eT) {}
 
+    $selectedDefectRank = isset($_GET['defect_rank']) ? (int)$_GET['defect_rank'] : 3;
+
     // 3. Compute concise fingerprint hash
     $rawToken = implode('|', [
         $rSum['max_sum_id'] ?? 0,
@@ -112,7 +132,8 @@ try {
         $startDate,
         $endDate,
         $selectedCustomer,
-        $targetPpmVal
+        $targetPpmVal,
+        $selectedDefectRank
     ]);
 
     $currentVersion = md5($rawToken);

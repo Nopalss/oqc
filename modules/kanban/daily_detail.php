@@ -79,8 +79,8 @@ if (empty($batches)) {
 }
 
 $breadcrumbCategory = "DATA REFERENSI";
-$pageTitle   = "Detail Planning Kanban — " . date('d F Y', strtotime($dateParam));
-$pageSubtitle = "Rincian semua batch planning Kanban pada tanggal ini";
+$pageTitle   = "Detail Batch Kanban — " . date('d F Y', strtotime($dateParam));
+$pageSubtitle = "Rincian semua batch dan jadwal Kanban yang di-import pada tanggal ini";
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';

@@ -10,11 +10,17 @@ var loadedDocumentUrls = {}; // Cache loaded URLs to prevent redundant network r
 /**
  * Update Document Badges & Availability Dots from Metadata
  */
-function refreshDocumentBadges(docsSummary) {
+function refreshDocumentBadges(docsSummary, partCode) {
     if (!docsSummary) return;
     currentPartDocuments = docsSummary;
 
-    var docTypes = ['pi', 'qpoint', 'pac', 'standar_packing'];
+    var curPart = partCode || '';
+    if (!curPart && typeof currentSessionPartCode !== 'undefined' && currentSessionPartCode && currentSessionPartCode !== '-') {
+        curPart = String(currentSessionPartCode).trim();
+    }
+
+    // 1. Sync Tab Dot Indicators
+    var docTypes = ['pi', 'qpoint', 'pac', 'standar_packing', 'mi'];
     docTypes.forEach(function(dt) {
         var dot = document.getElementById('tab-dot-' + dt);
         var info = docsSummary[dt];
@@ -28,36 +34,164 @@ function refreshDocumentBadges(docsSummary) {
         }
     });
 
-    // If currently on custom document tab, refresh version dropdown
-    if (activeDocumentTab !== '2d' && activeDocumentTab !== '3d') {
-        updateVersionDropdownForTab(activeDocumentTab);
+    // Sync Upload Redirect Buttons to current active part
+    syncUploadRedirectButtons(curPart);
+
+    // 2. Sync 2D Viewport from uploads/parts/{PartCode}/
+    var doc2d = docsSummary['2d'];
+    var pdfFrame = document.getElementById('pdf-frame');
+    var p2dBox = document.getElementById('drawing-placeholder-box');
+    var p2dText = document.getElementById('placeholder-part-code-text');
+    var p2dFolder = document.getElementById('placeholder-part-folder');
+    if (p2dText && curPart) p2dText.textContent = curPart;
+    if (p2dFolder && curPart) p2dFolder.textContent = curPart;
+
+    if (doc2d && doc2d.has_document && doc2d.latest) {
+        var url2d = (doc2d.latest.full_url || (window.APP_BASE_URL + '/' + doc2d.latest.file_path)) + '#toolbar=0';
+        if (pdfFrame) {
+            pdfFrame.onerror = function() {
+                pdfFrame.style.display = 'none';
+                if (p2dBox) p2dBox.style.display = 'flex';
+            };
+            if (pdfFrame.getAttribute('data-loaded-src') !== url2d) {
+                pdfFrame.setAttribute('data-loaded-src', url2d);
+                pdfFrame.src = url2d;
+            }
+            pdfFrame.style.display = 'block';
+        }
+        if (p2dBox) p2dBox.style.display = 'none';
+    } else {
+        if (pdfFrame) {
+            pdfFrame.removeAttribute('data-loaded-src');
+            pdfFrame.src = '';
+            pdfFrame.style.display = 'none';
+        }
+        if (p2dBox) p2dBox.style.display = 'flex';
     }
+
+    // 3. Sync 3D Viewport from uploads/parts/{PartCode}/
+    var doc3d = docsSummary['3d'];
+    var cad3dViewport = document.getElementById('cad-3d-viewport');
+    var p3dBox = document.getElementById('cad-3d-placeholder-box');
+    var p3dText = document.getElementById('placeholder-3d-part-code-text');
+    var p3dFolder = document.getElementById('placeholder-3d-part-folder');
+    if (p3dText && curPart) p3dText.textContent = curPart;
+    if (p3dFolder && curPart) p3dFolder.textContent = curPart;
+
+    if (doc3d && doc3d.has_document && doc3d.latest) {
+        var url3d = doc3d.latest.full_url || (window.APP_BASE_URL + '/' + doc3d.latest.file_path);
+        if (cad3dViewport) {
+            cad3dViewport.setAttribute('data-stp-url', url3d);
+            cad3dViewport.style.display = 'block';
+        }
+        if (p3dBox) p3dBox.style.display = 'none';
+        if (activeDocumentTab === '3d' && typeof is3dViewerInitialized !== 'undefined' && !is3dViewerInitialized && typeof init3dViewer === 'function') {
+            init3dViewer();
+        }
+    } else {
+        if (cad3dViewport) {
+            cad3dViewport.removeAttribute('data-stp-url');
+            cad3dViewport.style.display = 'none';
+        }
+        if (p3dBox) p3dBox.style.display = 'flex';
+    }
+
+    // 4. If currently on custom document tab or version-enabled tab, refresh version dropdown
+    updateVersionDropdownForTab(activeDocumentTab);
 }
 
 /**
- * Fetch Part Documents via AJAX on Part Switch or First Scan (Zero-Lag)
+ * Fetch Part Documents via AJAX on Part Switch, Tab Click, or Manual Trigger (Zero-Lag & Zero-Overhead)
  */
-function fetchPartDocuments(partCode) {
-    if (!partCode) return;
-    var url = window.APP_BASE_URL + '/modules/inspection/api/get_part_documents.php?part_code=' + encodeURIComponent(partCode);
+function fetchPartDocuments(partCode, onComplete) {
+    var pCode = partCode || getActivePartCode();
+    if (!pCode) {
+        if (typeof onComplete === 'function') onComplete(false, null);
+        return;
+    }
+    // Add cache-busting timestamp query to guarantee fresh file detection from server folder
+    var url = window.APP_BASE_URL + '/modules/inspection/api/get_part_documents.php?part_code=' + encodeURIComponent(pCode) + '&_t=' + Date.now();
     fetch(url)
         .then(function(res) { return res.json(); })
         .then(function(json) {
             if (json && json.success) {
-                refreshDocumentBadges(json.documents);
-                // If active tab is custom document, reload viewer with new part
-                if (activeDocumentTab !== '2d' && activeDocumentTab !== '3d') {
-                    loadCustomDocumentViewer(activeDocumentTab);
+                refreshDocumentBadges(json.documents, pCode);
+                if (typeof onComplete === 'function') {
+                    onComplete(true, json.documents);
                 }
+            } else {
+                if (typeof onComplete === 'function') onComplete(false, null);
             }
         })
         .catch(function(err) {
             console.warn('[DocViewer] Gagal memuat metadata dokumen part:', err);
+            if (typeof onComplete === 'function') onComplete(false, null);
         });
 }
 
 /**
- * Switch Active Tab (2d, 3d, pi, qpoint, pac, standar_packing)
+ * Robust Part Code resolution helper: checks global session state, inputs, and card elements
+ */
+function getActivePartCode() {
+    var partCode = '';
+    if (typeof currentSessionPartCode !== 'undefined' && currentSessionPartCode && currentSessionPartCode !== '-') {
+        partCode = String(currentSessionPartCode).trim();
+    } else if (typeof currentSessionObj !== 'undefined' && currentSessionObj && currentSessionObj.part_code) {
+        partCode = String(currentSessionObj.part_code).trim();
+    } else {
+        var pCodeElem = document.getElementById('card-part-code') || document.getElementById('selected-plan-part-code');
+        partCode = pCodeElem ? (pCodeElem.textContent || pCodeElem.innerText).trim() : '';
+    }
+
+    if (partCode === '-' || partCode === '') {
+        var inputCode = document.getElementById('scan-part-code');
+        if (inputCode && inputCode.value) {
+            partCode = inputCode.value.trim();
+        }
+    }
+    return (partCode === '-' ? '' : partCode);
+}
+
+/**
+ * Sync direct upload redirect buttons across viewports
+ */
+function syncUploadRedirectButtons(partCode) {
+    var pCode = partCode || getActivePartCode();
+    if (!pCode) return;
+    var uploadUrl = (window.APP_BASE_URL || '') + '/modules/master_drawings/upload.php?part_code=' + encodeURIComponent(pCode);
+    
+    var btn2d = document.getElementById('btn-upload-redirect-2d');
+    var btn3d = document.getElementById('btn-upload-redirect-3d');
+    var btnCustom = document.getElementById('btn-upload-redirect-custom');
+    
+    if (btn2d) {
+        btn2d.href = uploadUrl;
+        btn2d.style.display = 'inline-flex';
+    }
+    if (btn3d) {
+        btn3d.href = uploadUrl;
+        btn3d.style.display = 'inline-flex';
+    }
+    if (btnCustom) {
+        btnCustom.href = uploadUrl;
+        btnCustom.style.display = 'inline-flex';
+    }
+
+    var p2dText = document.getElementById('placeholder-part-code-text');
+    var p2dFolder = document.getElementById('placeholder-part-folder');
+    var p3dText = document.getElementById('placeholder-3d-part-code-text');
+    var p3dFolder = document.getElementById('placeholder-3d-part-folder');
+    var pCustomFolder = document.getElementById('custom-doc-placeholder-folder');
+
+    if (p2dText) p2dText.textContent = pCode;
+    if (p2dFolder) p2dFolder.textContent = pCode;
+    if (p3dText) p3dText.textContent = pCode;
+    if (p3dFolder) p3dFolder.textContent = pCode;
+    if (pCustomFolder) pCustomFolder.textContent = pCode;
+}
+
+/**
+ * Switch Active Tab (2d, 3d, pi, qpoint, pac, standar_packing, mi)
  */
 function switchDocumentTab(tab) {
     activeDocumentTab = tab;
@@ -86,6 +220,14 @@ function switchDocumentTab(tab) {
         'standar_packing': {
             activeBtn: 'bg-orange-700 text-white border-orange-700 shadow-xs',
             inactiveIcon: 'text-orange-600'
+        },
+        'mi': {
+            activeBtn: 'bg-cyan-700 text-white border-cyan-700 shadow-xs',
+            inactiveIcon: 'text-cyan-600'
+        },
+        'aql': {
+            activeBtn: 'bg-purple-600 text-white border-purple-600 shadow-xs',
+            inactiveIcon: 'text-purple-600'
         }
     };
 
@@ -95,10 +237,12 @@ function switchDocumentTab(tab) {
         'pi': { bg: '#4f46e5', border: '#4f46e5' },
         'qpoint': { bg: '#d97706', border: '#d97706' },
         'pac': { bg: '#059669', border: '#059669' },
-        'standar_packing': { bg: '#c2410c', border: '#c2410c' }
+        'standar_packing': { bg: '#c2410c', border: '#c2410c' },
+        'mi': { bg: '#0891b2', border: '#0891b2' },
+        'aql': { bg: '#7c3aed', border: '#7c3aed' }
     };
 
-    var allTabs = ['2d', '3d', 'pi', 'qpoint', 'pac', 'standar_packing'];
+    var allTabs = ['2d', '3d', 'aql', 'pi', 'qpoint', 'pac', 'standar_packing', 'mi'];
     allTabs.forEach(function(t) {
         var btn = document.getElementById('tab-btn-' + t);
         if (!btn) return;
@@ -107,14 +251,14 @@ function switchDocumentTab(tab) {
         if (t === tab) {
             btn.className = 'px-3 py-1.5 rounded-lg text-xs font-bold transition-all border shadow-xs flex items-center whitespace-nowrap cursor-pointer doc-tab-active-' + t;
             var c = tabColors[t] || { bg: '#2563eb', border: '#2563eb' };
-            btn.setAttribute('style', 'background-color: ' + c.bg + ' !important; border-color: ' + c.border + ' !important; color: #ffffff !important;');
+            btn.setAttribute('style', 'flex-shrink: 0 !important; white-space: nowrap !important; background-color: ' + c.bg + ' !important; border-color: ' + c.border + ' !important; color: #ffffff !important;');
             if (icon) {
                 icon.className = 'w-3.5 h-3.5 mr-1.5 flex-shrink-0 text-white';
                 icon.setAttribute('style', 'color: #ffffff !important; stroke: #ffffff !important;');
             }
         } else {
             btn.className = 'px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-100 text-slate-700 border border-slate-300 shadow-2xs flex items-center whitespace-nowrap cursor-pointer doc-tab-hover-' + t;
-            btn.removeAttribute('style');
+            btn.setAttribute('style', 'flex-shrink: 0 !important; white-space: nowrap !important;');
             if (icon) {
                 icon.className = 'w-3.5 h-3.5 mr-1.5 flex-shrink-0 doc-icon-' + t;
                 icon.removeAttribute('style');
@@ -125,33 +269,82 @@ function switchDocumentTab(tab) {
     var box2d = document.getElementById('viewport-2d');
     var box3d = document.getElementById('viewport-3d');
     var boxCustom = document.getElementById('viewport-custom-doc');
+    var boxAql = document.getElementById('viewport-aql');
     var versionContainer = document.getElementById('doc-version-selector-container');
 
     // Reset zoom level on tab change
     resetZoom();
 
     if (tab === '2d') {
-        box2d.classList.remove('hidden');
-        box3d.classList.add('hidden');
-        boxCustom.classList.add('hidden');
+        if (box2d) box2d.classList.remove('hidden');
+        if (box3d) box3d.classList.add('hidden');
+        if (boxCustom) boxCustom.classList.add('hidden');
+        if (boxAql) boxAql.classList.add('hidden');
         updateVersionDropdownForTab('2d');
+        syncUploadRedirectButtons();
+
+        // On-demand: Re-check server folder if 2D was previously not available
+        var cur2d = currentPartDocuments['2d'];
+        if (!cur2d || !cur2d.has_document) {
+            fetchPartDocuments(getActivePartCode(), function(ok) {
+                if (ok && activeDocumentTab === '2d') {
+                    updateVersionDropdownForTab('2d');
+                }
+            });
+        }
     } else if (tab === '3d') {
-        box3d.classList.remove('hidden');
-        box2d.classList.add('hidden');
-        boxCustom.classList.add('hidden');
+        if (box3d) box3d.classList.remove('hidden');
+        if (box2d) box2d.classList.add('hidden');
+        if (boxCustom) boxCustom.classList.add('hidden');
+        if (boxAql) boxAql.classList.add('hidden');
         updateVersionDropdownForTab('3d');
+        syncUploadRedirectButtons();
+
+        // On-demand: Re-check server folder if 3D was previously not available
+        var cur3d = currentPartDocuments['3d'];
+        if (!cur3d || !cur3d.has_document) {
+            fetchPartDocuments(getActivePartCode(), function(ok) {
+                if (ok && activeDocumentTab === '3d') {
+                    updateVersionDropdownForTab('3d');
+                }
+            });
+        }
 
         if (typeof is3dViewerInitialized !== 'undefined' && !is3dViewerInitialized && typeof init3dViewer === 'function') {
             init3dViewer();
         }
+    } else if (tab === 'aql') {
+        // Tab AQL: Global Standard Document from table standard_oqc id = 1
+        if (boxAql) boxAql.classList.remove('hidden');
+        if (box2d) box2d.classList.add('hidden');
+        if (box3d) box3d.classList.add('hidden');
+        if (boxCustom) boxCustom.classList.add('hidden');
+
+        // AQL is a global standard document without part code versioning
+        if (versionContainer) versionContainer.classList.add('hidden');
     } else {
-        // Custom Documents (pi, qpoint, pac, standar_packing)
-        box2d.classList.add('hidden');
-        box3d.classList.add('hidden');
-        boxCustom.classList.remove('hidden');
+        // Custom Documents (pi, qpoint, pac, standar_packing, mi)
+        if (box2d) box2d.classList.add('hidden');
+        if (box3d) box3d.classList.add('hidden');
+        if (boxAql) boxAql.classList.add('hidden');
+        if (boxCustom) boxCustom.classList.remove('hidden');
 
         updateVersionDropdownForTab(tab);
         loadCustomDocumentViewer(tab);
+
+        // On-demand: Re-check server folder if clicked document was previously not available
+        var curDoc = currentPartDocuments[tab];
+        if (!curDoc || !curDoc.has_document) {
+            fetchPartDocuments(getActivePartCode(), function(ok, updatedDocs) {
+                if (ok && activeDocumentTab === tab) {
+                    var newDocInfo = updatedDocs ? updatedDocs[tab] : null;
+                    if (newDocInfo && newDocInfo.has_document) {
+                        updateVersionDropdownForTab(tab);
+                        loadCustomDocumentViewer(tab);
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -253,29 +446,20 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     var pDesc = document.getElementById('custom-doc-placeholder-desc');
     var pFolder = document.getElementById('custom-doc-placeholder-folder');
 
-    // Robust Part Code resolution: check global session state, inputs, and card elements
-    var partCode = '';
-    if (typeof currentSessionPartCode !== 'undefined' && currentSessionPartCode && currentSessionPartCode !== '-') {
-        partCode = String(currentSessionPartCode).trim();
-    } else if (typeof currentSessionObj !== 'undefined' && currentSessionObj && currentSessionObj.part_code) {
-        partCode = String(currentSessionObj.part_code).trim();
-    } else {
-        var pCodeElem = document.getElementById('card-part-code') || document.getElementById('selected-plan-part-code');
-        partCode = pCodeElem ? (pCodeElem.textContent || pCodeElem.innerText).trim() : '';
-    }
-
-    // Fallback if still empty or '-'
-    if (partCode === '-' || partCode === '') {
-        var inputCode = document.getElementById('scan-part-code');
-        if (inputCode && inputCode.value) {
-            partCode = inputCode.value.trim();
-        }
-    }
-
+    var partCode = getActivePartCode();
     var docInfo = currentPartDocuments[docType];
     var folderName = docInfo ? docInfo.folder : docType.toUpperCase();
 
     if (pFolder) pFolder.textContent = partCode || '-';
+
+    var btnCustomUpload = document.getElementById('btn-upload-redirect-custom');
+    var btnCustomText = document.getElementById('btn-upload-redirect-text');
+    if (btnCustomUpload && partCode) {
+        btnCustomUpload.href = (window.APP_BASE_URL || '') + '/modules/master_drawings/upload.php?part_code=' + encodeURIComponent(partCode);
+    }
+    if (btnCustomText) {
+        btnCustomText.textContent = '+ Upload Berkas ' + (docInfo ? docInfo.label : docType.toUpperCase());
+    }
 
     if (!docInfo || !docInfo.has_document || !partCode) {
         // Document does not exist
@@ -285,7 +469,8 @@ function loadCustomDocumentViewer(docType, targetVersion) {
         }
         if (placeholder) {
             placeholder.style.display = 'flex';
-            if (pTitle) pTitle.textContent = (docInfo ? docInfo.full_label : docType.toUpperCase()) + ' BELUM TERSEDIA';
+            var displayLabel = (docInfo && docInfo.full_label) ? docInfo.full_label : (docType === 'pi' ? 'Pedoman Inspeksi (PI)' : docType.toUpperCase());
+            if (pTitle) pTitle.textContent = displayLabel + ' BELUM TERSEDIA';
             if (pDesc) pDesc.textContent = 'File belum diunggah untuk Part Code ' + (partCode || '-') + ' di folder uploads/parts/' + (partCode || '-') + '/';
         }
         if (loading) loading.classList.add('hidden');
@@ -346,7 +531,34 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     }
 }
 
-// Auto initialize document badges when page finishes rendering
+/**
+ * Instant Manual Document Reload (Without Page Refresh)
+ */
+function reloadDocViewer() {
+    var pCode = getActivePartCode();
+    if (!pCode) return;
+    fetchPartDocuments(pCode, function(ok, updatedDocs) {
+        if (ok) {
+            updateVersionDropdownForTab(activeDocumentTab);
+            if (activeDocumentTab !== '2d' && activeDocumentTab !== '3d') {
+                loadCustomDocumentViewer(activeDocumentTab);
+            }
+        }
+    });
+}
+
+// Auto initialize document badges and upload buttons when page finishes rendering
 document.addEventListener('DOMContentLoaded', function() {
-    refreshDocumentBadges(window.__INITIAL_PART_DOCS__);
+    var pCode = getActivePartCode();
+    refreshDocumentBadges(window.__INITIAL_PART_DOCS__, pCode);
+    syncUploadRedirectButtons(pCode);
+});
+
+// Passive check when returning to Workbench tab (0ms background overhead)
+window.addEventListener('focus', function() {
+    var curDoc = currentPartDocuments ? currentPartDocuments[activeDocumentTab] : null;
+    // Only check server if currently viewing a tab whose document was missing
+    if (!curDoc || !curDoc.has_document) {
+        reloadDocViewer();
+    }
 });

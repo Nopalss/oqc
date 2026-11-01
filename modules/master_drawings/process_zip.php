@@ -130,7 +130,7 @@ for ($i = 0; $i < $numFiles; $i++) {
         }
     }
 
-    // Fallback: Jika tidak ada segmen folder yang cocok, cek nama file
+    // Fallback: Jika tidak ada segmen folder yang cocok di map, cek nama file
     if (!$matchedPart) {
         $fileClean = strtoupper(extract_part_code_from_string($fileName));
         if ($fileClean !== '' && isset($validPartsMap[$fileClean])) {
@@ -143,6 +143,75 @@ for ($i = 0; $i < $numFiles; $i++) {
                 $fileFirstDash = strtoupper(explode('-', $fileName)[0]);
                 if (isset($validPartsMap[$fileFirstDash])) {
                     $matchedPart = $validPartsMap[$fileFirstDash];
+                }
+            }
+        }
+    }
+
+    // JIKA PART CODE BELUM TERDAFTAR DI DATABASE:
+    // Auto-create part code tersebut ke tabel master_parts agar tidak ditolak
+    if (!$matchedPart) {
+        $detectedCode = '';
+        $detectedName = '';
+
+        if (!empty($folderSegments)) {
+            $candidateFolder = trim(end($folderSegments));
+            $detectedCode = extract_part_code_from_string($candidateFolder);
+            
+            // Coba ambil nama part dari sisa nama folder setelah underscore atau pemisah
+            if (strpos($candidateFolder, '_') !== false) {
+                $partsExplode = explode('_', $candidateFolder, 2);
+                $detectedName = trim($partsExplode[1] ?? '');
+            } elseif (strpos($candidateFolder, ' ') !== false) {
+                $partsExplode = explode(' ', $candidateFolder, 2);
+                $detectedName = trim($partsExplode[1] ?? '');
+            }
+        }
+
+        if ($detectedCode === '') {
+            $detectedCode = extract_part_code_from_string($fileName);
+        }
+
+        $detectedCode = strtoupper(trim($detectedCode));
+
+        if ($detectedCode !== '') {
+            if ($detectedName === '') {
+                $detectedName = $detectedCode;
+            }
+
+            // Daftarkan part baru ke master_parts
+            $currentUserId = $_SESSION['user_id'] ?? null;
+            try {
+                $stmtInsertPart = $pdo->prepare("INSERT INTO master_parts (part_code, part_name, aql_level, source, created_by, created_at) VALUES (:part_code, :part_name, '1.0', 'import_zip', :created_by, NOW())");
+                $stmtInsertPart->execute([
+                    ':part_code'  => $detectedCode,
+                    ':part_name'  => $detectedName,
+                    ':created_by' => $currentUserId
+                ]);
+                $newId = (int)$pdo->lastInsertId();
+
+                $matchedPart = [
+                    'id' => $newId,
+                    'part_code' => $detectedCode,
+                    'part_name' => $detectedName,
+                    'is_new' => true,
+                ];
+
+                // Cache in-memory agar iterasi file berikutnya langsung mengenalinya
+                $validPartsMap[$detectedCode] = $matchedPart;
+            } catch (PDOException $e) {
+                // Jika race condition atau part_code ternyata baru masuk
+                $stmtFetch = $pdo->prepare("SELECT id, part_code, part_name FROM master_parts WHERE part_code = :pc");
+                $stmtFetch->execute([':pc' => $detectedCode]);
+                $exRow = $stmtFetch->fetch(PDO::FETCH_ASSOC);
+                if ($exRow) {
+                    $matchedPart = [
+                        'id' => (int)$exRow['id'],
+                        'part_code' => $exRow['part_code'],
+                        'part_name' => $exRow['part_name'],
+                        'is_new' => false,
+                    ];
+                    $validPartsMap[$detectedCode] = $matchedPart;
                 }
             }
         }
@@ -192,9 +261,14 @@ for ($i = 0; $i < $numFiles; $i++) {
             $processedParts[$officialCode] = [
                 'part_id' => $partId,
                 'part_name' => $partData['part_name'],
+                'is_new' => !empty($partData['is_new']),
                 'files' => [],
                 'has_2d' => false,
                 'has_3d' => false,
+                'has_pi' => false,
+                'has_qpoint' => false,
+                'has_pac' => false,
+                'has_packing' => false,
             ];
         }
 
@@ -209,6 +283,14 @@ for ($i = 0; $i < $numFiles; $i++) {
             $processedParts[$officialCode]['has_2d'] = $relPath;
         } elseif ($docType === 'drawing_3d') {
             $processedParts[$officialCode]['has_3d'] = $relPath;
+        } elseif ($docType === 'pi') {
+            $processedParts[$officialCode]['has_pi'] = true;
+        } elseif ($docType === 'qpoint') {
+            $processedParts[$officialCode]['has_qpoint'] = true;
+        } elseif ($docType === 'pac') {
+            $processedParts[$officialCode]['has_pac'] = true;
+        } elseif ($docType === 'standar_packing') {
+            $processedParts[$officialCode]['has_packing'] = true;
         }
     } else {
         fclose($stream);
@@ -223,8 +305,13 @@ $stmtInsertDraw = $pdo->prepare("INSERT INTO master_drawings (part_id, drawing_2
 $stmtUpdateDraw = $pdo->prepare("UPDATE master_drawings SET drawing_2d_path = COALESCE(:path_2d, drawing_2d_path), drawing_3d_path = COALESCE(:path_3d, drawing_3d_path), updated_at = NOW() WHERE part_id = :part_id");
 
 $totalPartsUpdated = count($processedParts);
+$totalNewParts = 0;
 
-foreach ($processedParts as $code => $pInfo) {
+foreach ($processedParts as $code => &$pInfo) {
+    if (!empty($pInfo['is_new'])) {
+        $totalNewParts++;
+    }
+
     $pId = $pInfo['part_id'];
     $path2D = $pInfo['has_2d'] ?: null;
     $path3D = $pInfo['has_3d'] ?: null;
@@ -248,12 +335,19 @@ foreach ($processedParts as $code => $pInfo) {
         }
     }
 }
+unset($pInfo);
 
-$msg = "Import ZIP Berhasil! Sebanyak {$totalPartsUpdated} Part diproses, {$totalFilesSaved} berkas dokumen tersimpan ke uploads/parts/.";
-if (!empty($skippedEntries)) {
-    $skippedCount = count($skippedEntries);
-    $msg .= " ({$skippedCount} folder dilewati karena Part Code tidak terdaftar).";
-}
+// Simpan laporan lengkap hasil import ke session agar bisa ditampilkan di halaman import_result.php
+$_SESSION['import_zip_report'] = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'zip_name' => $originalName,
+    'total_parts' => $totalPartsUpdated,
+    'total_new_parts' => $totalNewParts,
+    'total_files_saved' => $totalFilesSaved,
+    'parts' => $processedParts,
+    'skipped_entries' => $skippedEntries,
+];
 
-set_flash('success', $msg);
-redirect('modules/master_drawings/index.php');
+set_flash('success', "Import ZIP Selesai! {$totalPartsUpdated} Part diproses ({$totalNewParts} Part baru otomatis didaftarkan), {$totalFilesSaved} berkas tersimpan.");
+redirect('modules/master_drawings/import_result.php');
+

@@ -947,8 +947,13 @@ try {
         if (!empty($refsToCheckPassed)) {
             $inRefPassPlaceholders = implode(',', array_fill(0, count($refsToCheckPassed), '?'));
             $typeCond = ($reqInspectionType === 'safety_stock') ? '' : "AND s.inspection_type = 'kanban'";
+
+            // LATEST-STATE CHECK: Ambil status sesi/lot paling mutakhir untuk kombinasi Part + Lot + Ref ini
+            // Jika record paling terakhir adalah REJECTED/NG, maka box ini adalah eks-NG yang sedang masuk alur sortir/re-inspeksi,
+            // sehingga TIDAK boleh diblokir oleh record Passed dari masa lampau.
             $sqlChkPassed = "
-                SELECT s.id AS session_id, s.inspection_type, s.closed_at, u.name AS inspector_name, isl.ref_number, ki.kanban_no, ki.customer
+                SELECT s.id AS session_id, s.inspection_type, s.status AS session_status, s.closed_at, 
+                       u.name AS inspector_name, isl.ref_number, isl.lot_result, isl.lot_status, ki.kanban_no, ki.customer
                 FROM inspection_session_lots isl
                 JOIN inspection_sessions s ON s.id = isl.inspection_session_id
                 LEFT JOIN users u ON u.id = s.inspector_id
@@ -957,19 +962,30 @@ try {
                 LEFT JOIN master_parts mp ON mp.id = s.part_id
                 WHERE UPPER(isl.ref_number) IN ($inRefPassPlaceholders)
                   $partLotCond
-                  AND (
-                      isl.lot_result IN ('passed', 'skipped')
-                      OR (s.status = 'passed' AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected') AND (isl.lot_status IS NULL OR isl.lot_status NOT IN ('rejected', 'ng_quarantine', 'replaced', 'ng_found')))
-                  )
-                  AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
-                  AND (isl.lot_status IS NULL OR isl.lot_status NOT IN ('rejected', 'ng_quarantine', 'replaced', 'ng_found'))
+                  AND s.status != 'in_progress'
                   $typeCond
+                ORDER BY isl.id DESC, s.id DESC
                 LIMIT 1
             ";
             $stmtChkPassed = $pdo->prepare($sqlChkPassed);
             $stmtChkPassed->execute(array_merge($refsToCheckPassed, $partLotParams));
             $passRow = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
+
+            // Blokir HANYA jika status TERAKHIRNYA memang benar-benar PASSED (bukan rejected / ng)
+            $isRowPassed = false;
             if ($passRow) {
+                $isRowRejected = (
+                    $passRow['lot_result'] === 'rejected' ||
+                    $passRow['session_status'] === 'rejected' ||
+                    in_array($passRow['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'rejected'])
+                );
+
+                if (!$isRowRejected && (in_array($passRow['lot_result'], ['passed', 'skipped']) || $passRow['session_status'] === 'passed')) {
+                    $isRowPassed = true;
+                }
+            }
+
+            if ($isRowPassed) {
                 $pDesc = ($passRow['inspection_type'] === 'safety_stock') ? 'Safety Stock Gudang' : ('Kanban ' . ($passRow['kanban_no'] ?: '-'));
                 if (ob_get_length()) ob_clean();
                 echo json_encode([

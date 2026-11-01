@@ -20,9 +20,9 @@ $startDate        = sanitize($_GET['start_date'] ?? '');
 $endDate          = sanitize($_GET['end_date'] ?? '');
 
 // Dynamic Limit
-$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 10;
-if (!in_array($limit, [5, 10, 25, 50, 100])) {
-    $limit = 10;
+$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: ($period === 'today' ? 50 : 10);
+if (!in_array($limit, [5, 10, 25, 50, 100, 200, 500])) {
+    $limit = ($period === 'today' ? 50 : 10);
 }
 
 $page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1;
@@ -30,6 +30,11 @@ if ($page < 1) $page = 1;
 $offset     = ($page - 1) * $limit;
 $totalItems = 0;
 $totalPages = 1;
+
+// Specific parameter for 'today' mode: batch selection filter ('all' or specific batch id)
+$selectedBatch = sanitize($_GET['batch_id'] ?? 'all');
+$todayBatches = [];
+$todayItems = [];
 
 // Fetch Customers List for Filter Dropdown
 $customersList = [];
@@ -78,12 +83,8 @@ if ($pdo) {
             $queryParams[':customer'] = $selectedCustomer;
         }
 
-        // Expression for Planning Date (prioritize Request Delivery Date -> ETA Date -> Import Date fallback)
-        $dateExpr = "COALESCE(
-            CASE WHEN ki.req_date IS NOT NULL AND ki.req_date > '1000-01-01' THEN DATE(ki.req_date) ELSE NULL END,
-            CASE WHEN ki.eta IS NOT NULL AND ki.eta > '1000-01-01' THEN DATE(ki.eta) ELSE NULL END,
-            DATE(b.imported_at)
-        )";
+        // Expression for Planning Date: Murni menggunakan Tanggal Input/Import batch
+        $dateExpr = "DATE(b.imported_at)";
 
         // Quick Period Preset & Custom Date Range Logic
         if ($period === 'today') {
@@ -147,42 +148,159 @@ if ($pdo) {
             }
         }
 
-        // 2. Count distinct dates for pagination
-        $countSql = "SELECT COUNT(DISTINCT {$dateExpr})
-                     FROM kanban_batches b
-                     LEFT JOIN kanban_items ki ON (ki.batch_id = b.id AND (ki.plan_type IS NULL OR ki.plan_type = 'kanban'))
-                     WHERE {$whereStr}";
-        $stmtCount = $pdo->prepare($countSql);
-        $stmtCount->execute($queryParams);
-        $totalItems = (int) $stmtCount->fetchColumn();
-
-        $totalPages = max(1, ceil($totalItems / $limit));
-        if ($page > $totalPages) $page = $totalPages;
-        $offset = ($page - 1) * $limit;
-
-        // 3. Fetch grouped-by-date summary
-        $sql = "SELECT
-                    {$dateExpr} AS plan_date,
-                    COUNT(DISTINCT b.id) AS batch_count,
-                    COUNT(ki.id) AS total_items,
-                    COALESCE(SUM(ki.qty), 0) AS total_pcs,
-                    MIN(b.imported_at) AS first_import,
-                    MAX(b.imported_at) AS last_import
+        if ($period === 'today') {
+            // =====================================================================
+            // MODE HARI INI: BREAKDOWN BATCH & DAFTAR ITEM KANBAN LANGSUNG
+            // =====================================================================
+            
+            // 2A. Ambil seluruh batch yang di-import hari ini
+            $stmtTB = $pdo->prepare("
+                SELECT b.id, b.document_number, b.vendor, b.imported_at, b.import_method,
+                       COUNT(k.id) as item_count,
+                       COALESCE(SUM(k.qty), 0) as total_pcs,
+                       SUM(CASE WHEN k.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                       SUM(CASE WHEN k.status IN ('in_progress', 'partial', 'rejected') THEN 1 ELSE 0 END) as in_progress_count
                 FROM kanban_batches b
-                LEFT JOIN kanban_items ki ON (ki.batch_id = b.id AND (ki.plan_type IS NULL OR ki.plan_type = 'kanban') AND (ki.check_type IS NULL OR ki.check_type != 'Safety Stock') AND (ki.kanban_no IS NULL OR ki.kanban_no NOT LIKE 'SS-%'))
-                WHERE {$whereStr}
-                GROUP BY {$dateExpr}
-                ORDER BY plan_date DESC
-                LIMIT :limit OFFSET :offset";
+                JOIN kanban_items k ON k.batch_id = b.id
+                WHERE b.plan_type = 'kanban'
+                  AND DATE(b.imported_at) = CURDATE()
+                  AND (k.plan_type IS NULL OR k.plan_type = 'kanban')
+                  AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
+                  AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
+                GROUP BY b.id, b.document_number, b.vendor, b.imported_at, b.import_method
+                ORDER BY b.imported_at ASC, b.id ASC
+            ");
+            $stmtTB->execute();
+            $todayBatches = $stmtTB->fetchAll(PDO::FETCH_ASSOC);
 
-        $stmt = $pdo->prepare($sql);
-        foreach ($queryParams as $k => $v) {
-            $stmt->bindValue($k, $v);
+            // Validasi $selectedBatch: jika batch_id yang dipilih bukan 'all' dan tidak ada di $todayBatches, default ke 'all'
+            if ($selectedBatch !== 'all') {
+                $batchExists = false;
+                foreach ($todayBatches as $tb) {
+                    if ((string)$tb['id'] === (string)$selectedBatch) {
+                        $batchExists = true;
+                        break;
+                    }
+                }
+                if (!$batchExists && !empty($todayBatches)) {
+                    $selectedBatch = 'all';
+                }
+            }
+
+            // 2B. Build query filter untuk items hari ini
+            $itemWhere = [
+                "b.plan_type = 'kanban'",
+                "DATE(b.imported_at) = CURDATE()",
+                "(ki.plan_type IS NULL OR ki.plan_type = 'kanban')",
+                "(ki.check_type IS NULL OR ki.check_type != 'Safety Stock')",
+                "(ki.kanban_no IS NULL OR ki.kanban_no NOT LIKE 'SS-%')"
+            ];
+            $itemParams = [];
+
+            if (!empty($selectedCustomer)) {
+                $itemWhere[] = "ki.customer = :cust_today";
+                $itemParams[':cust_today'] = $selectedCustomer;
+            }
+
+            if ($selectedBatch !== 'all') {
+                $itemWhere[] = "ki.batch_id = :bid_today";
+                $itemParams[':bid_today'] = (int)$selectedBatch;
+            }
+
+            $itemWhereStr = implode(' AND ', $itemWhere);
+
+            // Count total items for pagination
+            $stmtItemCount = $pdo->prepare("
+                SELECT COUNT(ki.id)
+                FROM kanban_items ki
+                JOIN kanban_batches b ON b.id = ki.batch_id
+                WHERE {$itemWhereStr}
+            ");
+            $stmtItemCount->execute($itemParams);
+            $totalItems = (int)$stmtItemCount->fetchColumn();
+
+            $totalPages = max(1, ceil($totalItems / $limit));
+            if ($page > $totalPages) $page = $totalPages;
+            $offset = ($page - 1) * $limit;
+
+            // Fetch kanban items detail for today
+            $stmtItems = $pdo->prepare("
+                SELECT ki.*, 
+                       b.document_number, b.vendor, b.imported_at, b.import_method,
+                       mp.part_name as master_part_name,
+                       COALESCE(
+                           (SELECT SUM(
+                               CASE 
+                                   WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                       COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                 FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                   WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                   ELSE 0
+                               END
+                           )
+                           FROM inspection_sessions s2
+                           WHERE s2.kanban_item_id = ki.id), 0
+                       ) AS passed_qty,
+                       (SELECT COUNT(*) FROM inspection_sessions s_cnt WHERE s_cnt.kanban_item_id = ki.id) as session_count,
+                       (SELECT 1 FROM inspection_sessions s_act WHERE s_act.kanban_item_id = ki.id AND s_act.status = 'in_progress' LIMIT 1) as has_active_session,
+                       (SELECT u.name FROM inspection_sessions s_act JOIN users u ON u.id = s_act.inspector_id WHERE s_act.kanban_item_id = ki.id AND s_act.status = 'in_progress' LIMIT 1) as active_inspector_name
+                FROM kanban_items ki
+                JOIN kanban_batches b ON b.id = ki.batch_id
+                LEFT JOIN master_parts mp ON mp.part_code = ki.item_code
+                WHERE {$itemWhereStr}
+                ORDER BY ki.id ASC
+                LIMIT :limit OFFSET :offset
+            ");
+            foreach ($itemParams as $k => $v) {
+                $stmtItems->bindValue($k, $v);
+            }
+            $stmtItems->bindValue(':limit',  (int)$limit,  PDO::PARAM_INT);
+            $stmtItems->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+            $stmtItems->execute();
+            $todayItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+
+        } else {
+            // =====================================================================
+            // MODE PERIODE LAIN (MINGGU INI, BULAN INI, TAHUN INI, DLL)
+            // =====================================================================
+
+            // 2. Count distinct dates for pagination
+            $countSql = "SELECT COUNT(DISTINCT {$dateExpr})
+                         FROM kanban_batches b
+                         LEFT JOIN kanban_items ki ON (ki.batch_id = b.id AND (ki.plan_type IS NULL OR ki.plan_type = 'kanban'))
+                         WHERE {$whereStr}";
+            $stmtCount = $pdo->prepare($countSql);
+            $stmtCount->execute($queryParams);
+            $totalItems = (int) $stmtCount->fetchColumn();
+
+            $totalPages = max(1, ceil($totalItems / $limit));
+            if ($page > $totalPages) $page = $totalPages;
+            $offset = ($page - 1) * $limit;
+
+            // 3. Fetch grouped-by-date summary
+            $sql = "SELECT
+                        {$dateExpr} AS plan_date,
+                        COUNT(DISTINCT b.id) AS batch_count,
+                        COUNT(ki.id) AS total_items,
+                        COALESCE(SUM(ki.qty), 0) AS total_pcs,
+                        MIN(b.imported_at) AS first_import,
+                        MAX(b.imported_at) AS last_import
+                    FROM kanban_batches b
+                    LEFT JOIN kanban_items ki ON (ki.batch_id = b.id AND (ki.plan_type IS NULL OR ki.plan_type = 'kanban') AND (ki.check_type IS NULL OR ki.check_type != 'Safety Stock') AND (ki.kanban_no IS NULL OR ki.kanban_no NOT LIKE 'SS-%'))
+                    WHERE {$whereStr}
+                    GROUP BY {$dateExpr}
+                    ORDER BY plan_date DESC
+                    LIMIT :limit OFFSET :offset";
+
+            $stmt = $pdo->prepare($sql);
+            foreach ($queryParams as $k => $v) {
+                $stmt->bindValue($k, $v);
+            }
+            $stmt->bindValue(':limit',  (int)$limit,  PDO::PARAM_INT);
+            $stmt->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+            $stmt->execute();
+            $days = $stmt->fetchAll();
         }
-        $stmt->bindValue(':limit',  (int)$limit,  PDO::PARAM_INT);
-        $stmt->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
-        $stmt->execute();
-        $days = $stmt->fetchAll();
 
     } catch (PDOException $e) {
         $days = [];
@@ -400,109 +518,506 @@ $monthsList = [
 
         </div>
 
-        <!-- Daily Planning Summary Table -->
-        <div class="card p-0 overflow-hidden bg-white border border-slate-200/80 rounded-xl shadow-2xs">
-            <div class="px-4 py-3 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between">
-                <h2 class="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center">
-                    <svg class="w-4 h-4 mr-1.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                    </svg>
-                    Ringkasan Jadwal Kanban Per Tanggal
-                </h2>
-                <span class="text-[11px] font-bold text-slate-500">
-                    Total: <?= number_format($totalItems) ?> Hari Terdaftar
-                </span>
+        <?php if ($period === 'today'): ?>
+            <!-- ===================================================================== -->
+            <!-- MODE HARI INI: GELOMBANG / BATCH PILLS & BREAKDOWN ITEM KANBAN        -->
+            <!-- ===================================================================== -->
+            
+            <!-- GELOMBANG / BATCH TABS (Mirip Modules Inspection) -->
+            <div class="card p-3 bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
+                    <div class="text-[11px] font-extrabold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                        <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path>
+                        </svg>
+                        <span>GELOMBANG / BATCH (<?= date('d M Y') ?>):</span>
+                    </div>
+                    <span class="text-[10px] text-slate-400 font-medium">Klik tab batch untuk menyaring daftar part sesuai lembar fisik batch</span>
+                </div>
+
+                <div class="flex items-center gap-2 flex-wrap">
+                    <?php 
+                    $batchNum = 1;
+                    $totalTodayParts = 0;
+                    foreach ($todayBatches as $tb) {
+                        $totalTodayParts += (int)$tb['item_count'];
+                    }
+                    ?>
+
+                    <?php if (empty($todayBatches)): ?>
+                        <span class="text-xs text-slate-400 font-semibold italic py-1">Belum ada batch Kanban yang di-import hari ini.</span>
+                    <?php else: ?>
+                        <!-- Pill Tiap Batch -->
+                        <?php foreach ($todayBatches as $tb): 
+                            $isActiveBatch = ((string)$selectedBatch === (string)$tb['id']);
+                            $timeStr = date('H:i', strtotime($tb['imported_at']));
+                            $cCount = (int)$tb['completed_count'];
+                            $iCount = (int)$tb['item_count'];
+                            $batchLabel = 'Batch ' . $batchNum++ . ' (' . $timeStr . ')';
+                        ?>
+                            <a href="<?= base_url('modules/kanban/index.php?period=today&batch_id=' . $tb['id'] . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '') . ($limit != 50 ? '&limit=' . $limit : '')) ?>"
+                               class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all <?= $isActiveBatch ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200/80' ?>">
+                                <span><?= htmlspecialchars($batchLabel) ?></span>
+                                <span class="px-1.5 py-0.5 rounded text-[10px] font-black <?= $isActiveBatch ? 'bg-white/20 text-white' : 'bg-white text-slate-800 border border-slate-200' ?>">
+                                    <?= $cCount ?>/<?= $iCount ?> Selesai
+                                </span>
+                            </a>
+                        <?php endforeach; ?>
+
+                        <!-- Pill Semua Batch Tanggal Ini -->
+                        <?php $isAllActive = ($selectedBatch === 'all'); ?>
+                        <a href="<?= base_url('modules/kanban/index.php?period=today&batch_id=all' . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '') . ($limit != 50 ? '&limit=' . $limit : '')) ?>"
+                           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all <?= $isAllActive ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200/80' ?>">
+                            <span>Semua Batch Tanggal Ini</span>
+                            <span class="px-1.5 py-0.5 rounded text-[10px] font-black <?= $isAllActive ? 'bg-white/20 text-white' : 'bg-white text-slate-800 border border-slate-200' ?>">
+                                <?= $totalTodayParts ?> Part
+                            </span>
+                        </a>
+                    <?php endif; ?>
+                </div>
             </div>
 
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs text-slate-700">
-                    <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200/80 uppercase tracking-wider text-[10px]">
-                        <tr>
-                            <th class="px-4 py-3">No</th>
-                            <th class="px-4 py-3">Tanggal Inspeksi</th>
-                            <th class="px-4 py-3">Tipe Planning</th>
-                            <th class="px-4 py-3">Jumlah Batch</th>
-                            <th class="px-4 py-3">Total Item</th>
-                            <th class="px-4 py-3">Total Qty (pcs)</th>
-                            <th class="px-4 py-3">Waktu Input</th>
-                            <th class="px-4 py-3 text-right">Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-100">
-                        <?php if (empty($days)): ?>
+            <!-- TABEL BREAKDOWN ITEM KANBAN HARI INI (GAYA WORKBOARD INSPEKSI) -->
+            <style>
+                .row-status-overdue > td {
+                    background-color: #fff1f2 !important;
+                }
+                .row-status-overdue:hover > td {
+                    background-color: #ffe4e6 !important;
+                }
+                .row-status-overdue > td:first-child {
+                    border-left: 5px solid #e11d48 !important;
+                }
+
+                .row-status-active > td {
+                    background-color: #fffbeb !important;
+                }
+                .row-status-active:hover > td {
+                    background-color: #fef3c7 !important;
+                }
+                .row-status-active > td:first-child {
+                    border-left: 5px solid #d97706 !important;
+                }
+
+                .row-status-partial > td {
+                    background-color: #fef3c7 !important;
+                }
+                .row-status-partial:hover > td {
+                    background-color: #fde68a !important;
+                }
+                .row-status-partial > td:first-child {
+                    border-left: 5px solid #f59e0b !important;
+                }
+
+                .row-status-completed > td {
+                    background-color: #dcfce7 !important;
+                }
+                .row-status-completed:hover > td {
+                    background-color: #bbf7d0 !important;
+                }
+                .row-status-completed > td:first-child {
+                    border-left: 5px solid #10b981 !important;
+                }
+
+                .row-status-rejected > td {
+                    background-color: #fff1f2 !important;
+                }
+                .row-status-rejected:hover > td {
+                    background-color: #ffe4e6 !important;
+                }
+                .row-status-rejected > td:first-child {
+                    border-left: 5px solid #be123c !important;
+                }
+
+                .row-status-uninspected > td {
+                    background-color: #ffffff;
+                }
+                .row-status-uninspected:hover > td {
+                    background-color: #f8fafc;
+                }
+                .row-status-uninspected > td:first-child {
+                    border-left: 5px solid #cbd5e1;
+                }
+            </style>
+
+            <div class="card p-0 overflow-hidden bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div class="px-4 py-3 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2">
+                    <div class="flex items-center gap-2">
+                        <span class="inline-flex p-1 rounded-md bg-blue-100 text-blue-700">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                            </svg>
+                        </span>
+                        <h2 class="text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+                            Rincian Item Kanban Hari Ini (<?= date('d M Y') ?>)
+                        </h2>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="text-[11px] font-bold text-slate-500">
+                            Menampilkan <?= count($todayItems) ?> dari <?= number_format($totalItems) ?> Item
+                        </span>
+                        <?php if (!empty($todayBatches)): ?>
+                            <a href="<?= base_url('modules/kanban/daily_detail.php?date=' . date('Y-m-d')) ?>" class="text-[11px] font-bold text-blue-600 hover:underline flex items-center">
+                                Buka Full Detail &rarr;
+                            </a>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs text-slate-700 table-fixed" style="border-collapse: collapse; min-width: 1050px;">
+                        <colgroup>
+                            <col style="width: 50px;">
+                            <col style="width: 20%;">
+                            <col style="width: 24%;">
+                            <col style="width: 17%;">
+                            <col style="width: 14%;">
+                            <col style="width: 12%;">
+                            <col style="width: 13%;">
+                        </colgroup>
+                        <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200/80 uppercase tracking-wider text-[10px]">
                             <tr>
-                                <td colspan="8" class="px-4 py-8 text-center text-slate-400">
-                                    Belum ada data Planning Inspeksi yang sesuai dengan filter.
-                                </td>
+                                <th class="text-center px-2 py-3">No</th>
+                                <th class="px-3 py-3">Kanban</th>
+                                <th class="px-3 py-3">Part</th>
+                                <th class="px-3 py-3">Jadwal & ETA</th>
+                                <th class="px-2 py-3 text-center">Progres</th>
+                                <th class="px-2 py-3 text-center">Status</th>
+                                <th class="px-3 py-3 text-right">Aksi</th>
                             </tr>
-                        <?php else: ?>
-                            <?php foreach ($days as $index => $d): ?>
-                                <tr class="hover:bg-slate-50/80 transition-colors">
-                                    <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
-
-                                    <!-- Tanggal -->
-                                    <td class="px-4 py-3">
-                                        <div class="font-extrabold text-slate-800 text-sm">
-                                            <?= date('d M Y', strtotime($d['plan_date'])) ?>
-                                        </div>
-                                        <div class="text-[10px] text-slate-400 font-medium mt-0.5">
-                                            <?= date('l', strtotime($d['plan_date'])) ?>
-                                        </div>
-                                    </td>
-
-                                    <!-- Tipe Planning Badges -->
-                                    <td class="px-4 py-3">
-                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200 w-fit">
-                                            Kanban (Kirim)
-                                        </span>
-                                    </td>
-
-                                    <!-- Jumlah Batch -->
-                                    <td class="px-4 py-3 font-bold text-slate-700">
-                                        <?= (int)$d['batch_count'] ?> Batch
-                                    </td>
-
-                                    <!-- Total Item -->
-                                    <td class="px-4 py-3 font-bold text-slate-700">
-                                        <?= number_format($d['total_items']) ?> Item
-                                    </td>
-
-                                    <!-- Total Qty -->
-                                    <td class="px-4 py-3 font-extrabold text-slate-800">
-                                        <?= number_format($d['total_pcs'] ?? 0) ?> pcs
-                                    </td>
-
-                                    <!-- Waktu Input Range -->
-                                    <td class="px-4 py-3 text-[11px] text-slate-500 font-medium">
-                                        <?php if ($d['first_import'] === $d['last_import']): ?>
-                                            <?= date('H:i', strtotime($d['first_import'])) ?> WIB
-                                        <?php else: ?>
-                                            <?= date('H:i', strtotime($d['first_import'])) ?> &ndash; <?= date('H:i', strtotime($d['last_import'])) ?> WIB
-                                        <?php endif; ?>
-                                    </td>
-
-                                    <!-- Aksi -->
-                                    <td class="px-4 py-3 text-right">
-                                        <a href="<?= base_url('modules/kanban/daily_detail.php?date=' . urlencode($d['plan_date']) . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '')) ?>"
-                                           class="btn-secondary py-1 px-2.5 text-xs inline-flex items-center" title="Lihat Detail Planning Hari Ini">
-                                            <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                                            </svg>
-                                            Detail Hari
-                                        </a>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <?php if (empty($todayItems)): ?>
+                                <tr>
+                                    <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                                        Tidak ada item Kanban untuk filter batch/hari ini.
                                     </td>
                                 </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
+                            <?php else: ?>
+                                <?php foreach ($todayItems as $idx => $it): 
+                                    $kid = (int)$it['id'];
+                                    $targetQty = (int)($it['qty'] ?? 0);
+                                    $passedQty = (int)($it['passed_qty'] ?? 0);
+                                    $progressPct = ($targetQty > 0) ? min(100, round(($passedQty / $targetQty) * 100)) : 0;
+                                    $isFullyPassed = ($targetQty > 0 && $passedQty >= $targetQty);
+                                    $st = $it['status'] ?? 'uninspected';
+
+                                    $hasActiveSession = !empty($it['has_active_session']);
+                                    $actInspName = htmlspecialchars($it['active_inspector_name'] ?? '');
+
+                                    $schedDate = !empty($it['eta']) ? $it['eta'] : (!empty($it['req_date']) ? $it['req_date'] : $it['created_at']);
+                                    $isOverdue = (!$isFullyPassed && $st !== 'completed' && !empty($schedDate) && date('Y-m-d', strtotime($schedDate)) < date('Y-m-d'));
+                                    $isPartial = (!$isFullyPassed && $st !== 'completed' && ($st === 'partial' || ($passedQty > 0 && $passedQty < $targetQty)));
+                                    $isCompleted = ($isFullyPassed || $st === 'completed');
+                                    $isRejected = ($st === 'rejected' && $passedQty <= 0);
+
+                                    $is100Check = (!empty($it['check_type']) && (strcasecmp($it['check_type'], '100%') === 0 || strpos($it['check_type'], '100') !== false));
+
+                                    if ($isOverdue) {
+                                        $rowColorClass = 'row-status-overdue';
+                                    } elseif ($hasActiveSession) {
+                                        $rowColorClass = 'row-status-active';
+                                    } elseif ($isPartial) {
+                                        $rowColorClass = 'row-status-partial';
+                                    } elseif ($isCompleted) {
+                                        $rowColorClass = 'row-status-completed';
+                                    } elseif ($isRejected) {
+                                        $rowColorClass = 'row-status-rejected';
+                                    } else {
+                                        $rowColorClass = 'row-status-uninspected';
+                                    }
+
+                                    $importMethod = strtolower($it['import_method'] ?? 'manual');
+                                    $isImport = ($importMethod === 'excel_import' || $importMethod === 'excel' || $importMethod === 'csv');
+                                    $partDesc = !empty($it['item_description']) ? $it['item_description'] : (!empty($it['master_part_name']) ? $it['master_part_name'] : '-');
+                                ?>
+                                    <tr class="transition-colors <?= $rowColorClass ?>" style="vertical-align: middle;">
+                                        
+                                        <!-- No Urut -->
+                                        <td class="text-center px-2 py-3 font-semibold text-slate-500 font-mono text-xs">
+                                            <?= $offset + $idx + 1 ?>
+                                        </td>
+                                        
+                                        <!-- KANBAN: #No & Customer -->
+                                        <td class="px-3 py-3">
+                                            <div class="flex items-center space-x-1.5">
+                                                <span class="font-mono font-black text-slate-900 text-xs">
+                                                    #<?= htmlspecialchars($it['kanban_no']) ?>
+                                                </span>
+                                            </div>
+                                            <div class="text-[11px] text-slate-500 font-medium truncate max-w-[200px]" title="<?= htmlspecialchars($it['customer'] ?? 'PT. Indonesia Epson Industry') ?>">
+                                                <?= htmlspecialchars($it['customer'] ?? 'PT. Indonesia Epson Industry') ?>
+                                            </div>
+                                            <div class="mt-1 flex items-center gap-1 flex-wrap">
+                                                <?php if ($isImport): ?>
+                                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-teal-50 text-teal-700 border border-teal-200 uppercase tracking-wider leading-none" title="Dibuat melalui Import File Batch">
+                                                        IMPORT
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-slate-100 text-slate-600 border border-slate-200 uppercase tracking-wider leading-none" title="Dibuat melalui Input Form Manual">
+                                                        MANUAL
+                                                    </span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- PART: Item Code & Name -->
+                                        <td class="px-3 py-3">
+                                            <span class="font-mono font-extrabold text-blue-700 text-xs block">
+                                                <?= htmlspecialchars($it['item_code']) ?>
+                                            </span>
+                                            <span class="text-[11px] text-slate-600 font-medium block truncate max-w-[240px]" title="<?= htmlspecialchars($partDesc) ?>">
+                                                <?= htmlspecialchars($partDesc) ?>
+                                            </span>
+                                            <?php if ($is100Check): ?>
+                                                <div class="mt-0.5">
+                                                    <span class="px-1.5 py-0.2 rounded text-[8.5px] font-bold bg-amber-50 text-amber-800 border border-amber-200 inline-block leading-tight">
+                                                        100% Cek
+                                                    </span>
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- JADWAL & ETA -->
+                                        <td class="px-3 py-3 whitespace-nowrap">
+                                            <div class="font-medium text-slate-700 text-[10px] flex items-center gap-1.5" title="Tanggal Request (Req Date)">
+                                                <svg width="12" height="12" style="width: 12px; height: 12px; min-width: 12px; min-height: 12px;" class="text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                                <span class="<?= ($isOverdue && empty($it['eta'])) ? 'text-rose-700 font-bold' : '' ?>"><?= !empty($it['req_date']) ? date('d/m/Y H:i', strtotime($it['req_date'])) : '-' ?></span>
+                                            </div>
+                                            <?php if (!empty($it['eta'])): ?>
+                                                <div class="text-[9.5px] font-semibold <?= $isOverdue ? 'text-rose-700 font-bold' : 'text-amber-700' ?> flex items-center gap-1.5 mt-0.5" title="Estimasi Kedatangan (ETA)">
+                                                    <svg width="12" height="12" style="width: 12px; height: 12px; min-width: 12px; min-height: 12px;" class="<?= $isOverdue ? 'text-rose-500' : 'text-amber-500' ?> flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                    <span><?= date('d/m/Y H:i', strtotime($it['eta'])) ?></span>
+                                                </div>
+                                            <?php endif; ?>
+
+                                            <?php if ($isOverdue): ?>
+                                                <?php
+                                                    $schedTs = strtotime($schedDate);
+                                                    $daysOver = max(1, (int)floor((strtotime(date('Y-m-d')) - strtotime(date('Y-m-d', $schedTs))) / 86400));
+                                                ?>
+                                                <div class="mt-1 flex items-center gap-1 flex-wrap">
+                                                    <span class="px-1.5 py-0.5 rounded text-[8.5px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 inline-flex items-center gap-1 shadow-2xs">
+                                                        <span class="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span> OVERDUE
+                                                    </span>
+                                                    <span class="px-1.5 py-0.5 rounded text-[8.5px] font-bold bg-rose-50 text-rose-700 border border-rose-200 inline-block">
+                                                        Lewat <?= $daysOver ?> hari
+                                                    </span>
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- PROGRES: 0 / 62 pcs -->
+                                        <td class="px-2 py-3 text-center whitespace-nowrap">
+                                            <div class="font-mono font-black text-xs text-slate-800">
+                                                <span><?= number_format($passedQty) ?></span> <span class="text-slate-400 font-normal">/</span> <?= number_format($targetQty) ?> <span class="text-[10px] text-slate-500 font-medium">pcs</span>
+                                            </div>
+                                            <?php
+                                                if ($isFullyPassed || $progressPct >= 100) {
+                                                    $barBg = 'background: linear-gradient(90deg, #10b981 0%, #059669 100%);';
+                                                    $barLabel = '100% selesai';
+                                                    $labelClass = 'text-emerald-700 font-extrabold';
+                                                    $barFillWidth = 100;
+                                                } elseif ($hasActiveSession) {
+                                                    $barBg = 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);';
+                                                    $barLabel = ($progressPct > 0) ? ($progressPct . '% berjalan') : 'Mulai berjalan';
+                                                    $labelClass = 'text-amber-800 font-black';
+                                                    $barFillWidth = max(8, $progressPct);
+                                                } elseif ($progressPct > 0) {
+                                                    $barBg = 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);';
+                                                    $barLabel = $progressPct . '% parsial';
+                                                    $labelClass = 'text-amber-800 font-extrabold';
+                                                    $barFillWidth = $progressPct;
+                                                } else {
+                                                    $barBg = 'background-color: #cbd5e1;';
+                                                    $barLabel = 'Belum mulai';
+                                                    $labelClass = 'text-slate-400 font-medium';
+                                                    $barFillWidth = 0;
+                                                }
+                                            ?>
+                                            <div class="w-20 rounded-full overflow-hidden mx-auto my-1 bg-slate-200" style="height: 7px; border: 1px solid #cbd5e1;">
+                                                <div style="height: 100%; width: <?= $barFillWidth ?>%; <?= $barBg ?> border-radius: 9999px;"></div>
+                                            </div>
+                                            <span class="text-[10px] <?= $labelClass ?> block leading-none">
+                                                <?= $barLabel ?>
+                                            </span>
+                                        </td>
+
+                                        <!-- STATUS -->
+                                        <td class="px-2 py-3 text-center whitespace-nowrap">
+                                            <?php if ($hasActiveSession): ?>
+                                                <span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(217, 119, 6, 0.4);">
+                                                    <span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #ffffff; display: inline-block;" class="animate-pulse"></span>
+                                                    Sedang Dikerjakan
+                                                </span>
+                                            <?php elseif ($isCompleted): ?>
+                                                <span style="background-color: #16a34a; color: #ffffff; font-weight: 800; font-size: 10.5px; padding: 3px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(22, 163, 74, 0.4);">
+                                                    <svg style="width: 10px; height: 10px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                                                    Selesai
+                                                </span>
+                                            <?php elseif ($isPartial): ?>
+                                                <span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10.5px; padding: 2.5px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px;">
+                                                    Parsial
+                                                </span>
+                                            <?php elseif ($isRejected): ?>
+                                                <span style="background-color: #dc2626; color: #ffffff; font-weight: 800; font-size: 10.5px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px;">
+                                                    Reject
+                                                </span>
+                                            <?php else: ?>
+                                                <span class="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200 inline-flex items-center gap-1">
+                                                    Belum Mulai
+                                                </span>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- AKSI (Close, Edit, Hapus) - Tanpa Tombol Inspeksi -->
+                                        <td class="px-3 py-3 text-right whitespace-nowrap">
+                                            <div class="inline-flex items-center justify-end gap-1.5">
+                                                <?php if (!$isCompleted): ?>
+                                                    <a href="<?= base_url('modules/inspection/close_kanban.php?kanban_id=' . $kid) ?>"
+                                                       style="background-color: #ffffff; color: #475569; border: 1.5px solid #cbd5e1;"
+                                                       onmouseover="this.style.borderColor='#86efac'; this.style.backgroundColor='#f0fdf4'; this.style.color='#15803d';"
+                                                       onmouseout="this.style.borderColor='#cbd5e1'; this.style.backgroundColor='#ffffff'; this.style.color='#475569';"
+                                                       class="px-2.5 py-1 font-extrabold text-xs rounded-md shadow-2xs transition-all inline-flex items-center gap-1 cursor-pointer"
+                                                       title="Tutup / Selesaikan Kanban">
+                                                        <svg class="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                                                        <span>Close</span>
+                                                    </a>
+                                                <?php endif; ?>
+
+                                                <a href="<?= base_url('modules/kanban/edit.php?id=' . $it['id']) ?>" 
+                                                   class="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-colors" title="Edit Data Kanban">
+                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                                                    </svg>
+                                                </a>
+
+                                                <button type="button" 
+                                                        onclick="confirmPostDelete('<?= base_url('modules/kanban/delete.php') ?>', <?= (int)$it['id'] ?>, 'Kanban No <?= htmlspecialchars($it['kanban_no'] ?? '', ENT_QUOTES) ?>', '<?= generate_csrf_token() ?>')"
+                                                        class="p-1 text-rose-600 hover:bg-rose-50 rounded-md transition-colors" title="Hapus Item">
+                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination Footer -->
+                <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
             </div>
 
-            <!-- Pagination Footer -->
-            <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
+        <?php else: ?>
+            <!-- ===================================================================== -->
+            <!-- MODE PERIODE LAIN (MINGGU INI, BULAN INI, TAHUN INI): REKAP PER TGL   -->
+            <!-- ===================================================================== -->
+            <div class="card p-0 overflow-hidden bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div class="px-4 py-3 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between">
+                    <h2 class="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center">
+                        <svg class="w-4 h-4 mr-1.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        Ringkasan Jadwal Kanban Per Tanggal
+                    </h2>
+                    <span class="text-[11px] font-bold text-slate-500">
+                        Total: <?= number_format($totalItems) ?> Hari Terdaftar
+                    </span>
+                </div>
 
-        </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs text-slate-700">
+                        <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200/80 uppercase tracking-wider text-[10px]">
+                            <tr>
+                                <th class="px-4 py-3">No</th>
+                                <th class="px-4 py-3">Tanggal Input / Import</th>
+                                <th class="px-4 py-3">Tipe Planning</th>
+                                <th class="px-4 py-3">Jumlah Batch</th>
+                                <th class="px-4 py-3">Total Item</th>
+                                <th class="px-4 py-3">Total Qty (pcs)</th>
+                                <th class="px-4 py-3">Waktu Input</th>
+                                <th class="px-4 py-3 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <?php if (empty($days)): ?>
+                                <tr>
+                                    <td colspan="8" class="px-4 py-8 text-center text-slate-400">
+                                        Belum ada data Planning Inspeksi yang sesuai dengan filter.
+                                    </td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($days as $index => $d): ?>
+                                    <tr class="hover:bg-slate-50/80 transition-colors">
+                                        <td class="px-4 py-3 font-semibold text-slate-400"><?= $offset + $index + 1 ?></td>
+
+                                        <!-- Tanggal -->
+                                        <td class="px-4 py-3">
+                                            <div class="font-extrabold text-slate-800 text-sm">
+                                                <?= date('d M Y', strtotime($d['plan_date'])) ?>
+                                            </div>
+                                            <div class="text-[10px] text-slate-400 font-medium mt-0.5">
+                                                <?= date('l', strtotime($d['plan_date'])) ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- Tipe Planning Badges -->
+                                        <td class="px-4 py-3">
+                                            <span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-blue-100 text-blue-800 border border-blue-200 w-fit">
+                                                Kanban (Kirim)
+                                            </span>
+                                        </td>
+
+                                        <!-- Jumlah Batch -->
+                                        <td class="px-4 py-3 font-bold text-slate-700">
+                                            <?= (int)$d['batch_count'] ?> Batch
+                                        </td>
+
+                                        <!-- Total Item -->
+                                        <td class="px-4 py-3 font-bold text-slate-700">
+                                            <?= number_format($d['total_items']) ?> Item
+                                        </td>
+
+                                        <!-- Total Qty -->
+                                        <td class="px-4 py-3 font-extrabold text-slate-800">
+                                            <?= number_format($d['total_pcs'] ?? 0) ?> pcs
+                                        </td>
+
+                                        <!-- Waktu Input Range -->
+                                        <td class="px-4 py-3 text-[11px] text-slate-500 font-medium">
+                                            <?php if ($d['first_import'] === $d['last_import']): ?>
+                                                <?= date('H:i', strtotime($d['first_import'])) ?> WIB
+                                            <?php else: ?>
+                                                <?= date('H:i', strtotime($d['first_import'])) ?> &ndash; <?= date('H:i', strtotime($d['last_import'])) ?> WIB
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Aksi -->
+                                        <td class="px-4 py-3 text-right">
+                                            <a href="<?= base_url('modules/kanban/daily_detail.php?date=' . urlencode($d['plan_date']) . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '')) ?>"
+                                               class="btn-secondary py-1 px-2.5 text-xs inline-flex items-center" title="Lihat Detail Planning Hari Ini">
+                                                <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                                </svg>
+                                                Detail Hari
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination Footer -->
+                <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
+            </div>
+        <?php endif; ?>
 
     </main>
 

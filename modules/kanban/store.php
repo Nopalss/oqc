@@ -208,14 +208,25 @@ if ($entryType === 'manual') {
             }
 
             // Per-row Req Date & ETA
-            $rowReqDate = str_replace('T', ' ', sanitize($r['req_date'] ?? date('Y-m-d H:i:s')));
+            $rawReqDate = trim(sanitize($r['req_date'] ?? ''));
+            $rawEta     = trim(sanitize($r['eta'] ?? ''));
+
+            if ($planType === 'kanban') {
+                if (empty($rawReqDate) || empty($rawEta)) {
+                    $pdo->rollBack();
+                    set_flash('error', "Gagal Menyimpan Data: Terdapat baris data Kanban (#{$kanbanNo}) yang tidak memiliki tanggal Req Date atau ETA yang valid. Seluruh transaksi dibatalkan.");
+                    redirect('modules/kanban/create.php');
+                }
+            }
+
+            $rowReqDate = str_replace('T', ' ', $rawReqDate ?: date('Y-m-d H:i:s'));
             if (strlen($rowReqDate) === 10) {
                 $rowReqDate .= ' 00:00:00';
             } elseif (strlen($rowReqDate) === 16) {
                 $rowReqDate .= ':00';
             }
 
-            $rowEta = str_replace('T', ' ', sanitize($r['eta'] ?? $rowReqDate));
+            $rowEta = str_replace('T', ' ', $rawEta ?: $rowReqDate);
             if (strlen($rowEta) === 10) {
                 $rowEta .= ' 00:00:00';
             } elseif (strlen($rowEta) === 16) {

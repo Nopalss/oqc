@@ -49,13 +49,13 @@ $indoMonths = [
 
 if ($pdo) {
     try {
-        // 1. Fetch available months from database based on existing records
+        // 1. Fetch available months from database based on existing records (Optimized to indexed column)
         $stmtMonths = $pdo->query("SELECT 
-                DATE_FORMAT(COALESCE(inspecting_date, created_at), '%Y-%m') AS ym,
+                DATE_FORMAT(inspecting_date, '%Y-%m') AS ym,
                 COUNT(id) AS total_batches,
                 SUM(total_items) AS total_lots
             FROM did_batches 
-            WHERE COALESCE(inspecting_date, created_at) IS NOT NULL
+            WHERE inspecting_date >= DATE_SUB(CURDATE(), INTERVAL 24 MONTH)
             GROUP BY ym 
             ORDER BY ym DESC");
 
@@ -84,7 +84,7 @@ if ($pdo) {
         if ($filterMode === 'month' && !empty($monthPeriod)) {
             $pStart = $monthPeriod . '-01';
             $pEnd   = date('Y-m-t', strtotime($pStart));
-            $countSql .= " AND COALESCE(b.inspecting_date, DATE(b.created_at)) >= :p_start AND COALESCE(b.inspecting_date, DATE(b.created_at)) <= :p_end";
+            $countSql .= " AND b.inspecting_date >= :p_start AND b.inspecting_date <= :p_end";
             $countParams[':p_start'] = $pStart;
             $countParams[':p_end']   = $pEnd;
         } elseif ($filterMode === 'custom') {
@@ -110,7 +110,7 @@ if ($pdo) {
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
 
-        // Fetch Batches: O(1) point-lookup utilizing denormalized counters
+        // Fetch Batches: O(1) point-lookup utilizing denormalized counters & composite index
         $sql = "SELECT b.id, b.batch_name, b.inspecting_date, b.import_method, b.total_items, b.ok_count, b.ng_count, b.created_at
                 FROM did_batches b 
                 WHERE 1=1";
@@ -119,7 +119,7 @@ if ($pdo) {
         if ($filterMode === 'month' && !empty($monthPeriod)) {
             $pStart = $monthPeriod . '-01';
             $pEnd   = date('Y-m-t', strtotime($pStart));
-            $sql .= " AND COALESCE(b.inspecting_date, DATE(b.created_at)) >= :p_start AND COALESCE(b.inspecting_date, DATE(b.created_at)) <= :p_end";
+            $sql .= " AND b.inspecting_date >= :p_start AND b.inspecting_date <= :p_end";
             $params[':p_start'] = $pStart;
             $params[':p_end']   = $pEnd;
         } elseif ($filterMode === 'custom') {
@@ -136,7 +136,7 @@ if ($pdo) {
             }
         }
 
-        $sql .= " ORDER BY b.id DESC LIMIT :limit OFFSET :offset";
+        $sql .= " ORDER BY b.inspecting_date DESC, b.id DESC LIMIT :limit OFFSET :offset";
 
         $stmt = $pdo->prepare($sql);
         foreach ($params as $k => $v) {

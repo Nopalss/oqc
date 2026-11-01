@@ -1,0 +1,284 @@
+/* ── Client Performance Optimization (Low RAM PC 4 GB) ── */
+tr.accordion-sub-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 120px;
+}
+
+/* ── Excel-Style Column Header Filters (100% Solid & High-Contrast) ── */
+.th-filter-wrapper {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    position: relative;
+    gap: 4px;
+}
+.th-filter-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    color: #334155 !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    background-color: #ffffff !important;
+    border: 1.5px solid #cbd5e1 !important;
+    flex-shrink: 0;
+    padding: 0;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.th-filter-btn:hover {
+    color: #1d4ed8 !important;
+    background-color: #dbeafe !important;
+    border-color: #3b82f6 !important;
+}
+.th-filter-btn.active {
+    color: #ffffff !important;
+    background-color: #2563eb !important;
+    border-color: #1d4ed8 !important;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.4);
+}
+.excel-filter-dropdown {
+    position: absolute;
+    top: calc(100% + 5px);
+    z-index: 60;
+    background-color: #ffffff !important;
+    border: 1.5px solid #94a3b8 !important;
+    border-radius: 10px;
+    box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.1);
+    width: 245px;
+    padding: 10px;
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: normal;
+    color: #0f172a;
+    display: none;
+    text-align: left;
+}
+.excel-filter-dropdown.align-right {
+    right: 0;
+    left: auto;
+}
+.excel-filter-dropdown.align-left {
+    left: 0;
+    right: auto;
+}
+.excel-filter-search {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 11px;
+    outline: none;
+    margin-bottom: 8px;
+    background-color: #ffffff;
+    color: #0f172a;
+}
+.excel-filter-search:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px #bfdbfe;
+}
+/* Tombol Cepat: Pilih Semua & Hapus Pilihan (Solid Pill Buttons) */
+.excel-quick-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3.5px 8px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 800;
+    cursor: pointer;
+    border: 1px solid #cbd5e1;
+    background-color: #f1f5f9;
+    color: #1e293b;
+    line-height: 1.2;
+    transition: all 0.15s ease;
+}
+.excel-quick-btn:hover {
+    background-color: #e2e8f0;
+    border-color: #94a3b8;
+    color: #0f172a;
+}
+/* Tombol Reset Header Mini (Solid Red Pill) */
+.excel-reset-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2.5px 7px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 800;
+    cursor: pointer;
+    border: 1px solid #fecdd3;
+    background-color: #ffe4e6;
+    color: #9f1239;
+    line-height: 1.2;
+    transition: all 0.15s ease;
+}
+.excel-reset-btn:hover {
+    background-color: #fecdd3;
+    border-color: #fda4af;
+    color: #881337;
+}
+.excel-filter-list {
+    max-height: 170px;
+    overflow-y: auto;
+    border: 1.5px solid #e2e8f0;
+    background-color: #f8fafc;
+    border-radius: 6px;
+    padding: 4px;
+    font-size: 11px;
+}
+.excel-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+    color: #1e293b;
+}
+.excel-filter-item:hover {
+    background-color: #e2e8f0;
+}
+.excel-filter-item input[type="checkbox"] {
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    accent-color: #2563eb;
+}
+.excel-filter-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1.5px solid #f1f5f9;
+}
+/* Tombol Footer: Tutup & Terapkan */
+.excel-btn-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    border: 1.5px solid #cbd5e1;
+    background-color: #f1f5f9;
+    color: #334155;
+    transition: all 0.15s ease;
+}
+.excel-btn-close:hover {
+    background-color: #e2e8f0;
+    border-color: #94a3b8;
+    color: #0f172a;
+}
+.excel-btn-apply {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    justify-content: center;
+    padding: 5px 14px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+    border: 1.5px solid #1d4ed8;
+    background-color: #2563eb;
+    color: #ffffff;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.4);
+    transition: all 0.15s ease;
+}
+.excel-btn-apply:hover {
+    background-color: #1d4ed8;
+    border-color: #1e40af;
+}
+.excel-btn-apply:active {
+    transform: scale(0.97);
+}
+
+/* ── Real-Time Active Recording (REC) CSS Animation ── */
+@keyframes oqcRecPulse {
+    0% {
+        transform: scale(0.9);
+        opacity: 0.9;
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    }
+    70% {
+        transform: scale(1.15);
+        opacity: 1;
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+    }
+    100% {
+        transform: scale(0.9);
+        opacity: 0.9;
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    }
+}
+@keyframes oqcGlowBorder {
+    0%, 100% {
+        border-color: #fca5a5;
+        background-color: #fff1f2;
+    }
+    50% {
+        border-color: #f87171;
+        background-color: #ffe4e6;
+    }
+}
+.oqc-rec-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    background-color: #ef4444;
+    display: inline-block;
+    flex-shrink: 0;
+    animation: oqcRecPulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    will-change: transform, box-shadow;
+}
+.oqc-rec-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 9999px;
+    font-size: 10.5px;
+    font-weight: 900;
+    color: #b91c1c;
+    border: 1.5px solid #fca5a5;
+    background-color: #fff1f2;
+    box-shadow: 0 1px 3px rgba(239, 68, 68, 0.15);
+    animation: oqcGlowBorder 2s ease-in-out infinite;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+.oqc-live-time-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: #fee2e2;
+    color: #dc2626;
+    font-size: 9px;
+    font-weight: 900;
+    padding: 1px 5px;
+    border-radius: 4px;
+    letter-spacing: 0.4px;
+    border: 1px solid #fca5a5;
+    margin-left: 4px;
+}
+
+/* ── Highlight Baris Sesi "LIVE RECORDING" ── */
+tr.session-data-row.session-row-live {
+    background-color: #fff8f8 !important;
+    box-shadow: inset 4px 0 0 0 #ef4444;
+}
+tr.session-data-row.session-row-live:hover {
+    background-color: #fee2e2 !important;
+}
+

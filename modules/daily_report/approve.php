@@ -20,11 +20,48 @@ if (!$pdo) {
     redirect('modules/daily_report/index.php');
 }
 
+$isAjax = isset($_POST['ajax']) || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
+
+if (!is_logged_in()) {
+    if ($isAjax) {
+        http_response_code(401);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Sesi telah berakhir. Silakan login kembali.']);
+        exit;
+    }
+    set_flash('error', 'Silakan login terlebih dahulu.');
+    redirect('login.php');
+}
+
 $currentUser = current_user();
-$userId   = (int)($currentUser['id'] ?? 1);
+$userRole = strtolower($currentUser['role'] ?? '');
+$allowedRoles = ['supervisor', 'chief', 'admin', 'leader'];
+
+if (!in_array($userRole, $allowedRoles)) {
+    if ($isAjax) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Akses ditolak: Anda tidak memiliki wewenang untuk menyetujui (ACC) laporan.']);
+        exit;
+    }
+    set_flash('error', 'Akses ditolak: Hanya Supervisor atau Admin yang berhak melakukan ACC.');
+    redirect('modules/daily_report/index.php');
+}
+
+if (!verify_csrf_token()) {
+    if ($isAjax) {
+        http_response_code(403);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => 'Validasi token keamanan (CSRF) gagal. Silakan muat ulang halaman.']);
+        exit;
+    }
+    set_flash('error', 'Token keamanan tidak valid atau telah kedaluwarsa.');
+    redirect('modules/daily_report/index.php');
+}
+
+$userId   = (int)$currentUser['id'];
 $userName = $currentUser['name'] ?? 'Supervisor';
 
-$isAjax = isset($_POST['ajax']) || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
 $action = sanitize($_POST['action'] ?? '');
 $redirectDate = sanitize($_POST['date'] ?? date('Y-m-d'));
 

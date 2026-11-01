@@ -330,11 +330,22 @@ if ($entryType === 'manual') {
 
     $stmtInsertBatch = $pdo->prepare("INSERT INTO did_batches (batch_name, inspecting_date, import_method, total_items, created_by, created_at) VALUES (:bname, :idate, 'excel_import', 0, :cby, NOW())");
 
-    $stmtRecalcBatch = $pdo->prepare("UPDATE did_batches SET 
-        total_items = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid1),
-        ok_count = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid2 AND status_inspect = 'OK'),
-        ng_count = (SELECT COUNT(*) FROM daily_inspection_data WHERE batch_id = :bid3 AND status_inspect = 'NG')
-        WHERE id = :bid4");
+    $stmtRecalcBatch = $pdo->prepare("UPDATE did_batches b
+        JOIN (
+            SELECT 
+                batch_id,
+                COUNT(*) AS total_items,
+                SUM(CASE WHEN status_inspect = 'OK' THEN 1 ELSE 0 END) AS ok_count,
+                SUM(CASE WHEN status_inspect = 'NG' THEN 1 ELSE 0 END) AS ng_count
+            FROM daily_inspection_data
+            WHERE batch_id = :bid
+            GROUP BY batch_id
+        ) agg ON b.id = agg.batch_id
+        SET 
+            b.total_items = agg.total_items,
+            b.ok_count = agg.ok_count,
+            b.ng_count = agg.ng_count
+        WHERE b.id = :bid_where");
 
     $currentUserId = current_user()['id'];
     $totalInserted = 0;
@@ -415,9 +426,9 @@ if ($entryType === 'manual') {
             $summaryLines[] = date('d M Y', strtotime($inspectingDate)) . ' → ' . ($sheetInserted + $sheetUpdated) . ' item (' . $sheetInserted . ' baru, ' . $sheetUpdated . ' di-update)';
         }
 
-        // Recalculate summary stats for all affected batches
+        // Recalculate summary stats for all affected batches (Single-pass aggregate per batch)
         foreach (array_keys($affectedBatches) as $bId) {
-            $stmtRecalcBatch->execute([':bid1' => $bId, ':bid2' => $bId, ':bid3' => $bId, ':bid4' => $bId]);
+            $stmtRecalcBatch->execute([':bid' => $bId, ':bid_where' => $bId]);
         }
 
         $pdo->commit();

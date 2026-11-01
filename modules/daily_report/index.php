@@ -85,6 +85,20 @@ $limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 15;
 if (!in_array($limit, [10, 15, 25, 50, 100])) $limit = 15;
 $page = max(1, filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1);
 
+// Paginasi Sesi Kronologis (Smart: Hari Ini = Tampil Semua, Rentang Luas = Paginasi 50)
+$isHariIni = ($presetFilter === 'hari_ini');
+$sessionLimit = $isHariIni ? 1000 : 50;
+$sessionPage = max(1, filter_input(INPUT_GET, 'session_page', FILTER_VALIDATE_INT) ?: 1);
+$showApproved = filter_input(INPUT_GET, 'show_approved', FILTER_VALIDATE_INT);
+if ($showApproved === null) {
+    // Default: jika di hari_ini atau belum di-set, default 0 (hanya sesi menunggu ACC)
+    $showApproved = 0;
+} else {
+    $showApproved = $showApproved ? 1 : 0;
+}
+$totalSessionRows = 0;
+$totalSessionPages = 1;
+
 // ── Helper: AQL Level II Lookup for Lot Fallback ───────────────────────────
 if (!function_exists('getLotAqlFallback')) {
     function getLotAqlFallback($qty, $pdo = null) {
@@ -208,8 +222,10 @@ if (!function_exists('renderLotStatusBadge')) {
 // Data structures
 $dailySummary = [
     'total_sesi'              => 0,
+    'completed_sesi'          => 0,
     'passed_sesi'             => 0,
     'rejected_sesi'           => 0,
+    'in_prog_sesi'            => 0,
     'total_kanban_sesi'       => 0,
     'total_ss_sesi'           => 0,
     'total_kanban_items'      => 0,
@@ -228,6 +244,7 @@ $sessionTimeline = [];
 $allLotsMap = [];
 $allNgMap = [];
 $allUnmatchedNgMap = [];
+$inspectorSummary = [];
 
 $rows       = [];
 $totalItems = 0;
@@ -243,12 +260,15 @@ if ($pdo) {
         $params = [];
 
         if ($presetFilter !== 'all_years' && !empty($startDate) && !empty($endDate)) {
-            // Logika Cerdas: Tampilkan sesi pada rentang tanggal aktif
-            // ATAU sesi lampau yang MASIH BELUM DISETUJUI (Pending ACC tunggakan kemarin)
-            $where[] = "(DATE(ss.started_at) BETWEEN :sd AND :ed OR (ss.is_approved = 0 AND DATE(ss.started_at) < :sd_pending))";
-            $params[':sd'] = $startDate;
-            $params[':ed'] = $endDate;
-            $params[':sd_pending'] = $startDate;
+            // Logika Cerdas (Sargable Datetime Range Query):
+            // Tampilkan sesi pada rentang tanggal aktif
+            // ATAU sesi lampau yang MASIH BELUM DISETUJUI (Pending ACC tunggakan hingga maksimal 30 hari ke belakang)
+            // Menggunakan operator datetime murni agar B-Tree index (idx_sess_started_at) bekerja maksimal tanpa Full Scan
+            $where[] = "((ss.started_at >= :dt_start AND ss.started_at <= :dt_end) OR (ss.is_approved = 0 AND ss.started_at >= :dt_pending_start AND ss.started_at < :dt_pending_end))";
+            $params[':dt_start']         = $startDate . ' 00:00:00';
+            $params[':dt_end']           = $endDate . ' 23:59:59';
+            $params[':dt_pending_start'] = date('Y-m-d 00:00:00', strtotime($startDate . ' -30 days'));
+            $params[':dt_pending_end']   = $startDate . ' 00:00:00';
         }
 
         if ($inspectorId > 0) {
@@ -322,6 +342,96 @@ if ($pdo) {
         // ═══════════════════════════════════════════════════════════════════
         // 1. QUERY TAB SESI INSPEKSI & 5 KPI CARDS
         // ═══════════════════════════════════════════════════════════════════
+        // A. Hitung total baris sesi & agregasi 5 KPI Banner secara instan di SQL (Zero-Memory Overhead)
+        $sqlCountKpi = "
+            SELECT 
+                COUNT(ss.id) AS total_sesi,
+                SUM(CASE WHEN ss.status = 'passed' THEN 1 ELSE 0 END) AS passed_sesi,
+                SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) AS rejected_sesi,
+                SUM(CASE WHEN ss.status = 'in_progress' OR ss.status IS NULL THEN 1 ELSE 0 END) AS in_prog_sesi,
+                SUM(CASE WHEN ss.status = 'passed' OR ss.status = 'rejected' THEN 1 ELSE 0 END) AS completed_sesi,
+                SUM(CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND ss.inspection_type = 'kanban' THEN 1 ELSE 0 END) AS total_kanban_sesi,
+                SUM(CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND ss.inspection_type = 'safety_stock' THEN 1 ELSE 0 END) AS total_ss_sesi,
+                COUNT(DISTINCT CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND ss.inspection_type = 'kanban' THEN ss.kanban_item_id END) AS total_kanban_items,
+                COUNT(DISTINCT CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND ss.inspection_type != 'kanban' THEN CONCAT(COALESCE(did.part_code, mp.part_code), '_', COALESCE(did.lot_number, 'NOLOT')) END) AS total_ss_items,
+                COALESCE(SUM(CASE WHEN ss.status = 'passed' OR ss.status = 'rejected' THEN ss.total_scanned_qty ELSE 0 END), 0) AS total_qty,
+                COALESCE(SUM(CASE WHEN ss.status = 'passed' OR ss.status = 'rejected' THEN ss.sample_size ELSE 0 END), 0) AS total_sampling,
+                COALESCE(SUM(CASE WHEN ss.status = 'passed' OR ss.status = 'rejected' THEN ss.ng_count ELSE 0 END), 0) AS total_ng,
+                SUM(CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND ss.is_approved = 1 THEN 1 ELSE 0 END) AS total_approved_sessions,
+                SUM(CASE WHEN (ss.status = 'passed' OR ss.status = 'rejected') AND (ss.is_approved = 0 OR ss.is_approved IS NULL) THEN 1 ELSE 0 END) AS total_pending_sessions
+            FROM inspection_sessions ss
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN master_parts mp ON mp.id = ss.part_id
+            LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
+            WHERE {$whereStr}
+        ";
+        $stKpi = $pdo->prepare($sqlCountKpi);
+        $stKpi->execute($params);
+        $kpiAgg = $stKpi->fetch(PDO::FETCH_ASSOC);
+
+        if ($kpiAgg) {
+            $totalSessionRows                        = (int)$kpiAgg['total_sesi'];
+            $dailySummary['total_sesi']              = $totalSessionRows;
+            $dailySummary['completed_sesi']          = (int)$kpiAgg['completed_sesi'];
+            $dailySummary['passed_sesi']             = (int)$kpiAgg['passed_sesi'];
+            $dailySummary['rejected_sesi']           = (int)$kpiAgg['rejected_sesi'];
+            $dailySummary['in_prog_sesi']            = (int)$kpiAgg['in_prog_sesi'];
+            $dailySummary['total_kanban_sesi']       = (int)$kpiAgg['total_kanban_sesi'];
+            $dailySummary['total_ss_sesi']           = (int)$kpiAgg['total_ss_sesi'];
+            $dailySummary['total_kanban_items']      = (int)$kpiAgg['total_kanban_items'];
+            $dailySummary['total_ss_items']          = (int)$kpiAgg['total_ss_items'];
+            $dailySummary['total_items']             = $dailySummary['total_kanban_items'] + $dailySummary['total_ss_items'];
+            $dailySummary['total_qty']               = (int)$kpiAgg['total_qty'];
+            $dailySummary['total_sampling']          = (int)$kpiAgg['total_sampling'];
+            $dailySummary['total_ng']                = (int)$kpiAgg['total_ng'];
+            $dailySummary['total_approved_sessions'] = (int)$kpiAgg['total_approved_sessions'];
+            $dailySummary['total_pending_sessions']  = (int)$kpiAgg['total_pending_sessions'];
+            $dailySummary['is_all_approved']         = ($dailySummary['completed_sesi'] > 0 && $dailySummary['total_pending_sessions'] === 0);
+        }
+
+        // B. Total Label (Box) dari tabel inspection_session_lots
+        $sqlCountLots = "
+            SELECT COUNT(isl.id) AS total_label
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN master_parts mp ON mp.id = ss.part_id
+            LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
+            WHERE {$whereStr}
+              AND (ss.status = 'passed' OR ss.status = 'rejected')
+              AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE 'Sisa Kelebihan Kanban%'))
+        ";
+        $stLotsAgg = $pdo->prepare($sqlCountLots);
+        $stLotsAgg->execute($params);
+        $dailySummary['total_label'] = (int)$stLotsAgg->fetchColumn();
+
+        // C. Hitung Offset Paginasi untuk Baris Sesi yang Ditampilkan
+        // Jika toggle showApproved = 0 (hanya sesi menunggu ACC), total baris yang dipaginasi adalah sesi pending
+        $targetSessionCount = ($showApproved === 0) ? $dailySummary['total_pending_sessions'] : $totalSessionRows;
+
+        if ($isHariIni) {
+            $totalSessionPages = 1;
+            $sessionPage = 1;
+            $sessionOffset = 0;
+            $limitClause = "LIMIT 1000";
+        } else {
+            $totalSessionPages = max(1, ceil($targetSessionCount / $sessionLimit));
+            if ($sessionPage > $totalSessionPages) $sessionPage = $totalSessionPages;
+            $sessionOffset = ($sessionPage - 1) * $sessionLimit;
+            $limitClause = "LIMIT {$sessionLimit} OFFSET {$sessionOffset}";
+        }
+
+        // Where clause khusus untuk query sesi tampilan
+        $whereSessions = $where;
+        $paramsSessions = $params;
+        if ($showApproved === 0) {
+            $whereSessions[] = "(ss.is_approved = 0 OR ss.is_approved IS NULL)";
+        }
+        $whereSessionsStr = implode(' AND ', $whereSessions);
+
+        // D. Query Pengambilan Baris Sesi Tampilan
         $sqlSessions = "
             SELECT 
                 ss.id AS session_id,
@@ -366,33 +476,32 @@ if ($pdo) {
                 did.cavity AS did_cavity,
                 did.pic AS did_pic,
                 -- Master Part details
-                COALESCE(did.part_code, ki.item_code, mp.part_code, '-') AS part_code,
-                COALESCE(did.part_name, ki.item_description, mp.part_name, '-') AS part_name,
-                COALESCE(mm.name, mp.model, '-') AS model_name
+                COALESCE(did.part_code, ki.item_code, mp.part_code, mp_fb.part_code, '-') AS part_code,
+                COALESCE(did.part_name, ki.item_description, mp.part_name, mp_fb.part_name, '-') AS part_name,
+                COALESCE(mm.name, mp.model, mp_fb.model, '-') AS model_name
             FROM inspection_sessions ss
             LEFT JOIN `lines` l ON l.id = ss.line_id
             LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
             LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
-            LEFT JOIN master_parts mp ON (mp.id = ss.part_id OR UPPER(mp.part_code) = UPPER(COALESCE(did.part_code, ki.item_code)))
-            LEFT JOIN master_models mm ON mm.id = mp.model_id
+            LEFT JOIN master_parts mp ON mp.id = ss.part_id
+            LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
+            LEFT JOIN master_models mm ON mm.id = COALESCE(mp.model_id, mp_fb.model_id)
             LEFT JOIN users u ON u.id = ss.inspector_id
             LEFT JOIN users u_app ON u_app.id = ss.approved_by
-            WHERE {$whereStr}
+            WHERE {$whereSessionsStr}
             ORDER BY ss.started_at DESC, ss.id DESC
+            {$limitClause}
         ";
 
         $stSess = $pdo->prepare($sqlSessions);
-        $stSess->execute($params);
+        $stSess->execute($paramsSessions);
         $rawSessions = $stSess->fetchAll(PDO::FETCH_ASSOC);
-
-        $kanbanItemKeys = [];
-        $ssItemKeys     = [];
 
         if (!empty($rawSessions)) {
             $sessionIds = array_column($rawSessions, 'session_id');
             $inSessIds  = implode(',', array_map('intval', $sessionIds));
 
-            // Scanned lots query
+            // Scanned lots query (hanya untuk sesi yang tampil di halaman aktif)
             $stmtLots = $pdo->query("
                 SELECT 
                     isl.id AS lot_id,
@@ -446,7 +555,7 @@ if ($pdo) {
                 $rawLotsList[$sId][] = $lRow;
             }
 
-            // Defect NG query
+            // Defect NG query (hanya untuk sesi yang tampil di halaman aktif)
             $stmtNg = $pdo->query("
                 SELECT 
                     ngr.id,
@@ -537,7 +646,7 @@ if ($pdo) {
                 }
             }
 
-            // Build Timeline list and calculate 5 KPI totals
+            // Build Timeline list untuk baris yang ditampilkan
             foreach ($rawSessions as $sess) {
                 $sId = (int)$sess['session_id'];
                 $sessLots = $allLotsMap[$sId] ?? [];
@@ -582,41 +691,7 @@ if ($pdo) {
                 $timelineItem['reinspect_samples'] = $extraSamples;
 
                 $sessionTimeline[] = $timelineItem;
-
-                // Unique Items tally & Session Type tally
-                if ($sess['inspection_type'] === 'kanban') {
-                    $dailySummary['total_kanban_sesi']++;
-                    $kKey = $sess['kanban_item_id'] ?: ($sess['part_code'] . '_' . $sess['kanban_no']);
-                    $kanbanItemKeys[$kKey] = true;
-                } else {
-                    $dailySummary['total_ss_sesi']++;
-                    $sKey = strtoupper($sess['part_code']) . '_' . strtoupper($sess['did_lot_number'] ?: 'NOLOT');
-                    $ssItemKeys[$sKey] = true;
-                }
-
-                // 5 KPI Accumulators
-                $dailySummary['total_sesi']++;
-                if ($sess['session_status'] === 'passed') {
-                    $dailySummary['passed_sesi']++;
-                } elseif ($sess['session_status'] === 'rejected') {
-                    $dailySummary['rejected_sesi']++;
-                }
-                $dailySummary['total_label']    += $boxCount;
-                $dailySummary['total_sampling'] += $sessEffectiveSample;
-                $dailySummary['total_qty']      += $sessTotalQty;
-                $dailySummary['total_ng']       += $sessNgCount;
-
-                if (!empty($sess['is_approved']) && (int)$sess['is_approved'] === 1) {
-                    $dailySummary['total_approved_sessions']++;
-                } else {
-                    $dailySummary['total_pending_sessions']++;
-                }
             }
-
-            $dailySummary['total_kanban_items'] = count($kanbanItemKeys);
-            $dailySummary['total_ss_items']     = count($ssItemKeys);
-            $dailySummary['total_items']        = $dailySummary['total_kanban_items'] + $dailySummary['total_ss_items'];
-            $dailySummary['is_all_approved']    = ($dailySummary['total_sesi'] > 0 && $dailySummary['total_pending_sessions'] === 0);
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -705,7 +780,8 @@ if ($pdo) {
                 FROM inspection_sessions ss
                 LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
                 LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
-                LEFT JOIN master_parts mp ON (mp.id = ss.part_id OR UPPER(mp.part_code) = UPPER(COALESCE(did.part_code, ki.item_code)))
+                LEFT JOIN master_parts mp ON mp.id = ss.part_id
+                LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
                 LEFT JOIN (
                     SELECT 
                         inspection_session_id, 
@@ -737,14 +813,28 @@ if ($pdo) {
                 GROUP BY DATE(ss.started_at)
                 ORDER BY DATE(ss.started_at) DESC";
 
-        $stAll = $pdo->prepare($sqlDailyGroup);
-        $stAll->execute($params);
-        $allRows = $stAll->fetchAll(PDO::FETCH_ASSOC);
+        // 1. Hitung total tanggal secara efisien untuk paginasi (Zero-Memory Overhead)
+        $sqlCountDaily = "SELECT COUNT(DISTINCT DATE(ss.started_at))
+                          FROM inspection_sessions ss
+                          LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                          LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+                          LEFT JOIN master_parts mp ON mp.id = ss.part_id
+                          LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
+                          WHERE {$whereStr}";
+        $stCount = $pdo->prepare($sqlCountDaily);
+        $stCount->execute($params);
+        $totalItems = (int)$stCount->fetchColumn();
 
-        $totalItems = count($allRows);
         $totalPages = max(1, ceil($totalItems / $limit));
         if ($page > $totalPages) $page = $totalPages;
-        $rows = array_slice($allRows, ($page - 1) * $limit, $limit);
+        $offset = ($page - 1) * $limit;
+
+        // 2. Ambil hanya baris halaman aktif langsung via LIMIT & OFFSET di MySQL
+        $sqlDailyGroup .= " LIMIT {$limit} OFFSET {$offset}";
+
+        $stPage = $pdo->prepare($sqlDailyGroup);
+        $stPage->execute($params);
+        $rows = $stPage->fetchAll(PDO::FETCH_ASSOC);
 
     } catch (PDOException $e) {
         set_flash('error', 'Gagal memuat laporan: ' . $e->getMessage());
@@ -763,395 +853,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
         <?= render_flash() ?>
 
-        <style>
-        /* ── Excel-Style Column Header Filters (100% Solid & High-Contrast) ── */
-        .th-filter-wrapper {
-            display: inline-flex;
-            align-items: center;
-            justify-content: space-between;
-            width: 100%;
-            position: relative;
-            gap: 4px;
-        }
-        .th-filter-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 20px;
-            height: 20px;
-            border-radius: 4px;
-            color: #334155 !important;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            background-color: #ffffff !important;
-            border: 1.5px solid #cbd5e1 !important;
-            flex-shrink: 0;
-            padding: 0;
-            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-        }
-        .th-filter-btn:hover {
-            color: #1d4ed8 !important;
-            background-color: #dbeafe !important;
-            border-color: #3b82f6 !important;
-        }
-        .th-filter-btn.active {
-            color: #ffffff !important;
-            background-color: #2563eb !important;
-            border-color: #1d4ed8 !important;
-            box-shadow: 0 1px 3px rgba(37, 99, 235, 0.4);
-        }
-        .excel-filter-dropdown {
-            position: absolute;
-            top: calc(100% + 5px);
-            z-index: 60;
-            background-color: #ffffff !important;
-            border: 1.5px solid #94a3b8 !important;
-            border-radius: 10px;
-            box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.2), 0 4px 6px -2px rgba(0, 0, 0, 0.1);
-            width: 245px;
-            padding: 10px;
-            text-transform: none;
-            letter-spacing: normal;
-            font-weight: normal;
-            color: #0f172a;
-            display: none;
-            text-align: left;
-        }
-        .excel-filter-dropdown.align-right {
-            right: 0;
-            left: auto;
-        }
-        .excel-filter-dropdown.align-left {
-            left: 0;
-            right: auto;
-        }
-        .excel-filter-search {
-            width: 100%;
-            padding: 6px 10px;
-            border: 1.5px solid #cbd5e1;
-            border-radius: 6px;
-            font-size: 11px;
-            outline: none;
-            margin-bottom: 8px;
-            background-color: #ffffff;
-            color: #0f172a;
-        }
-        .excel-filter-search:focus {
-            border-color: #2563eb;
-            box-shadow: 0 0 0 2px #bfdbfe;
-        }
-        /* Tombol Cepat: Pilih Semua & Hapus Pilihan (Solid Pill Buttons) */
-        .excel-quick-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 3.5px 8px;
-            border-radius: 5px;
-            font-size: 10.5px;
-            font-weight: 800;
-            cursor: pointer;
-            border: 1px solid #cbd5e1;
-            background-color: #f1f5f9;
-            color: #1e293b;
-            line-height: 1.2;
-            transition: all 0.15s ease;
-        }
-        .excel-quick-btn:hover {
-            background-color: #e2e8f0;
-            border-color: #94a3b8;
-            color: #0f172a;
-        }
-        /* Tombol Reset Header Mini (Solid Red Pill) */
-        .excel-reset-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 3px;
-            padding: 2.5px 7px;
-            border-radius: 5px;
-            font-size: 10px;
-            font-weight: 800;
-            cursor: pointer;
-            border: 1px solid #fecdd3;
-            background-color: #ffe4e6;
-            color: #9f1239;
-            line-height: 1.2;
-            transition: all 0.15s ease;
-        }
-        .excel-reset-btn:hover {
-            background-color: #fecdd3;
-            border-color: #fda4af;
-            color: #881337;
-        }
-        .excel-filter-list {
-            max-height: 170px;
-            overflow-y: auto;
-            border: 1.5px solid #e2e8f0;
-            background-color: #f8fafc;
-            border-radius: 6px;
-            padding: 4px;
-            font-size: 11px;
-        }
-        .excel-filter-item {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 6px;
-            border-radius: 4px;
-            cursor: pointer;
-            user-select: none;
-            font-weight: 600;
-            color: #1e293b;
-        }
-        .excel-filter-item:hover {
-            background-color: #e2e8f0;
-        }
-        .excel-filter-item input[type="checkbox"] {
-            cursor: pointer;
-            width: 14px;
-            height: 14px;
-            border-radius: 3px;
-            accent-color: #2563eb;
-        }
-        .excel-filter-actions {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-top: 10px;
-            padding-top: 8px;
-            border-top: 1.5px solid #f1f5f9;
-        }
-        /* Tombol Footer: Tutup & Terapkan */
-        .excel-btn-close {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 5px 12px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 800;
-            cursor: pointer;
-            border: 1.5px solid #cbd5e1;
-            background-color: #f1f5f9;
-            color: #334155;
-            transition: all 0.15s ease;
-        }
-        .excel-btn-close:hover {
-            background-color: #e2e8f0;
-            border-color: #94a3b8;
-            color: #0f172a;
-        }
-        .excel-btn-apply {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            justify-content: center;
-            padding: 5px 14px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 800;
-            cursor: pointer;
-            border: 1.5px solid #1d4ed8;
-            background-color: #2563eb;
-            color: #ffffff;
-            box-shadow: 0 1px 2px rgba(37, 99, 235, 0.4);
-            transition: all 0.15s ease;
-        }
-        .excel-btn-apply:hover {
-            background-color: #1d4ed8;
-            border-color: #1e40af;
-        }
-        .excel-btn-apply:active {
-            transform: scale(0.97);
-        }
-
-        /* ── Real-Time Active Recording (REC) CSS Animation ── */
-        @keyframes oqcRecPulse {
-            0% {
-                transform: scale(0.9);
-                opacity: 0.9;
-                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-            }
-            70% {
-                transform: scale(1.15);
-                opacity: 1;
-                box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
-            }
-            100% {
-                transform: scale(0.9);
-                opacity: 0.9;
-                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
-            }
-        }
-        @keyframes oqcGlowBorder {
-            0%, 100% {
-                border-color: #fca5a5;
-                background-color: #fff1f2;
-            }
-            50% {
-                border-color: #f87171;
-                background-color: #ffe4e6;
-            }
-        }
-        .oqc-rec-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 9999px;
-            background-color: #ef4444;
-            display: inline-block;
-            flex-shrink: 0;
-            animation: oqcRecPulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-            will-change: transform, box-shadow;
-        }
-        .oqc-rec-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 3px 9px;
-            border-radius: 9999px;
-            font-size: 10.5px;
-            font-weight: 900;
-            color: #b91c1c;
-            border: 1.5px solid #fca5a5;
-            background-color: #fff1f2;
-            box-shadow: 0 1px 3px rgba(239, 68, 68, 0.15);
-            animation: oqcGlowBorder 2s ease-in-out infinite;
-            letter-spacing: 0.3px;
-            white-space: nowrap;
-        }
-        .oqc-live-time-tag {
-            display: inline-flex;
-            align-items: center;
-            gap: 3px;
-            background: #fee2e2;
-            color: #dc2626;
-            font-size: 9px;
-            font-weight: 900;
-            padding: 1px 5px;
-            border-radius: 4px;
-            letter-spacing: 0.4px;
-            border: 1px solid #fca5a5;
-            margin-left: 4px;
-        }
-
-        /* ── Highlight Baris Sesi "LIVE RECORDING" ── */
-        tr.session-data-row.session-row-live {
-            background-color: #fff8f8 !important;
-            box-shadow: inset 4px 0 0 0 #ef4444;
-        }
-        tr.session-data-row.session-row-live:hover {
-            background-color: #fee2e2 !important;
-        }
-        </style>
+        <link rel="stylesheet" href="<?= base_url('assets/css/modules/daily_report.css?v=' . APP_VERSION) ?>">
 
         <!-- ═══════════════════════════════════════════════════════════════════ -->
-        <!-- 1. HEADER BANNER WITH EXECUTIVE 5 KPI CARDS RIBBON -->
-        <!-- ═══════════════════════════════════════════════════════════════════ -->
-        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%); border-radius: 14px; padding: 16px 20px; color: #fff; box-shadow: 0 4px 16px rgba(15,23,42,0.18);">
-            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <div style="background: rgba(59,130,246,0.22); border: 1px solid rgba(59,130,246,0.35); padding: 10px; border-radius: 12px; flex-shrink: 0;">
-                        <svg style="width: 22px; height: 22px; color: #93c5fd;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                        </svg>
-                    </div>
-                    <div>
-                        <div style="font-size: 10px; font-weight: 800; color: #93c5fd; text-transform: uppercase; letter-spacing: 0.6px;">Outgoing Quality Control &bull; Executive Monitoring</div>
-                        <h1 style="font-size: 16px; font-weight: 900; margin: 2px 0 0 0; line-height: 1.2; letter-spacing: -0.2px;">Laporan Inspeksi Harian</h1>
-                        <p style="font-size: 11px; color: #cbd5e1; font-weight: 500; margin: 2px 0 0 0;">
-                            Periode: <b><?= date('d M Y', strtotime($startDate)) ?></b> s/d <b><?= date('d M Y', strtotime($endDate)) ?></b>
-                            <?php if (!empty($search)): ?> &bull; Filter: "<?= htmlspecialchars($search) ?>"<?php endif; ?>
-                        </p>
-                    </div>
-                </div>
-                
-                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-                    <a href="<?= base_url('modules/daily_report/export_excel.php?' . http_build_query([
-                        'start_date' => $startDate,
-                        'end_date'   => $endDate,
-                        'search'     => $search
-                    ])) ?>" target="_blank" style="background: #16a34a; border: 1px solid #15803d; color: #ffffff; border-radius: 9999px; padding: 7px 16px; font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; box-shadow: 0 2px 8px rgba(22,163,74,0.35); transition: all 0.2s;" onmouseover="this.style.background='#15803d'" onmouseout="this.style.background='#16a34a'">
-                        <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                        </svg>
-                        Export Excel
-                    </a>
-                    <a href="<?= base_url('modules/daily_report/index.php') ?>" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.18); color: #e2e8f0; border-radius: 9999px; padding: 7px 14px; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; text-decoration: none;">
-                        <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                        </svg>
-                        Refresh
-                    </a>
-                </div>
-            </div>
-
-            <!-- 5 KPI CARDS RIBBON GRID -->
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 14px;">
-                <!-- KPI 1: Total Sesi Inspeksi (Digabung: Status Pass/Reject & Jenis Kanban/SS) -->
-                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL SESI INSPEKSI</div>
-                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_sesi']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">sesi</span>
-                    </div>
-                    <div style="font-size: 9.5px; color: #38bdf8; font-weight: 700; margin-top: 3px; line-height: 1.3;">
-                        <span><?= $dailySummary['passed_sesi'] ?> Pass &bull; <?= $dailySummary['rejected_sesi'] ?> Reject</span>
-                        <span style="color: #cbd5e1; margin-left: 2px;">(<?= $dailySummary['total_kanban_sesi'] ?> KB &bull; <?= $dailySummary['total_ss_sesi'] ?> SS)</span>
-                    </div>
-                </div>
-
-                <!-- KPI 2: Total Lot & Sampling (LOT DULU BARU SAMPLE) -->
-                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL LOT &amp; SAMPLING</div>
-                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_label']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">Lot</span>
-                    </div>
-                    <div style="font-size: 10px; color: #38bdf8; font-weight: 800; margin-top: 3px;">
-                        <?= number_format($dailySummary['total_sampling']) ?> pcs Sampling Fisik
-                    </div>
-                </div>
-
-                <!-- KPI 3: Total Kuantitas Barang (Qty Pcs) -->
-                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL BARANG (QTY)</div>
-                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_qty']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">pcs</span>
-                    </div>
-                    <div style="font-size: 10px; color: #c4b5fd; font-weight: 700; margin-top: 3px;">
-                        <?= $dailySummary['total_items'] ?> Jenis Part Diperiksa
-                    </div>
-                </div>
-
-                <!-- KPI 4: Temuan Cacat (NG) -->
-                <div style="background: <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.22)' : 'rgba(255,255,255,0.08)' ?>; border: 1px solid <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.4)' : 'rgba(255,255,255,0.12)' ?>; border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#94a3b8' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TEMUAN CACAT (NG)</div>
-                    <div style="font-size: 20px; font-weight: 900; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#fff' ?>; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= number_format($dailySummary['total_ng']) ?> <span style="font-size: 11px; font-weight: 600;"><?= $dailySummary['total_ng'] === 0 ? 'All OK' : 'pcs NG' ?></span>
-                    </div>
-                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fecdd3' : '#4ade80' ?>; font-weight: 700; margin-top: 3px;">
-                        <?= $dailySummary['total_ng'] > 0 ? 'Cacat terdeteksi' : 'Kualitas produksi prima' ?>
-                    </div>
-                </div>
-
-                <!-- KPI 5: Persetujuan Supervisor -->
-                <div style="background: <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.22)' : 'rgba(245,158,11,0.22)' ?>; border: 1px solid <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.4)' : 'rgba(245,158,11,0.4)' ?>; border-radius: 12px; padding: 10px 14px;">
-                    <div style="font-size: 10px; color: <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#a7f3d0' : '#fde68a' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">PERSETUJUAN SUPERVISOR</div>
-                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
-                        <?= $dailySummary['total_approved_sessions'] ?> / <?= $dailySummary['total_sesi'] ?> <span style="font-size: 11px; font-weight: 600;">Sesi</span>
-                    </div>
-                    <div style="font-size: 10px; color: <?= ($dailySummary['total_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#6ee7b7' : '#fcd34d' ?>; font-weight: 700; margin-top: 3px;">
-                        <?php if ($dailySummary['total_sesi'] === 0): ?>
-                            Tidak ada aktivitas
-                        <?php elseif ($dailySummary['is_all_approved']): ?>
-                            Lengkap Disetujui (100%)
-                        <?php else: ?>
-                            <?= $dailySummary['total_pending_sessions'] ?> Sesi Menunggu ACC
-                        <?php endif; ?>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- ═══════════════════════════════════════════════════════════════════ -->
-        <!-- 2. FILTER BAR WITH QUICK PRESET DATE PILLS -->
+        <!-- 1. FILTER BAR WITH QUICK PRESET DATE PILLS (POSISI ATAS)           -->
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <div style="background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.03);" class="space-y-3">
             
@@ -1268,6 +973,125 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         </div>
 
         <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- 2. HEADER BANNER WITH EXECUTIVE 5 KPI CARDS RIBBON                 -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <div id="executive-kpi-banner" style="background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%); border-radius: 14px; padding: 16px 20px; color: #fff; box-shadow: 0 4px 16px rgba(15,23,42,0.18);">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div style="background: rgba(59,130,246,0.22); border: 1px solid rgba(59,130,246,0.35); padding: 10px; border-radius: 12px; flex-shrink: 0;">
+                        <svg style="width: 22px; height: 22px; color: #93c5fd;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <div style="font-size: 10px; font-weight: 800; color: #93c5fd; text-transform: uppercase; letter-spacing: 0.6px;">Outgoing Quality Control &bull; Executive Monitoring</div>
+                        <h1 style="font-size: 16px; font-weight: 900; margin: 2px 0 0 0; line-height: 1.2; letter-spacing: -0.2px;">Laporan Inspeksi Harian</h1>
+                        <p style="font-size: 11px; color: #cbd5e1; font-weight: 500; margin: 2px 0 0 0;">
+                            Periode: <b><?= date('d M Y', strtotime($startDate)) ?></b> s/d <b><?= date('d M Y', strtotime($endDate)) ?></b>
+                            <?php if (!empty($search)): ?> &bull; Filter: "<?= htmlspecialchars($search) ?>"<?php endif; ?>
+                        </p>
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <a href="<?= base_url('modules/daily_report/export_excel.php?' . http_build_query([
+                        'start_date' => $startDate,
+                        'end_date'   => $endDate,
+                        'search'     => $search
+                    ])) ?>" target="_blank" style="background: #16a34a; border: 1px solid #15803d; color: #ffffff; border-radius: 9999px; padding: 7px 16px; font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; box-shadow: 0 2px 8px rgba(22,163,74,0.35); transition: all 0.2s;" onmouseover="this.style.background='#15803d'" onmouseout="this.style.background='#16a34a'">
+                        <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                        Export Excel
+                    </a>
+                    <a href="<?= base_url('modules/daily_report/index.php') ?>" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.18); color: #e2e8f0; border-radius: 9999px; padding: 7px 14px; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; text-decoration: none;">
+                        <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Refresh
+                    </a>
+                </div>
+            </div>
+
+            <!-- 5 KPI CARDS RIBBON GRID -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-top: 14px;">
+                <!-- KPI 1: Total Sesi Inspeksi (Hanya Menghitung Sesi Selesai: Pass & Reject) -->
+                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
+                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL SESI INSPEKSI</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
+                        <?= number_format($dailySummary['completed_sesi']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">sesi</span>
+                    </div>
+                    <?php
+                        $rejectRate = $dailySummary['completed_sesi'] > 0 
+                            ? round(($dailySummary['rejected_sesi'] / $dailySummary['completed_sesi']) * 100, 1) 
+                            : 0;
+                        // Format: jika bulat tampilkan tanpa desimal, jika ada pecahan tampilkan 1 desimal
+                        $rejectRateText = (fmod($rejectRate, 1) == 0) ? number_format($rejectRate, 0) : number_format($rejectRate, 1);
+                    ?>
+                    <div style="font-size: 9.5px; color: #38bdf8; font-weight: 700; margin-top: 3px; line-height: 1.35;">
+                        <div><?= $dailySummary['passed_sesi'] ?> Pass &bull; <?= $dailySummary['rejected_sesi'] ?> Reject <span style="color: <?= $dailySummary['rejected_sesi'] > 0 ? '#fca5a5' : '#67e8f9' ?>; font-weight: 800;">(Rate: <?= $rejectRateText ?>%)</span></div>
+                        <div style="color: #cbd5e1; margin-top: 2px;">
+                            <?= $dailySummary['total_kanban_sesi'] ?> Kanban &bull; <?= $dailySummary['total_ss_sesi'] ?> Safety Stock
+                            <?php if ($dailySummary['in_prog_sesi'] > 0): ?>
+                                &bull; <span style="color: #f87171; font-weight: 800;"><?= $dailySummary['in_prog_sesi'] ?> REC In Prog</span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- KPI 2: Total Lot & Sampling (LOT DULU BARU SAMPLE) -->
+                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
+                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL LOT &amp; SAMPLING</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
+                        <?= number_format($dailySummary['total_label']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">Lot</span>
+                    </div>
+                    <div style="font-size: 10px; color: #38bdf8; font-weight: 800; margin-top: 3px;">
+                        <?= number_format($dailySummary['total_sampling']) ?> pcs Sampling Fisik
+                    </div>
+                </div>
+
+                <!-- KPI 3: Total Kuantitas Barang (Qty Pcs) -->
+                <div style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 10px 14px;">
+                    <div style="font-size: 10px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TOTAL BARANG (QTY)</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
+                        <?= number_format($dailySummary['total_qty']) ?> <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">pcs</span>
+                    </div>
+                    <div style="font-size: 10px; color: #c4b5fd; font-weight: 700; margin-top: 3px;">
+                        <?= $dailySummary['total_items'] ?> Jenis Part Diperiksa
+                    </div>
+                </div>
+
+                <!-- KPI 4: Temuan Cacat (NG) -->
+                <div style="background: <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.22)' : 'rgba(255,255,255,0.08)' ?>; border: 1px solid <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.4)' : 'rgba(255,255,255,0.12)' ?>; border-radius: 12px; padding: 10px 14px;">
+                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#94a3b8' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">TEMUAN CACAT (NG)</div>
+                    <div style="font-size: 20px; font-weight: 900; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#fff' ?>; margin-top: 2px; font-family: monospace; line-height: 1.1;">
+                        <?= number_format($dailySummary['total_ng']) ?> <span style="font-size: 11px; font-weight: 600;"><?= $dailySummary['total_ng'] === 0 ? 'All OK' : 'pcs NG' ?></span>
+                    </div>
+                    <div style="font-size: 10px; color: <?= $dailySummary['total_ng'] > 0 ? '#fecdd3' : '#4ade80' ?>; font-weight: 700; margin-top: 3px;">
+                        <?= $dailySummary['total_ng'] > 0 ? 'Cacat terdeteksi' : 'Kualitas produksi prima' ?>
+                    </div>
+                </div>
+
+                <!-- KPI 5: Persetujuan Supervisor (Hanya Menghitung Sesi Selesai) -->
+                <div style="background: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.22)' : 'rgba(245,158,11,0.22)' ?>; border: 1px solid <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.4)' : 'rgba(245,158,11,0.4)' ?>; border-radius: 12px; padding: 10px 14px;">
+                    <div style="font-size: 10px; color: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#a7f3d0' : '#fde68a' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">PERSETUJUAN SUPERVISOR</div>
+                    <div style="font-size: 20px; font-weight: 900; color: #fff; margin-top: 2px; font-family: monospace; line-height: 1.1;">
+                        <?= $dailySummary['total_approved_sessions'] ?> / <?= $dailySummary['completed_sesi'] ?> <span style="font-size: 11px; font-weight: 600;">Sesi</span>
+                    </div>
+                    <div style="font-size: 10px; color: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#6ee7b7' : '#fcd34d' ?>; font-weight: 700; margin-top: 3px;">
+                        <?php if ($dailySummary['completed_sesi'] === 0): ?>
+                            Tidak ada aktivitas
+                        <?php elseif ($dailySummary['is_all_approved']): ?>
+                            Lengkap Disetujui (100%)
+                        <?php else: ?>
+                            <?= $dailySummary['total_pending_sessions'] ?> Sesi Menunggu ACC
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
         <!-- 3. TAB CONTROLLER: BERDASARKAN SESI INSPEKSI VS RINGKASAN PER HARI -->
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <div class="card p-3 bg-white border border-slate-200/80 rounded-xl shadow-xs">
@@ -1350,7 +1174,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                         <!-- Toggle: Sembunyikan / Tampilkan Sesi yang Sudah di-ACC -->
                         <label style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer; background: #fff; border: 1px solid #cbd5e1; padding: 4px 10px; border-radius: 8px; font-size: 11px; font-weight: 700; color: #334155; user-select: none;">
-                            <input type="checkbox" id="toggleShowApproved" onchange="filterApprovedSessions(this.checked)" style="cursor: pointer; width: 14px; height: 14px; accent-color: #2563eb;">
+                            <input type="checkbox" id="toggleShowApproved" <?= $showApproved ? 'checked' : '' ?> onchange="onToggleShowApprovedChange(this.checked)" style="cursor: pointer; width: 14px; height: 14px; accent-color: #2563eb;">
                             <span>Tampilkan Sesi Disetujui</span>
                         </label>
 
@@ -1390,6 +1214,15 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         Reset Semua Filter
                     </button>
                 </div>
+
+                <?php if (count($sessionTimeline) >= 500): ?>
+                    <div style="background: #fffbeb; border-bottom: 1.5px solid #fde68a; padding: 7px 16px; display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #92400e; font-weight: 600;">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                            <span>Menampilkan <b>500 sesi terbaru</b> untuk menjaga kecepatan PC client. Untuk audit/rekapitulasi data jangka panjang secara utuh, gunakan <b>Tab Ringkasan Per Hari</b> atau fitur <b>Export Excel</b>.</span>
+                        </div>
+                    </div>
+                <?php endif; ?>
 
                 <div style="overflow-x: auto;">
                     <table class="w-full text-left" style="border-collapse: collapse; font-size: 12px; min-width: 960px;">
@@ -1686,8 +1519,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     $fInspector = trim($sess['inspector_name']);
                                     $fStatus = strtoupper($sess['session_status'] ?? 'IN PROG');
                                     $fApproval = $isApp ? 'DISETUJUI' : 'BELUM DI-ACC';
+                                    $rowStateClass = $isApp ? 'row-approved-session' : ($isInProgress ? 'row-live-session' : 'row-pending-session');
                                 ?>
-                                <tr class="review-row hover:bg-slate-50 transition-colors session-data-row <?= $isApp ? 'row-approved-session' : 'row-pending-session' ?> <?= $isInProgress ? 'session-row-live' : '' ?>"
+                                <tr class="review-row hover:bg-slate-50 transition-colors session-data-row <?= $rowStateClass ?> <?= $isInProgress ? 'session-row-live' : '' ?>"
                                     data-approved="<?= $isApp ? '1' : '0' ?>"
                                     data-session-id="<?= $sess['session_id'] ?>"
                                     data-is-live="<?= $isInProgress ? '1' : '0' ?>"
@@ -1697,7 +1531,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     data-filter-inspector="<?= htmlspecialchars($fInspector) ?>"
                                     data-filter-status="<?= htmlspecialchars($fStatus) ?>"
                                     data-filter-approval="<?= htmlspecialchars($fApproval) ?>"
-                                    style="border-bottom: 1px solid #f1f5f9; cursor: pointer; <?= $isApp ? 'display: none;' : '' ?>"
+                                    style="border-bottom: 1px solid #f1f5f9; cursor: pointer;"
                                     onclick="toggleAccordion('acc-timeline-<?= $sess['session_id'] ?>')">
                                     
                                     <!-- Ceklis & Sesi # -->
@@ -1857,155 +1691,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     </td>
                                 </tr>
 
-                                <!-- Sub-Row Accordion Detail Sesi -->
-                                <tr id="acc-timeline-<?= $sess['session_id'] ?>" class="accordion-sub-row hidden" data-parent-session-id="<?= $sess['session_id'] ?>" style="background: #fafafa;">
-                                    <td colspan="10" style="padding: 14px 18px 18px 24px; border-bottom: 2px solid #e2e8f0;">
-                                        <div style="border-left: 3px solid #0f172a; padding-left: 16px;" class="space-y-3">
-                                            
-                                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
-                                                <div style="font-size: 11px; font-weight: 800; color: #0f172a; text-transform: uppercase;">
-                                                    Rincian Box / Lot yang Digunakan pada Sesi #<?= $sess['session_id'] ?> (<?= count($sess['lots']) ?> <?= count($sess['lots']) > 1 ? 'Pemeriksaan' : 'Box' ?>):
-                                                </div>
-                                                <div style="font-size: 11px; font-weight: 700; color: #475569;">
-                                                    Sample : <b><?= (int)($sess['effective_sample_size'] ?? $sess['sample_size']) ?> pcs</b> &middot; NG: <b style="color: <?= ((int)($sess['ng_count'] ?? 0) > 0) ? '#dc2626' : '#16a34a' ?>;"><?= (int)($sess['ng_count'] ?? 0) ?> / <?= max(1, (int)$sess['reject_number']) ?></b>
-                                                </div>
-                                            </div>
-
-                                            <?php if (!empty($sess['reinspection_notes'])): ?>
-                                                <div style="background: #fefce8; border: 1px solid #fef08a; border-radius: 8px; padding: 6px 10px; font-size: 11px; color: #854d0e;">
-                                                    <b>Catatan Re-inspeksi:</b> <?= htmlspecialchars($sess['reinspection_notes']) ?>
-                                                </div>
-                                            <?php endif; ?>
-
-                                            <!-- Lots list table -->
-                                            <div style="overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;">
-                                                <table style="width: 100%; border-collapse: collapse; font-size: 11px;">
-                                                    <thead style="background: #f8fafc; color: #64748b; font-weight: 700; border-bottom: 1px solid #e2e8f0;">
-                                                        <tr>
-                                                            <th style="padding: 7px 12px; width: 35px; text-align: center;">No</th>
-                                                            <th style="padding: 7px 12px; min-width: 130px;">Lot Number</th>
-                                                            <th style="padding: 7px 12px; min-width: 130px;">Ref Number</th>
-                                                            <th style="padding: 7px 12px; text-align: right; width: 90px;">Qty</th>
-                                                            <th style="padding: 7px 12px; text-align: center; width: 100px;">Sampel (pcs)</th>
-                                                            <th style="padding: 7px 12px; text-align: center; width: 75px;">NG</th>
-                                                            <th style="padding: 7px 12px; text-align: center; min-width: 130px;">Status Lot</th>
-                                                            <th style="padding: 7px 12px; min-width: 110px;">Waktu Scan</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        <?php if (empty($sess['lots'])): ?>
-                                                            <tr><td colspan="8" style="padding: 8px; text-align: center; color: #94a3b8;">Tidak ada catatan rincian box.</td></tr>
-                                                        <?php else: ?>
-                                                            <?php foreach ($sess['lots'] as $bIdx => $bLot): 
-                                                                $hasDefects = !empty($bLot['defects']);
-                                                                $lotNgTotal = 0;
-                                                                if ($hasDefects) {
-                                                                    foreach ($bLot['defects'] as $df) { $lotNgTotal += (int)$df['qty_ng']; }
-                                                                } else {
-                                                                    $lotNgTotal = (int)($bLot['ng_count'] ?? 0);
-                                                                }
-                                                                $isReinspect = !empty($bLot['is_reinspected_attempt']);
-                                                                $isInitial = !empty($bLot['is_initial_attempt']);
-                                                            ?>
-                                                                <tr style="border-bottom: <?= $hasDefects ? '1px dashed #fca5a5' : ($isReinspect ? '1px dashed #86efac' : '1px solid #f8fafc') ?>; background: <?= $hasDefects ? '#fffbfb' : ($isReinspect ? '#f0fdf4' : 'transparent') ?>;">
-                                                                    <td style="padding: 7px 12px; text-align: center; color: #94a3b8; font-weight: 700;"><?= $bIdx + 1 ?></td>
-                                                                    <td style="padding: 7px 12px; font-family: monospace; color: #334155;">
-                                                                        <?= htmlspecialchars($bLot['lot_number'] ?: '-') ?>
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; font-family: monospace; font-weight: 800; color: #0284c7;">
-                                                                        <?= htmlspecialchars($bLot['ref_number'] ?: '-') ?>
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; text-align: right; font-family: monospace; font-weight: 700; color: #0f172a;">
-                                                                        <?= number_format($bLot['qty']) ?> pcs
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; text-align: center; font-family: monospace; font-weight: 700; color: #2563eb;">
-                                                                        <?= !empty($bLot['is_safety_stock']) ? '<span style="color:#7c3aed;font-weight:800;">0 (Lolos SS)</span>' : ((int)$bLot['computed_sample_size'] . ' pcs') ?>
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; text-align: center;">
-                                                                        <span style="font-family: monospace; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 4px; <?= $lotNgTotal > 0 ? 'background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;' : 'background: #f0fdf4; color: #16a34a; border: 1px solid #dcfce7;' ?>">
-                                                                            <?= $lotNgTotal ?> / <?= (int)$bLot['computed_reject_number'] ?>
-                                                                        </span>
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; text-align: center;">
-                                                                        <?= renderLotStatusBadge($bLot) ?>
-                                                                    </td>
-                                                                    <td style="padding: 7px 12px; color: #64748b;">
-                                                                        <?= date('H:i', strtotime($bLot['scanned_at'])) ?> WIB
-                                                                    </td>
-                                                                </tr>
-                                                                <?php if ($hasDefects): ?>
-                                                                    <tr style="background: #fff5f5; border-bottom: 2px solid #fecaca;">
-                                                                        <td colspan="8" style="padding: 6px 12px 8px 16px;">
-                                                                            <div style="display: flex; flex-direction: column; gap: 4px;">
-                                                                                <div style="font-size: 10px; font-weight: 800; color: #991b1b; text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 4px;">
-                                                                                    <svg style="width: 12px; height: 12px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                                                                                    <span>Temuan Cacat pada Box / Lot Ini (<?= count($bLot['defects']) ?> defect):</span>
-                                                                                </div>
-                                                                                <?php foreach ($bLot['defects'] as $df): ?>
-                                                                                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; background: #ffffff; padding: 5px 10px; border-radius: 5px; border: 1px solid #fee2e2; flex-wrap: wrap;">
-                                                                                        <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-                                                                                            <span style="font-weight: 800; color: #dc2626;">• <?= htmlspecialchars($df['defect_name']) ?>:</span>
-                                                                                            <span style="font-family: monospace; font-weight: 800; color: #b91c1c; background: #fee2e2; padding: 1px 6px; border-radius: 3px;">
-                                                                                                <?= (int)$df['qty_ng'] ?> pcs
-                                                                                            </span>
-                                                                                            <?php if (!empty($df['remark'])): ?>
-                                                                                                <span style="color: #64748b; font-style: italic; font-size: 10px;">
-                                                                                                    (<?= htmlspecialchars($df['remark']) ?>)
-                                                                                                </span>
-                                                                                            <?php endif; ?>
-                                                                                        </div>
-                                                                                        <div style="display: flex; align-items: center; gap: 10px; font-size: 10px; color: #475569;">
-                                                                                            <span>
-                                                                                                <span style="color: #64748b;">Inspector:</span> 
-                                                                                                <strong style="color: #0f172a;"><?= htmlspecialchars($df['inspector_name'] ?? 'Inspector') ?></strong>
-                                                                                            </span>
-                                                                                            <span style="background: #f1f5f9; color: #334155; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-weight: 700; border: 1px solid #e2e8f0;">
-                                                                                                <?= !empty($df['defect_created_at']) ? date('H:i \W\I\B', strtotime($df['defect_created_at'])) : '-' ?>
-                                                                                            </span>
-                                                                                        </div>
-                                                                                    </div>
-                                                                                <?php endforeach; ?>
-                                                                            </div>
-                                                                        </td>
-                                                                    </tr>
-                                                                <?php endif; ?>
-                                                            <?php endforeach; ?>
-                                                        <?php endif; ?>
-                                                    </tbody>
-                                                </table>
-                                            </div>
-
-                                            <!-- Defects box (unmatched) -->
-                                            <?php if (!empty($sess['unmatched_defects'])): ?>
-                                                <div style="background: #fff5f5; border: 1px solid #fed7d7; border-radius: 8px; padding: 10px 14px;">
-                                                    <div style="font-size: 11px; font-weight: 800; color: #9b2c2c; margin-bottom: 6px; display: flex; align-items: center; gap: 5px;">
-                                                        <svg style="width: 13px; height: 13px; color: #dc2626;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                                                        <span>Temuan Cacat Sesi (Tanpa Mapping Lot):</span>
-                                                    </div>
-                                                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                                                        <?php foreach ($sess['unmatched_defects'] as $ng): ?>
-                                                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; background: #fff; padding: 6px 10px; border-radius: 6px; border: 1px solid #fee2e2; flex-wrap: wrap;">
-                                                                <div style="display: flex; align-items: center; gap: 6px;">
-                                                                    <span style="font-weight: 800; color: #dc2626;">• <?= htmlspecialchars($ng['defect_name']) ?>:</span>
-                                                                    <span style="font-family: monospace; font-weight: 900; color: #b91c1c; background: #fee2e2; padding: 1px 6px; border-radius: 3px;"><?= (int)$ng['qty_ng'] ?> pcs</span>
-                                                                    <span style="color: #64748b; font-size: 10px;">(Posisi Lot: <?= htmlspecialchars($ng['lot_number']) ?>, Ref: <?= htmlspecialchars($ng['ref_number']) ?>)</span>
-                                                                </div>
-                                                                <div style="display: flex; align-items: center; gap: 10px; font-size: 10px; color: #475569;">
-                                                                    <span><span style="color: #64748b;">Inspector:</span> <strong style="color: #0f172a;"><?= htmlspecialchars($ng['inspector_name'] ?? 'Inspector') ?></strong></span>
-                                                                    <span style="background: #f1f5f9; color: #334155; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-weight: 700; border: 1px solid #e2e8f0;"><?= !empty($ng['defect_created_at']) ? date('H:i \W\I\B', strtotime($ng['defect_created_at'])) : '-' ?></span>
-                                                                </div>
-                                                            </div>
-                                                        <?php endforeach; ?>
-                                                    </div>
-                                                </div>
-                                            <?php elseif (empty($sess['ng_records'])): ?>
-                                                <div style="font-size: 11px; color: #166534; background: #f0fdf4; border: 1px solid #dcfce7; border-radius: 6px; padding: 5px 10px; display: inline-flex; align-items: center; gap: 4px;">
-                                                    <svg style="width: 13px; height: 13px; color: #16a34a;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
-                                                    <span><b>All Samples OK:</b> Seluruh sampel lot memenuhi standar, tidak ditemukan cacat.</span>
-                                                </div>
-                                            <?php endif; ?>
-
-                                        </div>
+                                <!-- Sub-Row Accordion Detail Sesi (Lazy Loaded via AJAX - Zero Initial DOM Overhead) -->
+                                <tr id="acc-timeline-<?= $sess['session_id'] ?>" class="accordion-sub-row hidden" data-session-id="<?= $sess['session_id'] ?>" style="background: #fafafa;">
+                                    <td colspan="10" id="acc-content-<?= $sess['session_id'] ?>" style="padding: 14px 18px 18px 24px; border-bottom: 2px solid #e2e8f0;">
+                                        <!-- Konten rincian lot dan defect dimuat secara on-demand -->
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
@@ -2013,6 +1702,59 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         </tbody>
                     </table>
                 </div>
+
+                <!-- Pagination Footer Bar untuk Tab Sesi Kronologis (Hanya aktif pada filter rentang luas) -->
+                <?php if (!$isHariIni && $totalSessionPages > 1): ?>
+                    <?php
+                        $sessStart = $targetSessionCount > 0 ? (($sessionPage - 1) * $sessionLimit) + 1 : 0;
+                        $sessEnd   = min($sessionPage * $sessionLimit, $targetSessionCount);
+                        $sessParams = $_GET;
+                        $buildSessUrl = function($p) use ($sessParams) {
+                            $sessParams['session_page'] = $p;
+                            $sessParams['tab'] = 'session';
+                            return '?' . http_build_query($sessParams);
+                        };
+                    ?>
+                    <div class="px-4 py-3 bg-white border-t border-slate-200/80 text-xs text-slate-500 font-medium" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                        <div>
+                            Menampilkan <span class="font-bold text-slate-800"><?= number_format($sessStart) ?></span> - <span class="font-bold text-slate-800"><?= number_format($sessEnd) ?></span> dari <span class="font-bold text-slate-800"><?= number_format($targetSessionCount) ?></span> sesi<?= ($showApproved === 0 ? ' (Menunggu ACC)' : '') ?>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <?php if ($sessionPage > 1): ?>
+                                <a href="<?= $buildSessUrl($sessionPage - 1) ?>" class="btn-secondary py-1 px-2.5 text-xs">&laquo; Prev</a>
+                            <?php else: ?>
+                                <span class="px-2.5 py-1 text-slate-300 border border-slate-200 rounded-lg text-xs cursor-not-allowed select-none">&laquo; Prev</span>
+                            <?php endif; ?>
+
+                            <?php
+                            $sessWindow = 2;
+                            $sessStartPage = max(1, $sessionPage - $sessWindow);
+                            $sessEndPage = min($totalSessionPages, $sessionPage + $sessWindow);
+                            if ($sessStartPage > 1) {
+                                echo '<a href="' . $buildSessUrl(1) . '" class="btn-secondary py-1 px-2.5 text-xs">1</a>';
+                                if ($sessStartPage > 2) echo '<span class="px-1.5 py-1 text-slate-400">...</span>';
+                            }
+                            for ($sp = $sessStartPage; $sp <= $sessEndPage; $sp++) {
+                                if ($sp == $sessionPage) {
+                                    echo '<span class="bg-blue-600 text-white font-bold px-3 py-1 rounded-lg text-xs shadow-xs">' . $sp . '</span>';
+                                } else {
+                                    echo '<a href="' . $buildSessUrl($sp) . '" class="btn-secondary py-1 px-2.5 text-xs">' . $sp . '</a>';
+                                }
+                            }
+                            if ($sessEndPage < $totalSessionPages) {
+                                if ($sessEndPage < $totalSessionPages - 1) echo '<span class="px-1.5 py-1 text-slate-400">...</span>';
+                                echo '<a href="' . $buildSessUrl($totalSessionPages) . '" class="btn-secondary py-1 px-2.5 text-xs">' . $totalSessionPages . '</a>';
+                            }
+                            ?>
+
+                            <?php if ($sessionPage < $totalSessionPages): ?>
+                                <a href="<?= $buildSessUrl($sessionPage + 1) ?>" class="btn-secondary py-1 px-2.5 text-xs">Next &raquo;</a>
+                            <?php else: ?>
+                                <span class="px-2.5 py-1 text-slate-300 border border-slate-200 rounded-lg text-xs cursor-not-allowed select-none">Next &raquo;</span>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                <?php endif; ?>
 
             </div>
         </div>
@@ -2348,1251 +2090,94 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- FLOATING STICKY MINI KPI RIBBON (FOLLOWS USER SCROLL SEAMLESSLY)     -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <div id="sticky-kpi-floating-ribbon"
+             style="display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 50; padding: 10px 18px; background: rgba(15, 23, 42, 0.98); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 2px solid rgba(59, 130, 246, 0.4); box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4); transition: opacity 0.2s ease, transform 0.2s ease; opacity: 0; transform: translateY(-8px);"
+             class="md:pl-64">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 100%; overflow-x: auto; padding-bottom: 2px;">
+                
+                <!-- Title & Period Indicator -->
+                <div style="display: flex; align-items: center; gap: 10px; flex-shrink: 0;">
+                    <div style="width: 32px; height: 32px; border-radius: 9px; background: rgba(59,130,246,0.25); border: 1.5px solid rgba(59,130,246,0.45); display: flex; align-items: center; justify-content: center; color: #93c5fd; flex-shrink: 0;">
+                        <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                        </svg>
+                    </div>
+                    <div style="line-height: 1.2;">
+                        <div style="font-size: 12px; font-weight: 900; color: #ffffff; white-space: nowrap; letter-spacing: -0.2px;">Laporan Harian</div>
+                        <div style="font-size: 10.5px; color: #94a3b8; font-weight: 700; white-space: nowrap;"><?= date('d M Y', strtotime($startDate)) ?></div>
+                    </div>
+                </div>
+
+                <!-- 5 KPI Mini Solid Pills (Larger, Bolder & Clearer) -->
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; flex-shrink: 0;">
+                    
+                    <!-- KPI 1: Sesi -->
+                    <div style="background: rgba(255,255,255,0.08); border: 1.5px solid rgba(255,255,255,0.16); border-radius: 10px; padding: 6px 14px; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">SESI</span>
+                        <span style="font-size: 17px; font-weight: 900; color: #ffffff; font-family: monospace; line-height: 1;"><?= number_format($dailySummary['completed_sesi']) ?></span>
+                        <span style="font-size: 11px; color: #38bdf8; font-weight: 800;">(<?= $dailySummary['passed_sesi'] ?>P / <?= $dailySummary['rejected_sesi'] ?>R)</span>
+                    </div>
+
+                    <!-- KPI 2: Lot & Sampling -->
+                    <div style="background: rgba(255,255,255,0.08); border: 1.5px solid rgba(255,255,255,0.16); border-radius: 10px; padding: 6px 14px; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">LOT &amp; SAMPLE</span>
+                        <span style="font-size: 17px; font-weight: 900; color: #ffffff; font-family: monospace; line-height: 1;"><?= number_format($dailySummary['total_label']) ?> <span style="font-size: 11px; color: #94a3b8; font-weight: 600;">Lot</span></span>
+                        <span style="font-size: 11px; color: #38bdf8; font-weight: 800;">&bull; <?= number_format($dailySummary['total_sampling']) ?> pcs</span>
+                    </div>
+
+                    <!-- KPI 3: QTY Total -->
+                    <div style="background: rgba(255,255,255,0.08); border: 1.5px solid rgba(255,255,255,0.16); border-radius: 10px; padding: 6px 14px; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: #94a3b8; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">QTY</span>
+                        <span style="font-size: 17px; font-weight: 900; color: #ffffff; font-family: monospace; line-height: 1;"><?= number_format($dailySummary['total_qty']) ?></span>
+                        <span style="font-size: 11px; color: #c4b5fd; font-weight: 800;">pcs</span>
+                    </div>
+
+                    <!-- KPI 4: Temuan NG -->
+                    <div style="background: <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.28)' : 'rgba(255,255,255,0.08)' ?>; border: 1.5px solid <?= $dailySummary['total_ng'] > 0 ? 'rgba(239,68,68,0.5)' : 'rgba(255,255,255,0.16)' ?>; border-radius: 10px; padding: 6px 14px; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#94a3b8' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">NG</span>
+                        <span style="font-size: 17px; font-weight: 900; color: <?= $dailySummary['total_ng'] > 0 ? '#fca5a5' : '#ffffff' ?>; font-family: monospace; line-height: 1;"><?= number_format($dailySummary['total_ng']) ?></span>
+                        <span style="font-size: 11px; color: <?= $dailySummary['total_ng'] > 0 ? '#fecdd3' : '#4ade80' ?>; font-weight: 800;"><?= $dailySummary['total_ng'] > 0 ? 'pcs' : 'OK' ?></span>
+                    </div>
+
+                    <!-- KPI 5: ACC Supervisor -->
+                    <div style="background: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.28)' : 'rgba(245,158,11,0.28)' ?>; border: 1.5px solid <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? 'rgba(16,185,129,0.5)' : 'rgba(245,158,11,0.5)' ?>; border-radius: 10px; padding: 6px 14px; display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#a7f3d0' : '#fde68a' ?>; font-weight: 800; text-transform: uppercase; letter-spacing: 0.3px;">ACC SPV</span>
+                        <span style="font-size: 17px; font-weight: 900; color: #ffffff; font-family: monospace; line-height: 1;"><?= $dailySummary['total_approved_sessions'] ?>/<?= $dailySummary['completed_sesi'] ?></span>
+                        <span style="font-size: 11px; color: <?= ($dailySummary['completed_sesi'] > 0 && $dailySummary['is_all_approved']) ? '#6ee7b7' : '#fcd34d' ?>; font-weight: 800;"><?= $dailySummary['is_all_approved'] ? '100%' : 'Pending' ?></span>
+                    </div>
+
+                </div>
+
+                <!-- Scroll Top Quick Button (Larger) -->
+                <button type="button" onclick="window.scrollTo({top: 0, behavior: 'smooth'})"
+                        style="background: rgba(255,255,255,0.14); border: 1.5px solid rgba(255,255,255,0.25); color: #ffffff; border-radius: 8px; padding: 6px 13px; font-size: 11px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; transition: all 0.15s ease;"
+                        onmouseover="this.style.background='rgba(255,255,255,0.25)'" onmouseout="this.style.background='rgba(255,255,255,0.14)'"
+                        title="Kembali ke atas">
+                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"/></svg>
+                    <span>Ke Atas</span>
+                </button>
+
+            </div>
+        </div>
+
     </main>
 
+    <!-- Global Config & Static JS Engine -->
     <script>
-    // Tab Switcher Handler
-    function switchReportTab(tabKey) {
-        const paneSession   = document.getElementById('pane-tab-session');
-        const paneDaily     = document.getElementById('pane-tab-daily');
-        const paneInspector = document.getElementById('pane-tab-inspector');
-
-        const btnSession    = document.getElementById('tab-btn-session');
-        const btnDaily      = document.getElementById('tab-btn-daily');
-        const btnInspector  = document.getElementById('tab-btn-inspector');
-
-        const inputTab      = document.getElementById('inputTab');
-        const descText      = document.getElementById('tab-desc-text');
-
-        inputTab.value = tabKey;
-
-        // Reset all buttons style
-        const activeClass   = 'bg-blue-600 text-white shadow-xs';
-        const inactiveClass = 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/70';
-
-        if (btnSession) btnSession.className = inactiveClass;
-        if (btnDaily) btnDaily.className = inactiveClass;
-        if (btnInspector) btnInspector.className = inactiveClass;
-
-        if (paneSession) paneSession.style.display = 'none';
-        if (paneDaily) paneDaily.style.display = 'none';
-        if (paneInspector) paneInspector.style.display = 'none';
-
-        const badgeSession   = document.getElementById('tab-badge-session');
-        const badgeDaily     = document.getElementById('tab-badge-daily');
-        const badgeInspector = document.getElementById('tab-badge-inspector');
-
-        // Reset badge styles to inactive state
-        const resetBadge = function(badge) {
-            if (!badge) return;
-            badge.style.background = '#e2e8f0';
-            badge.style.color = '#334155';
-        };
-        const activateBadge = function(badge) {
-            if (!badge) return;
-            badge.style.background = 'rgba(255,255,255,0.25)';
-            badge.style.color = '#ffffff';
-        };
-
-        resetBadge(badgeSession);
-        resetBadge(badgeDaily);
-        resetBadge(badgeInspector);
-
-        if (tabKey === 'session') {
-            if (paneSession) paneSession.style.display = 'block';
-            if (btnSession) btnSession.className = activeClass;
-            activateBadge(badgeSession);
-            if (descText) descText.textContent = 'Menampilkan kronologi seluruh sesi inspeksi secara langsung';
-        } else if (tabKey === 'daily') {
-            if (paneDaily) paneDaily.style.display = 'block';
-            if (btnDaily) btnDaily.className = activeClass;
-            activateBadge(badgeDaily);
-            if (descText) descText.textContent = 'Menampilkan rekapitulasi performa inspeksi dikelompokkan per hari';
-        } else if (tabKey === 'inspector') {
-            if (paneInspector) paneInspector.style.display = 'block';
-            if (btnInspector) btnInspector.className = activeClass;
-            activateBadge(badgeInspector);
-            if (descText) descText.textContent = 'Daftar aktivitas dan performa kerja per inspektur QC (klik untuk melihat rincian per lot)';
-        }
-
-        // Update URL state without full page reload
-        try {
-            const url = new URL(window.location);
-            url.searchParams.set('tab', tabKey);
-            window.history.replaceState({}, '', url);
-        } catch (e) {}
-    }
-
-    // Cache lokal data lot per inspektur agar tidak request berulang jika data belum berubah
-    var InspectorLotsCache = {};
-
-    function toggleInspectorAccordion(inspIdSafe, inspName) {
-        const acc = document.getElementById('acc-insp-' + inspIdSafe);
-        const caret = document.querySelector('.caret-insp-' + inspIdSafe);
-        if (!acc) return;
-
-        const isHidden = acc.classList.contains('hidden');
-        if (isHidden) {
-            acc.classList.remove('hidden');
-            if (caret) caret.style.transform = 'rotate(180deg)';
-            // Jika belum pernah dimuat, load data secara on-demand (Anti-Lag)
-            if (!InspectorLotsCache[inspIdSafe]) {
-                loadInspectorLots(inspIdSafe, inspName, 1, '');
-            }
-        } else {
-            acc.classList.add('hidden');
-            if (caret) caret.style.transform = 'rotate(0deg)';
-        }
-    }
-
-    // ── Helper: Parser QR Code Scanner Label Pabrik ─────────────────────────
-    function parseDailyReportQR(raw) {
-        var obj = {};
-        if (!raw) return obj;
-        var parts = raw.split('|');
-        parts.forEach(function(p) {
-            p = p.trim();
-            if (p.startsWith('Z1')) obj.Z1 = p.substring(2);
-            if (p.startsWith('Z2')) obj.Z2 = p.substring(2);
-            if (p.startsWith('Z3')) {
-                var valZ3 = parseInt(p.substring(2), 10);
-                if (!isNaN(valZ3) && valZ3 > 0) obj.Z3 = valZ3;
-            }
-            if (p.startsWith('Z4')) obj.Z4 = p.substring(2);
-            if (p.startsWith('Z5')) obj.Z5 = p.substring(2);
-        });
-        return obj;
-    }
-
-    // Handler untuk Scanner Barcode pada Kotak Pencarian Utama
-    function handleMainSearchScan(e) {
-        if (e.key === 'Enter') {
-            var input = document.getElementById('mainSearchInput');
-            if (!input) return;
-            var val = input.value.trim();
-            if (val.includes('|') || val.startsWith('Z1') || val.startsWith('Z2') || val.startsWith('Z5')) {
-                var qr = parseDailyReportQR(val);
-                // Utamakan Ref No (Z5), jika tidak ada pakai Lot No (Z2), atau Part Code (Z1)
-                if (qr.Z5) {
-                    input.value = qr.Z5;
-                } else if (qr.Z2) {
-                    input.value = qr.Z2;
-                } else if (qr.Z1) {
-                    input.value = qr.Z1;
-                }
-            }
-            // Biarkan browser men-submit formDailyFilter secara natural
-        }
-    }
-
-    function searchInspectorLots(inspIdSafe, inspName) {
-        const searchInput = document.getElementById('search-insp-' + inspIdSafe);
-        let query = searchInput ? searchInput.value.trim() : '';
-        if (query.includes('|') || query.startsWith('Z1') || query.startsWith('Z2') || query.startsWith('Z5')) {
-            var qr = parseDailyReportQR(query);
-            if (qr.Z5) {
-                query = qr.Z5;
-            } else if (qr.Z2) {
-                query = qr.Z2;
-            } else if (qr.Z1) {
-                query = qr.Z1;
-            }
-            if (searchInput) searchInput.value = query;
-        }
-        loadInspectorLots(inspIdSafe, inspName, 1, query);
-    }
-
-    function loadInspectorLots(inspIdSafe, inspName, page, search) {
-        const tbody = document.getElementById('tbody-insp-' + inspIdSafe);
-        const pagi = document.getElementById('pagi-insp-' + inspIdSafe);
-        const countSpan = document.getElementById('info-count-' + inspIdSafe);
-        if (!tbody) return;
-
-        page = page || 1;
-        search = search || '';
-
-        // Tampilkan indikator loading halus
-        tbody.innerHTML = '<tr><td colspan="14" style="padding: 24px; text-align: center; color: #64748b; font-weight: 600;">' +
-            '<div style="display: flex; align-items: center; justify-content: center; gap: 8px;">' +
-            '<svg style="width: 16px; height: 16px; animation: spin 1s linear infinite; color: #2563eb;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="3" stroke="currentColor" stroke-dasharray="31.4 31.4" fill="none"/></svg>' +
-            '<span>Mengambil data rincian lot...</span>' +
-            '</div></td></tr>';
-
-        const sDate = '<?= htmlspecialchars($todayDateStr) ?>';
-        const eDate = '<?= htmlspecialchars($todayDateStr) ?>';
-
-        const url = '<?= base_url("modules/daily_report/api/get_inspector_lots.php") ?>' +
-            '?inspector_name=' + encodeURIComponent(inspName) +
-            '&start_date=' + encodeURIComponent(sDate) +
-            '&end_date=' + encodeURIComponent(eDate) +
-            '&page=' + encodeURIComponent(page) +
-            '&limit=50' +
-            '&search=' + encodeURIComponent(search);
-
-        fetch(url, {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
-        })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            if (!data || !data.success) {
-                tbody.innerHTML = '<tr><td colspan="14" style="padding: 20px; text-align: center; color: #dc2626; font-weight: 700;">Gagal memuat rincian lot.</td></tr>';
-                return;
-            }
-
-            tbody.innerHTML = data.html;
-            InspectorLotsCache[inspIdSafe] = true;
-
-            if (countSpan && data.total_lots !== undefined) {
-                countSpan.textContent = 'Ditemukan: ' + Number(data.total_lots).toLocaleString('id-ID') + ' Lot';
-            }
-
-            // Render Pagination Footer Bar
-            if (pagi) {
-                if (data.total_pages <= 1) {
-                    pagi.innerHTML = '<span style="color: #64748b;">Menampilkan seluruh (' + data.total_lots + ') lot</span>' +
-                                     '<span style="color: #94a3b8; font-weight: 600;">Halaman 1 dari 1</span>';
-                } else {
-                    var safeNameStr = inspName.replace(/'/g, "\\'");
-                    var prevDisabled = (data.page <= 1) ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'onclick="loadInspectorLots(\'' + inspIdSafe + '\', \'' + safeNameStr + '\', ' + (data.page - 1) + ', \'' + search.replace(/'/g, "\\'") + '\')"';
-                    var nextDisabled = (data.page >= data.total_pages) ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : 'onclick="loadInspectorLots(\'' + inspIdSafe + '\', \'' + safeNameStr + '\', ' + (data.page + 1) + ', \'' + search.replace(/'/g, "\\'") + '\')"';
-
-                    pagi.innerHTML = '<div style="color: #475569; font-weight: 600;">' +
-                        'Halaman <b>' + data.page + '</b> dari <b>' + data.total_pages + '</b> (Total ' + Number(data.total_lots).toLocaleString('id-ID') + ' Lot)' +
-                        '</div>' +
-                        '<div style="display: flex; align-items: center; gap: 6px;">' +
-                        '<button type="button" ' + prevDisabled + ' class="excel-quick-btn" style="padding: 4px 10px;">&larr; Sebelumnya</button>' +
-                        '<button type="button" ' + nextDisabled + ' class="excel-quick-btn" style="padding: 4px 10px;">Berikutnya &rarr;</button>' +
-                        '</div>';
-                }
-            }
-        })
-        .catch(function(err) {
-            tbody.innerHTML = '<tr><td colspan="14" style="padding: 20px; text-align: center; color: #dc2626; font-weight: 700;">Gangguan jaringan saat memuat data lot.</td></tr>';
-        });
-    }
-
-    // Filter Approved Sessions (Hide/Show Sesi yang Sudah di-ACC)
-    function filterApprovedSessions(showApproved) {
-        try {
-            localStorage.setItem('oqc_show_approved_sessions', showApproved ? '1' : '0');
-        } catch (e) {}
-
-        const approvedRows = document.querySelectorAll('.row-approved-session');
-        const badgeCount = document.getElementById('badgeTotalSessionCount');
-        const totalRows = document.querySelectorAll('.session-data-row').length;
-        const pendingRows = document.querySelectorAll('.row-pending-session').length;
-
-        approvedRows.forEach(function(row) {
-            row.style.display = showApproved ? '' : 'none';
-            // Sembunyikan accordion sub-row jika induknya disembunyikan
-            if (!showApproved) {
-                const sId = row.getAttribute('data-session-id');
-                const subRow = document.getElementById('acc-timeline-' + sId);
-                if (subRow && !subRow.classList.contains('hidden')) {
-                    subRow.classList.add('hidden');
-                    const caret = row.querySelector('.caret-icon');
-                    const btnText = row.querySelector('.btn-text');
-                    if (caret) caret.style.transform = 'rotate(0deg)';
-                    if (btnText) btnText.textContent = 'Detail';
-                }
-            }
-        });
-
-        if (badgeCount) {
-            if (showApproved) {
-                badgeCount.textContent = 'Total ' + totalRows + ' Sesi';
-            } else {
-                badgeCount.textContent = pendingRows + ' Sesi Menunggu ACC (' + totalRows + ' Total)';
-            }
-        }
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
-        const toggle = document.getElementById('toggleShowApproved');
-        if (toggle) {
-            // Default: tidak dicentang (0), artinya sesi yang sudah disetujui langsung disembunyikan
-            const savedState = localStorage.getItem('oqc_show_approved_sessions');
-            const shouldShow = (savedState === '1');
-            toggle.checked = shouldShow;
-            filterApprovedSessions(shouldShow);
-        }
-    });
-
-    // Accordion Toggle Handler
-    function toggleAccordion(rowId) {
-        const subRow = document.getElementById(rowId);
-        if (!subRow) return;
-
-        const isHidden = subRow.classList.contains('hidden');
-        if (isHidden) {
-            subRow.classList.remove('hidden');
-        } else {
-            subRow.classList.add('hidden');
-        }
-
-        const parentRow = subRow.previousElementSibling;
-        if (parentRow) {
-            const caret = parentRow.querySelector('.caret-icon');
-            const btnText = parentRow.querySelector('.btn-text');
-            if (caret) {
-                caret.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
-            }
-            if (btnText) {
-                btnText.textContent = isHidden ? 'Tutup' : 'Detail';
-            }
-        }
-    }
-
-    // Preset Date Filters Handler
-    function handlePresetClick(presetKey) {
-        const inputPreset = document.getElementById('inputPreset');
-        const containerSubFilter = document.getElementById('containerSubFilter');
-        const boxMonthYear = document.getElementById('boxFilterMonthYear');
-        const boxSpecificYear = document.getElementById('boxFilterSpecificYear');
-        const inputStartDate = document.getElementById('inputStartDate');
-        const inputEndDate = document.getElementById('inputEndDate');
-
-        inputPreset.value = presetKey;
-
-        if (presetKey === 'month_year') {
-            containerSubFilter.style.display = 'flex';
-            boxMonthYear.style.display = 'flex';
-            boxSpecificYear.style.display = 'none';
-            return;
-        } else if (presetKey === 'specific_year') {
-            containerSubFilter.style.display = 'flex';
-            boxMonthYear.style.display = 'none';
-            boxSpecificYear.style.display = 'flex';
-            return;
-        } else {
-            containerSubFilter.style.display = 'none';
-            boxMonthYear.style.display = 'none';
-            boxSpecificYear.style.display = 'none';
-        }
-
-        // Clear start/end dates so backend calculates based on preset
-        if (presetKey !== 'custom') {
-            inputStartDate.value = '';
-            inputEndDate.value = '';
-        }
-
-        document.getElementById('formDailyFilter').submit();
-    }
-
-    function applyMonthYearFilter() {
-        const m = document.getElementById('subSelectMonth').value;
-        const y = document.getElementById('subSelectMonthYear').value;
-        document.getElementById('inputMonth').value = m;
-        document.getElementById('inputYear').value = y;
-        document.getElementById('inputPreset').value = 'month_year';
-        document.getElementById('inputStartDate').value = '';
-        document.getElementById('inputEndDate').value = '';
-        document.getElementById('formDailyFilter').submit();
-    }
-
-    function applySpecificYearFilter() {
-        const y = document.getElementById('subSelectYear').value;
-        document.getElementById('inputYear').value = y;
-        document.getElementById('inputPreset').value = 'specific_year';
-        document.getElementById('inputStartDate').value = '';
-        document.getElementById('inputEndDate').value = '';
-        document.getElementById('formDailyFilter').submit();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // SUPERVISOR APPROVAL (ACC) HANDLERS
-    // ═══════════════════════════════════════════════════════════════════
-    function submitApproval(payload) {
-        if (typeof Swal !== 'undefined') {
-            Swal.fire({
-                title: 'Memproses Persetujuan...',
-                text: 'Mohon tunggu, sistem sedang memperbarui basis data.',
-                allowOutsideClick: false,
-                didOpen: function() {
-                    Swal.showLoading();
-                }
-            });
-        }
-
-        var formData = new FormData();
-        for (var key in payload) {
-            formData.append(key, payload[key]);
-        }
-        formData.append('ajax', '1');
-
-        fetch('<?= base_url("modules/daily_report/approve.php") ?>', {
-            method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: formData
-        })
-        .then(function(res) {
-            return res.json();
-        })
-        .then(function(res) {
-            if (res.success) {
-                if (typeof Swal !== 'undefined') {
-                    Swal.fire({
-                        icon: 'success',
-                        title: 'Berhasil',
-                        text: res.message,
-                        confirmButtonColor: '#2563eb'
-                    }).then(function() {
-                        window.location.reload();
-                    });
-                } else {
-                    alert(res.message);
-                    window.location.reload();
-                }
-            } else {
-                if (typeof Swal !== 'undefined') {
-                    Swal.fire({
-                        icon: 'error',
-                        title: 'Gagal',
-                        text: res.message || 'Terjadi kesalahan sistem saat memperbarui status persetujuan.',
-                        confirmButtonColor: '#2563eb'
-                    });
-                } else {
-                    alert(res.message || 'Gagal memproses persetujuan.');
-                }
-            }
-        })
-        .catch(function(err) {
-            if (typeof Swal !== 'undefined') {
-                Swal.fire({
-                    icon: 'error',
-                    title: 'Gangguan Jaringan',
-                    text: 'Tidak dapat menghubungi server. Silakan coba beberapa saat lagi.',
-                    confirmButtonColor: '#2563eb'
-                });
-            } else {
-                alert('Tidak dapat menghubungi server.');
-            }
-        });
-    }
-
-    function confirmApproveSingle(sessionId) {
-        if (typeof Swal === 'undefined') {
-            if (confirm('Apakah Anda yakin ingin menyetujui (ACC) Sesi #' + sessionId + '?')) {
-                submitApproval({
-                    action: 'approve_single',
-                    session_id: sessionId,
-                    notes: 'Disetujui oleh supervisor',
-                    date: '<?= htmlspecialchars($startDate) ?>'
-                });
-            }
-            return;
-        }
-
-        Swal.fire({
-            title: 'Persetujuan Sesi Inspeksi',
-            text: 'Apakah Anda yakin ingin memberikan persetujuan (ACC) atas hasil pemeriksaan Sesi #' + sessionId + '?',
-            icon: 'question',
-            input: 'text',
-            inputLabel: 'Catatan Persetujuan (Opsional)',
-            inputPlaceholder: 'Tuliskan catatan supervisor bila diperlukan...',
-            showCancelButton: true,
-            confirmButtonColor: '#2563eb',
-            cancelButtonColor: '#64748b',
-            confirmButtonText: 'Ya, Setujui Sesi',
-            cancelButtonText: 'Batal'
-        }).then(function(result) {
-            if (result.isConfirmed) {
-                submitApproval({
-                    action: 'approve_single',
-                    session_id: sessionId,
-                    notes: result.value || 'Disetujui oleh supervisor',
-                    date: '<?= htmlspecialchars($startDate) ?>'
-                });
-            }
-        });
-    }
-
-    function confirmUnapprove(sessionId) {
-        if (typeof Swal === 'undefined') {
-            if (confirm('Apakah Anda yakin ingin membatalkan persetujuan atas Sesi #' + sessionId + '?')) {
-                submitApproval({
-                    action: 'unapprove_single',
-                    session_id: sessionId,
-                    date: '<?= htmlspecialchars($startDate) ?>'
-                });
-            }
-            return;
-        }
-
-        Swal.fire({
-            title: 'Batalkan Persetujuan',
-            text: 'Apakah Anda yakin ingin membatalkan persetujuan atas Sesi #' + sessionId + '? Status akan kembali menjadi belum di-ACC.',
-            icon: 'warning',
-            showCancelButton: true,
-            confirmButtonColor: '#dc2626',
-            cancelButtonColor: '#64748b',
-            confirmButtonText: 'Ya, Batalkan Persetujuan',
-            cancelButtonText: 'Kembali'
-        }).then(function(result) {
-            if (result.isConfirmed) {
-                submitApproval({
-                    action: 'unapprove_single',
-                    session_id: sessionId,
-                    date: '<?= htmlspecialchars($startDate) ?>'
-                });
-            }
-        });
-    }
-
-    function confirmApproveAllVisible() {
-        const pendingRows = document.querySelectorAll('.row-pending-session');
-        const pendingCount = pendingRows.length;
-
-        if (pendingCount === 0) {
-            if (typeof Swal !== 'undefined') {
-                Swal.fire({
-                    icon: 'info',
-                    title: 'Tidak Ada Sesi Pending',
-                    text: 'Seluruh sesi pada filter saat ini telah disetujui (ACC).'
-                });
-            } else {
-                alert('Tidak ada sesi yang memerlukan persetujuan.');
-            }
-            return;
-        }
-
-        // Kumpulkan session_id dari seluruh baris yang masih pending
-        const pendingIds = [];
-        pendingRows.forEach(function(r) {
-            const sid = r.getAttribute('data-session-id');
-            if (sid) pendingIds.push(sid);
-        });
-
-        const filterContext = '<?= !empty($startDate) && !empty($endDate) ? date("d/m/Y", strtotime($startDate)) . " - " . date("d/m/Y", strtotime($endDate)) : "" ?>';
-
-        if (typeof Swal === 'undefined') {
-            if (confirm('Apakah Anda yakin ingin menyetujui seluruh (' + pendingCount + ') sesi inspeksi yang tampil?')) {
-                submitApproval({
-                    action: 'approve_all_filtered',
-                    session_ids: pendingIds.join(','),
-                    start_date: '<?= htmlspecialchars($startDate) ?>',
-                    end_date: '<?= htmlspecialchars($endDate) ?>',
-                    inspector_id: '<?= (int)$inspectorId ?>',
-                    notes: 'Persetujuan massal oleh supervisor'
-                });
-            }
-            return;
-        }
-
-        Swal.fire({
-            title: 'Setujui Semua Sesi (ACC All)',
-            html: 'Anda akan memberikan persetujuan (ACC) sekaligus untuk <b>' + pendingCount + ' sesi inspeksi</b> yang belum di-ACC' + (filterContext ? ' pada periode <b>' + filterContext + '</b>' : '') + '.<br><br><span style="font-size: 12px; color: #64748b;">Pastikan seluruh hasil pemeriksaan dan temuan NG telah ditinjau dengan seksama.</span>',
-            icon: 'question',
-            input: 'text',
-            inputLabel: 'Catatan Persetujuan Massal (Opsional)',
-            inputPlaceholder: 'Tuliskan catatan supervisor bila diperlukan...',
-            showCancelButton: true,
-            confirmButtonColor: '#16a34a',
-            cancelButtonColor: '#64748b',
-            confirmButtonText: 'Ya, Setujui Semua (' + pendingCount + ' Sesi)',
-            cancelButtonText: 'Batal'
-        }).then(function(result) {
-            if (result.isConfirmed) {
-                submitApproval({
-                    action: 'approve_all_filtered',
-                    session_ids: pendingIds.join(','),
-                    start_date: '<?= htmlspecialchars($startDate) ?>',
-                    end_date: '<?= htmlspecialchars($endDate) ?>',
-                    inspector_id: '<?= (int)$inspectorId ?>',
-                    notes: result.value || 'Persetujuan massal oleh supervisor'
-                });
-            }
-        });
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // BULK CHECKBOX APPROVAL HANDLERS (FLOATING BOTTOM BAR)
-    // ═══════════════════════════════════════════════════════════════════
-    function onSessionCheckChange() {
-        const checkboxes = document.querySelectorAll('.bulk-session-cb');
-        const checkedBoxes = document.querySelectorAll('.bulk-session-cb:checked');
-        const count = checkedBoxes.length;
-
-        let totalQty = 0;
-        checkedBoxes.forEach(function(cb) {
-            totalQty += parseInt(cb.getAttribute('data-qty') || 0, 10);
-        });
-
-        const actionBar = document.getElementById('bulk-session-action-bar');
-        const countSpan = document.getElementById('bulk-session-selected-count');
-        const qtySpan   = document.getElementById('bulk-session-selected-qty');
-        const checkAll  = document.getElementById('checkAllSessions');
-
-        if (countSpan) countSpan.textContent = count;
-        if (qtySpan) qtySpan.textContent = totalQty.toLocaleString('id-ID') + ' pcs';
-
-        if (actionBar) {
-            actionBar.style.display = (count > 0) ? 'inline-flex' : 'none';
-        }
-
-        if (checkAll) {
-            // Cek hanya checkbox yang sedang tampak (visible)
-            const visibleCheckboxes = Array.from(checkboxes).filter(function(cb) {
-                const tr = cb.closest('tr.session-data-row');
-                return tr && tr.style.display !== 'none';
-            });
-            const visibleChecked = visibleCheckboxes.filter(function(cb) { return cb.checked; });
-            
-            checkAll.checked = (visibleCheckboxes.length > 0 && visibleChecked.length === visibleCheckboxes.length);
-            checkAll.indeterminate = (visibleChecked.length > 0 && visibleChecked.length < visibleCheckboxes.length);
-        }
-    }
-
-    function clearBulkSessionSelection() {
-        const checkboxes = document.querySelectorAll('.bulk-session-cb');
-        checkboxes.forEach(function(cb) {
-            cb.checked = false;
-        });
-        const checkAll = document.getElementById('checkAllSessions');
-        if (checkAll) {
-            checkAll.checked = false;
-            checkAll.indeterminate = false;
-        }
-        onSessionCheckChange();
-    }
-
-    function toggleSelectAllSessionRows(checkState) {
-        const checkboxes = document.querySelectorAll('.bulk-session-cb');
-        checkboxes.forEach(function(cb) {
-            const tr = cb.closest('tr.session-data-row');
-            // Hanya centang baris yang saat ini terlihat (lolos filter)
-            if (tr && tr.style.display !== 'none') {
-                cb.checked = checkState;
-            }
-        });
-        onSessionCheckChange();
-    }
-
-    function confirmApproveSelected() {
-        const checkedBoxes = document.querySelectorAll('.bulk-session-cb:checked');
-        const selectedIds = [];
-        let totalQty = 0;
-        checkedBoxes.forEach(function(cb) {
-            if (cb.value) {
-                selectedIds.push(cb.value);
-                totalQty += parseInt(cb.getAttribute('data-qty') || 0, 10);
-            }
-        });
-
-        if (selectedIds.length === 0) {
-            if (typeof Swal !== 'undefined') {
-                Swal.fire({
-                    icon: 'info',
-                    title: 'Pilih Sesi Terlebih Dahulu',
-                    text: 'Silakan beri centang pada kotak ceklis sesi yang ingin disetujui (ACC).'
-                });
-            } else {
-                alert('Pilih sesi terlebih dahulu.');
-            }
-            return;
-        }
-
-        const count = selectedIds.length;
-
-        if (typeof Swal === 'undefined') {
-            if (confirm('Apakah Anda yakin ingin menyetujui (' + count + ') sesi inspeksi terpilih (Total Qty: ' + totalQty + ' pcs)?')) {
-                submitApproval({
-                    action: 'approve_all_filtered',
-                    session_ids: selectedIds.join(','),
-                    start_date: '<?= htmlspecialchars($startDate) ?>',
-                    end_date: '<?= htmlspecialchars($endDate) ?>',
-                    notes: 'Disetujui secara bersamaan oleh supervisor'
-                });
-            }
-            return;
-        }
-
-        Swal.fire({
-            title: 'Setujui Sesi Terpilih (ACC Bulk)',
-            html: 'Anda akan memberikan persetujuan (ACC) sekaligus untuk <b>' + count + ' sesi inspeksi</b> yang Anda centang.<br>' +
-                  '<div style="margin-top: 8px; font-size: 13px; font-weight: 700; color: #1e40af; background: #eff6ff; padding: 6px 12px; border-radius: 8px; border: 1px solid #bfdbfe;">Total Barang: ' + totalQty.toLocaleString('id-ID') + ' pcs</div>' +
-                  '<br><span style="font-size: 12px; color: #64748b;">Pastikan seluruh hasil pemeriksaan dan lot dari sesi terpilih telah Anda tinjau.</span>',
-            icon: 'question',
-            input: 'text',
-            inputLabel: 'Catatan Persetujuan (Opsional)',
-            inputPlaceholder: 'Tuliskan catatan supervisor bila diperlukan...',
-            showCancelButton: true,
-            confirmButtonColor: '#059669',
-            cancelButtonColor: '#64748b',
-            confirmButtonText: 'Ya, Setujui (' + count + ' Sesi)',
-            cancelButtonText: 'Batal'
-        }).then(function(result) {
-            if (result.isConfirmed) {
-                submitApproval({
-                    action: 'approve_all_filtered',
-                    session_ids: selectedIds.join(','),
-                    start_date: '<?= htmlspecialchars($startDate) ?>',
-                    end_date: '<?= htmlspecialchars($endDate) ?>',
-                    notes: result.value || 'Disetujui secara bersamaan oleh supervisor'
-                });
-            }
-        });
-    }
-    // EXCEL-STYLE COLUMN HEADER FILTERS ENGINE (DAILY REPORT SESSION TIMELINE)
-    // ══════════════════════════════════════════════════════════════════════════
-    var ExcelFilterState = {
-        activeCol: null,
-        filters: {
-            date: new Set(),
-            jalur: new Set(),
-            item: new Set(),
-            inspector: new Set(),
-            status: new Set(),
-            approval: new Set()
-        },
-        options: {
-            date: [],
-            jalur: [],
-            item: [],
-            inspector: [],
-            status: [],
-            approval: []
-        }
+    window.DAILY_REPORT_CONFIG = {
+        baseUrl: '<?= base_url() ?>',
+        csrfToken: '<?= htmlspecialchars(generate_csrf_token()) ?>',
+        todayDate: '<?= htmlspecialchars($todayDateStr) ?>',
+        startDate: '<?= htmlspecialchars($startDate) ?>',
+        endDate: '<?= htmlspecialchars($endDate) ?>',
+        inspectorId: <?= (int)$inspectorId ?>,
+        filterContext: '<?= !empty($startDate) && !empty($endDate) ? date("d/m/Y", strtotime($startDate)) . " - " . date("d/m/Y", strtotime($endDate)) : "" ?>',
+        activeTab: '<?= htmlspecialchars($activeTab) ?>'
     };
-
-    function initExcelFilters() {
-        var rows = document.querySelectorAll('tr.session-data-row');
-        if (!rows || rows.length === 0) return;
-
-        var sets = {
-            date: new Set(),
-            jalur: new Set(),
-            item: new Set(),
-            inspector: new Set(),
-            status: new Set(),
-            approval: new Set()
-        };
-
-        rows.forEach(function(r) {
-            var d = (r.getAttribute('data-filter-date') || '').trim();
-            var j = (r.getAttribute('data-filter-jalur') || '').trim();
-            var it = (r.getAttribute('data-filter-item') || '').trim();
-            var ins = (r.getAttribute('data-filter-inspector') || '').trim();
-            var st = (r.getAttribute('data-filter-status') || '').trim();
-            var ap = (r.getAttribute('data-filter-approval') || '').trim();
-
-            if (d) sets.date.add(d);
-            if (j) sets.jalur.add(j);
-            if (it) sets.item.add(it);
-            if (ins) sets.inspector.add(ins);
-            if (st) sets.status.add(st);
-            if (ap) sets.approval.add(ap);
-        });
-
-        ['date', 'jalur', 'item', 'inspector', 'status', 'approval'].forEach(function(col) {
-            ExcelFilterState.options[col] = Array.from(sets[col]).sort();
-            renderFilterCheckboxes(col);
-        });
-    }
-
-    function renderFilterCheckboxes(col) {
-        var container = document.getElementById('filter-list-' + col);
-        if (!container) return;
-
-        var options = ExcelFilterState.options[col] || [];
-        var activeSet = ExcelFilterState.filters[col];
-        var isAllActive = (activeSet.size === 0);
-
-        container.innerHTML = '';
-        if (options.length === 0) {
-            container.innerHTML = '<div style="color: #94a3b8; padding: 6px; text-align: center; font-size: 10px;">Tidak ada opsi</div>';
-            return;
-        }
-
-        options.forEach(function(opt) {
-            var isChecked = isAllActive || activeSet.has(opt);
-            var itemDiv = document.createElement('label');
-            itemDiv.className = 'excel-filter-item';
-            itemDiv.setAttribute('data-val', opt.toLowerCase());
-
-            var cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.value = opt;
-            cb.checked = isChecked;
-
-            var span = document.createElement('span');
-            span.textContent = opt;
-            span.style.overflow = 'hidden';
-            span.style.textOverflow = 'ellipsis';
-            span.style.whiteSpace = 'nowrap';
-            span.title = opt;
-
-            itemDiv.appendChild(cb);
-            itemDiv.appendChild(span);
-            container.appendChild(itemDiv);
-        });
-
-        updateFilterCountInfo(col);
-    }
-
-    function updateFilterCountInfo(col) {
-        var dropdown = document.getElementById('filter-dropdown-' + col);
-        if (!dropdown) return;
-        var info = dropdown.querySelector('.filter-count-info');
-        if (!info) return;
-
-        var checkboxes = dropdown.querySelectorAll('.excel-filter-list input[type="checkbox"]');
-        var checkedCount = 0;
-        checkboxes.forEach(function(cb) {
-            if (cb.checked) checkedCount++;
-        });
-        info.textContent = checkedCount + ' / ' + checkboxes.length + ' dipilih';
-    }
-
-    function toggleExcelFilter(event, col) {
-        event.stopPropagation();
-        var dropdown = document.getElementById('filter-dropdown-' + col);
-        if (!dropdown) return;
-
-        var isVisible = (dropdown.style.display === 'block');
-        closeAllExcelFilters();
-
-        if (!isVisible) {
-            dropdown.style.display = 'block';
-            ExcelFilterState.activeCol = col;
-            var searchInput = dropdown.querySelector('.excel-filter-search');
-            if (searchInput) {
-                searchInput.value = '';
-                onSearchFilterOptions(col, '');
-                setTimeout(function() { searchInput.focus(); }, 50);
-            }
-        }
-    }
-
-    function closeAllExcelFilters() {
-        document.querySelectorAll('.excel-filter-dropdown').forEach(function(dd) {
-            dd.style.display = 'none';
-        });
-        ExcelFilterState.activeCol = null;
-    }
-
-    function onSearchFilterOptions(col, keyword) {
-        var container = document.getElementById('filter-list-' + col);
-        if (!container) return;
-        var kw = (keyword || '').toLowerCase().trim();
-        var items = container.querySelectorAll('.excel-filter-item');
-        items.forEach(function(item) {
-            var val = item.getAttribute('data-val') || '';
-            if (!kw || val.indexOf(kw) !== -1) {
-                item.style.display = 'flex';
-            } else {
-                item.style.display = 'none';
-            }
-        });
-    }
-
-    function toggleSelectAllFilter(col, selectAll) {
-        var container = document.getElementById('filter-list-' + col);
-        if (!container) return;
-        var checkboxes = container.querySelectorAll('input[type="checkbox"]');
-        checkboxes.forEach(function(cb) {
-            if (cb.closest('.excel-filter-item').style.display !== 'none') {
-                cb.checked = selectAll;
-            }
-        });
-        updateFilterCountInfo(col);
-    }
-
-    function applyExcelFilters() {
-        var cols = ['date', 'jalur', 'item', 'inspector', 'status', 'approval'];
-
-        cols.forEach(function(col) {
-            var container = document.getElementById('filter-list-' + col);
-            if (!container) return;
-
-            var checkboxes = container.querySelectorAll('input[type="checkbox"]');
-            var allCount = checkboxes.length;
-            var checkedValues = [];
-
-            checkboxes.forEach(function(cb) {
-                if (cb.checked) {
-                    checkedValues.push(cb.value);
-                }
-            });
-
-            var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
-
-            if (checkedValues.length === 0 || checkedValues.length === allCount) {
-                ExcelFilterState.filters[col].clear();
-                if (btn) btn.classList.remove('active');
-            } else {
-                ExcelFilterState.filters[col] = new Set(checkedValues);
-                if (btn) btn.classList.add('active');
-            }
-        });
-
-        closeAllExcelFilters();
-        executeDailyReportFiltering();
-    }
-
-    function resetSingleColFilter(col) {
-        ExcelFilterState.filters[col].clear();
-        var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
-        if (btn) btn.classList.remove('active');
-        renderFilterCheckboxes(col);
-        closeAllExcelFilters();
-        executeDailyReportFiltering();
-    }
-
-    function resetAllExcelFilters() {
-        ['date', 'jalur', 'item', 'inspector', 'status', 'approval'].forEach(function(col) {
-            ExcelFilterState.filters[col].clear();
-            var btn = document.querySelector('.th-filter-btn[data-col="' + col + '"]');
-            if (btn) btn.classList.remove('active');
-            renderFilterCheckboxes(col);
-        });
-        closeAllExcelFilters();
-        executeDailyReportFiltering();
-    }
-
-    function executeDailyReportFiltering() {
-        var rows = document.querySelectorAll('tr.session-data-row');
-        if (!rows || rows.length === 0) return;
-
-        var showApprovedToggle = document.getElementById('toggleShowApproved');
-        var allowApproved = showApprovedToggle ? showApprovedToggle.checked : true;
-
-        var activeFilterCols = [];
-        ['date', 'jalur', 'item', 'inspector', 'status', 'approval'].forEach(function(c) {
-            if (ExcelFilterState.filters[c].size > 0) activeFilterCols.push(c);
-        });
-
-        var visibleCount = 0;
-        var totalRows = rows.length;
-
-        rows.forEach(function(r) {
-            var sId = r.getAttribute('data-session-id');
-            var subRow = document.getElementById('acc-timeline-' + sId);
-            var isApproved = (r.getAttribute('data-approved') === '1');
-
-            // 1. Cek toggle approval
-            if (!allowApproved && isApproved) {
-                r.style.display = 'none';
-                if (subRow) subRow.classList.add('hidden');
-                return;
-            }
-
-            // 2. Cek Excel Filter per kolom
-            var d = (r.getAttribute('data-filter-date') || '').trim();
-            var j = (r.getAttribute('data-filter-jalur') || '').trim();
-            var it = (r.getAttribute('data-filter-item') || '').trim();
-            var ins = (r.getAttribute('data-filter-inspector') || '').trim();
-            var st = (r.getAttribute('data-filter-status') || '').trim();
-            var ap = (r.getAttribute('data-filter-approval') || '').trim();
-
-            var match = true;
-            if (ExcelFilterState.filters.date.size > 0 && !ExcelFilterState.filters.date.has(d)) match = false;
-            if (match && ExcelFilterState.filters.jalur.size > 0 && !ExcelFilterState.filters.jalur.has(j)) match = false;
-            if (match && ExcelFilterState.filters.item.size > 0 && !ExcelFilterState.filters.item.has(it)) match = false;
-            if (match && ExcelFilterState.filters.inspector.size > 0 && !ExcelFilterState.filters.inspector.has(ins)) match = false;
-            if (match && ExcelFilterState.filters.status.size > 0 && !ExcelFilterState.filters.status.has(st)) match = false;
-            if (match && ExcelFilterState.filters.approval.size > 0 && !ExcelFilterState.filters.approval.has(ap)) match = false;
-
-            if (match) {
-                r.style.display = '';
-                visibleCount++;
-            } else {
-                r.style.display = 'none';
-                if (subRow) subRow.classList.add('hidden');
-            }
-        });
-
-        // Update indikator bar filter
-        var indicatorBar = document.getElementById('excel-filter-active-bar');
-        var summaryText = document.getElementById('excel-filter-summary-text');
-        var badgeCount = document.getElementById('badgeTotalSessionCount');
-
-        if (activeFilterCols.length > 0) {
-            if (indicatorBar) indicatorBar.style.display = 'flex';
-            if (summaryText) {
-                summaryText.innerText = 'Menyaring ' + visibleCount + ' dari ' + totalRows + ' sesi (' + activeFilterCols.join(', ') + ')';
-            }
-            if (badgeCount) {
-                badgeCount.innerText = visibleCount + ' Sesi Tersaring (' + totalRows + ' Total)';
-            }
-        } else {
-            if (indicatorBar) indicatorBar.style.display = 'none';
-            if (badgeCount) {
-                if (!allowApproved) {
-                    var pendingCount = document.querySelectorAll('.row-pending-session').length;
-                    badgeCount.innerText = pendingCount + ' Sesi Menunggu ACC (' + totalRows + ' Total)';
-                } else {
-                    badgeCount.innerText = 'Total ' + totalRows + ' Sesi';
-                }
-            }
-        }
-
-        // Sinkronisasi status checkbox dan tombol approve terpilih saat tabel disaring
-        if (typeof onSessionCheckChange === 'function') {
-            onSessionCheckChange();
-        }
-    }
-
-    // Inisialisasi Excel Filters saat halaman selesai dimuat
-    document.addEventListener('DOMContentLoaded', function() {
-        initExcelFilters();
-
-        // Integrasikan dengan toggleShowApproved
-        var toggle = document.getElementById('toggleShowApproved');
-        if (toggle) {
-            toggle.addEventListener('change', function() {
-                executeDailyReportFiltering();
-            });
-        }
-    });
-
-    // Event listener: Klik di luar untuk menutup dropdown
-    document.addEventListener('click', function(e) {
-        if (!e.target.closest('.excel-filter-dropdown') && !e.target.closest('.th-filter-btn')) {
-            closeAllExcelFilters();
-        }
-    });
-
-    // Event listener: Tombol Escape untuk menutup dropdown
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
-            closeAllExcelFilters();
-        }
-    });
-
-    // ═══════════════════════════════════════════════════════════════════
-    // REAL-TIME LIVE SESSION MONITOR (ZERO-OVERHEAD POLLING)
-    // ═══════════════════════════════════════════════════════════════════
-    var LiveSessionMonitor = (function() {
-        var pollTimer = null;
-        var isPollingActive = false;
-        var inFlight = false;
-        var pollInterval = 12000; // 12 detik: responsif dan sangat ramah server/multi-PC
-
-        function getLiveSessionIds() {
-            var liveRows = document.querySelectorAll('tr.session-data-row.session-row-live');
-            var ids = [];
-            liveRows.forEach(function(row) {
-                var sid = row.getAttribute('data-session-id');
-                if (sid && ids.indexOf(sid) === -1) {
-                    ids.push(sid);
-                }
-            });
-            return ids;
-        }
-
-        function checkLiveStatus() {
-            var ids = getLiveSessionIds();
-            if (ids.length === 0) {
-                stop();
-                return;
-            }
-
-            if (inFlight) return; // Mencegah tumpukan request jika koneksi lambat
-            if (document.hidden) return; // Page Visibility: Jangan polling jika tab sedang di-minimize/background
-
-            inFlight = true;
-            var endpoint = '<?= base_url("modules/daily_report/api/check_live_status.php") ?>?ids=' + encodeURIComponent(ids.join(','));
-
-            var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-            var fetchTimeout = null;
-            if (controller) {
-                fetchTimeout = setTimeout(function() {
-                    controller.abort();
-                }, 5000); // 5 detik max timeout
-            }
-
-            fetch(endpoint, {
-                method: 'GET',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                signal: controller ? controller.signal : undefined
-            })
-            .then(function(res) {
-                return res.json();
-            })
-            .then(function(data) {
-                if (!data || !data.success || !data.sessions) return;
-
-                var sessions = data.sessions;
-                var anyStatusChanged = false;
-
-                for (var sid in sessions) {
-                    var sInfo = sessions[sid];
-                    var row = document.querySelector('tr.session-data-row[data-session-id="' + sid + '"]');
-                    if (!row) continue;
-
-                    // Update jumlah sampling bila bertambah di DB
-                    var sampleSpan = document.querySelector('.session-sample-size-' + sid);
-                    if (sampleSpan && sInfo.effective_sample) {
-                        sampleSpan.textContent = Number(sInfo.effective_sample).toLocaleString('id-ID') + ' pcs';
-                    }
-
-                    // Cek apakah status sudah bukan in_progress lagi (selesai di line)
-                    if (!sInfo.is_in_progress && sInfo.status !== 'in_progress') {
-                        anyStatusChanged = true;
-                        row.classList.remove('session-row-live');
-                        row.setAttribute('data-is-live', '0');
-                        row.setAttribute('data-filter-status', sInfo.status.toUpperCase());
-
-                        // 1. Update Badge Status
-                        var statusCell = document.querySelector('.session-status-cell-' + sid);
-                        if (statusCell) {
-                            if (sInfo.status === 'passed') {
-                                statusCell.innerHTML = '<span style="display: inline-flex; align-items: center; gap: 3px; background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">PASS</span>';
-                            } else if (sInfo.status === 'rejected') {
-                                statusCell.innerHTML = '<span style="display: inline-flex; align-items: center; gap: 3px; background: #ffe4e6; color: #be123c; border: 1px solid #fecdd3; font-size: 11px; font-weight: 900; padding: 3px 8px; border-radius: 9999px;">REJECT</span>';
-                            }
-                        }
-
-                        // 2. Update Waktu Selesai & Hilangkan Tag LIVE
-                        var timeContainer = document.querySelector('.session-time-text-' + sid);
-                        if (timeContainer) {
-                            timeContainer.innerHTML = '<span>' + (sInfo.time_text || '') + '</span>';
-                        }
-                    }
-
-                    // ═══════════════════════════════════════════════════════════════
-                    // 3. Update Real-Time Pada Kartu Tab Inspektur (#pane-tab-inspector)
-                    // ═══════════════════════════════════════════════════════════════
-                    if (!sInfo.is_in_progress && sInfo.status !== 'in_progress') {
-                        var inspCards = document.querySelectorAll('.inspector-card');
-                        inspCards.forEach(function(card) {
-                            var liveIdsAttr = card.getAttribute('data-live-session-ids') || '';
-                            var arrIds = liveIdsAttr.split(',').filter(function(x) { return x.trim() !== ''; });
-                            var idxSid = arrIds.indexOf(String(sid));
-                            if (idxSid !== -1) {
-                                // Hapus sid ini dari daftar sesi live inspektur
-                                arrIds.splice(idxSid, 1);
-                                card.setAttribute('data-live-session-ids', arrIds.join(','));
-
-                                var safeId = card.getAttribute('data-inspector-safe');
-                                
-                                // Update hitungan sesi di teks info inspektur
-                                var totalSess = parseInt(card.getAttribute('data-total-sessions') || '0', 10);
-                                var passSess = parseInt(card.getAttribute('data-passed-sessions') || '0', 10);
-                                var rejSess = parseInt(card.getAttribute('data-rejected-sessions') || '0', 10);
-                                var inprogSess = Math.max(0, parseInt(card.getAttribute('data-inprog-sessions') || '0', 10) - 1);
-                                if (sInfo.status === 'passed') {
-                                    passSess++;
-                                } else if (sInfo.status === 'rejected') {
-                                    rejSess++;
-                                }
-                                card.setAttribute('data-passed-sessions', passSess);
-                                card.setAttribute('data-rejected-sessions', rejSess);
-                                card.setAttribute('data-inprog-sessions', inprogSess);
-
-                                var summaryText = document.getElementById('summary-sess-' + safeId);
-                                if (summaryText) {
-                                    summaryText.innerHTML = totalSess + ' Sesi Inspeksi &bull; ' + passSess + ' Passed &bull; ' + rejSess + ' Rejected &bull; ' + inprogSess + ' In Progress';
-                                }
-
-                                // Jika inspektur ini sudah TIDAK memiliki sesi live lain
-                                if (arrIds.length === 0) {
-                                    // 1. Ubah badge LIVE menjadi STANDBY / SELESAI
-                                    var badgeBox = document.getElementById('badge-container-' + safeId);
-                                    if (badgeBox) {
-                                        badgeBox.innerHTML = '<span style="font-size: 10px; font-weight: 800; background: #f1f5f9; color: #64748b; border: 1px solid #e2e8f0; padding: 2px 7px; border-radius: 9999px;">STANDBY / SELESAI</span>';
-                                    }
-
-                                    // 2. Kembalikan Border Card dari Merah ke Netral
-                                    card.classList.remove('border-red-300', 'ring-1', 'ring-red-200');
-                                    card.classList.add('border-slate-200/90');
-
-                                    // 3. Kembalikan Header Card Background
-                                    var cardHeader = document.getElementById('card-header-' + safeId);
-                                    if (cardHeader) {
-                                        cardHeader.style.background = '#fafafa';
-                                        cardHeader.style.borderBottomColor = '#e2e8f0';
-                                    }
-
-                                    // 4. Kembalikan Avatar Warna
-                                    var avatarBox = document.getElementById('avatar-' + safeId);
-                                    if (avatarBox) {
-                                        avatarBox.style.background = '#e2e8f0';
-                                        avatarBox.style.color = '#1e293b';
-                                        avatarBox.style.borderColor = '#cbd5e1';
-                                    }
-                                }
-                            }
-                        });
-
-                        // Periksa apakah masih ada inspektur yang LIVE sama sekali
-                        var stillAnyInspLive = false;
-                        document.querySelectorAll('.inspector-card').forEach(function(c) {
-                            var idsLeft = (c.getAttribute('data-live-session-ids') || '').trim();
-                            if (idsLeft !== '') stillAnyInspLive = true;
-                        });
-                        var tabLiveDot = document.getElementById('tab-inspector-live-dot');
-                        if (tabLiveDot) {
-                            tabLiveDot.style.display = stillAnyInspLive ? 'inline-block' : 'none';
-                        }
-                    }
-                }
-
-                // Jika ada status yang berubah, cek apakah masih ada sesi live tersisa
-                if (anyStatusChanged) {
-                    var remaining = getLiveSessionIds();
-                    if (remaining.length === 0) {
-                        stop();
-                    }
-                    if (typeof executeDailyReportFiltering === 'function') {
-                        executeDailyReportFiltering();
-                    }
-                }
-            })
-            .catch(function(err) {
-                // Silent fail agar tidak mengganggu UX pengguna saat ada fluktuasi jaringan / timeout
-            })
-            .finally(function() {
-                if (fetchTimeout) clearTimeout(fetchTimeout);
-                inFlight = false;
-            });
-        }
-
-        function start() {
-            var ids = getLiveSessionIds();
-            if (ids.length === 0) {
-                return;
-            }
-            if (!isPollingActive) {
-                isPollingActive = true;
-                pollTimer = setInterval(checkLiveStatus, pollInterval);
-            }
-        }
-
-        function stop() {
-            if (pollTimer) {
-                clearInterval(pollTimer);
-                pollTimer = null;
-            }
-            isPollingActive = false;
-            inFlight = false;
-        }
-
-        return {
-            init: function() {
-                start();
-                // Page Visibility API: hemat baterai dan resource saat tab browser tidak aktif
-                document.addEventListener('visibilitychange', function() {
-                    if (document.hidden) {
-                        stop();
-                    } else {
-                        start();
-                    }
-                });
-            },
-            stop: stop
-        };
-    })();
-
-    // Inisialisasi Real-Time Live Monitor saat DOM siap
-    document.addEventListener('DOMContentLoaded', function() {
-        LiveSessionMonitor.init();
-    });
     </script>
+    <script src="<?= base_url('assets/js/modules/daily_report.js?v=' . APP_VERSION) ?>"></script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

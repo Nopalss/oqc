@@ -7,6 +7,18 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+// Production Security Guard: Require authenticated user with menu access
+require_menu_access('inspection');
+if (!is_logged_in()) {
+    http_response_code(401);
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'message' => 'Sesi login Anda telah berakhir. Silakan login kembali.', 'unauthorized' => true]);
+    exit;
+}
+
+$currentUser = current_user();
+$currentUserId = (int)($currentUser['id'] ?? 0);
+
 $pdo = getDB();
 
 // Handle Form Submission / AJAX request to initiate session
@@ -171,7 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     if ($didId > 0 && $sampleSize > 0 && $pdo) {
         try {
-            $inspectorId = (int)($_SESSION['user_id'] ?? 1);
+            $inspectorId = $currentUserId > 0 ? $currentUserId : (int)($_SESSION['user_id'] ?? 0);
             $existingSession = null;
 
             if ($kanbanItemId > 0 && $inspectionType === 'kanban') {
@@ -261,7 +273,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 if (!empty($scannedLabels)) {
                     foreach ($scannedLabels as $chkLbl) {
                         $cRef = strtoupper(trim(sanitize($chkLbl['Z5'] ?? ($chkLbl['ref_number'] ?? ''))));
-                        if (!empty($cRef)) {
+                        $cLot = strtoupper(trim(sanitize($chkLbl['Z2'] ?? ($chkLbl['lot_number'] ?? $lotNumber))));
+                        if (!empty($cRef) || !empty($cLot)) {
                             // 0. Cek apakah label ini pernah di-ABOLISH (Scrap / Dimusnahkan)
                             $stmtChkAb = $pdo->prepare("
                                 SELECT isl.id, isl.lot_number, isl.ref_number, isl.lot_status, lqc.closure_type, lqc.notes, lqc.closed_at 
@@ -271,12 +284,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 LEFT JOIN daily_inspection_data did ON did.id = s.did_id
                                 LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
                                 LEFT JOIN master_parts mp ON mp.id = s.part_id
-                                WHERE UPPER(isl.ref_number) = :ref
+                                WHERE UPPER(isl.lot_number) = :lot
+                                  " . (!empty($cRef) ? "AND UPPER(isl.ref_number) = :ref" : "") . "
                                   AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
                                   AND (isl.lot_status = 'abolished' OR lqc.closure_type = 'abolish')
                                 ORDER BY isl.id DESC LIMIT 1
                             ");
-                            $stmtChkAb->execute([':ref' => $cRef, ':p1' => $partCode, ':p2' => $partCode, ':p3' => $partCode]);
+                            $abParams = [':lot' => $cLot, ':p1' => $partCode, ':p2' => $partCode, ':p3' => $partCode];
+                            if (!empty($cRef)) $abParams[':ref'] = $cRef;
+                            $stmtChkAb->execute($abParams);
                             $abRow = $stmtChkAb->fetch(PDO::FETCH_ASSOC);
                             if ($abRow) {
                                 if ($pdo->inTransaction()) {
@@ -286,34 +302,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 echo json_encode([
                                     'success' => false,
                                     'error_type' => 'lot_abolished',
-                                    'message' => "⛔ LABEL DI-ABOLISH: Label Box Ref '{$cRef}' telah dinyatakan ABOLISH (Scrap / Dimusnahkan) dan dilarang untuk diinspeksi kembali!"
+                                    'message' => "⛔ LABEL DI-ABOLISH: Label Lot '{$cLot}'" . (!empty($cRef) ? " (Ref '{$cRef}')" : "") . " telah dinyatakan ABOLISH (Scrap / Dimusnahkan) dan dilarang untuk diinspeksi kembali!"
                                 ]);
                                 exit;
                             }
 
-                            // 1. Cek in_progress di sesi lain
+                            // 1. Cek in_progress di sesi lain (3-way match: Part + Lot + Ref)
                             $stmtChkActive = $pdo->prepare("
                                 SELECT s.id, s.line_name, s.inspection_type, ki.kanban_no 
                                 FROM inspection_session_lots isl 
                                 JOIN inspection_sessions s ON s.id = isl.inspection_session_id 
                                 LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
-                                WHERE UPPER(isl.ref_number) = :ref AND s.status = 'in_progress'
+                                WHERE UPPER(isl.lot_number) = :lot
+                                  " . (!empty($cRef) ? "AND UPPER(isl.ref_number) = :ref" : "") . "
+                                  AND s.status = 'in_progress'
                                 LIMIT 1
                             ");
-                            $stmtChkActive->execute([':ref' => $cRef]);
+                            $actParams = [':lot' => $cLot];
+                            if (!empty($cRef)) $actParams[':ref'] = $cRef;
+                            $stmtChkActive->execute($actParams);
                             $activeSess = $stmtChkActive->fetch(PDO::FETCH_ASSOC);
                             if ($activeSess) {
                                 $sessDesc = ($activeSess['inspection_type'] === 'safety_stock') ? 'Safety Stock' : ('Kanban ' . ($activeSess['kanban_no'] ?: ('#' . $activeSess['id'])));
                                 echo json_encode([
                                     'success' => false,
-                                    'message' => "Label Ref '{$cRef}' saat ini sedang aktif diinspeksi pada Sesi #{$activeSess['id']} [{$sessDesc}] Line {$activeSess['line_name']}."
+                                    'message' => "Label Lot '{$cLot}'" . (!empty($cRef) ? " (Ref '{$cRef}')" : "") . " saat ini sedang aktif diinspeksi pada Sesi #{$activeSess['id']} [{$sessDesc}] Line {$activeSess['line_name']}."
                                 ]);
                                 exit;
                             }
 
                             // 2. Cek already passed (jika tipe kanban)
                             if ($inspectionType !== 'safety_stock') {
-                                // Cek apakah label ini punya sisa aktif di Safety Stock Gudang
+                                // Cek apakah label ini punya sisa aktif di Safety Stock Gudang (wajib match lot_number & ref_number)
+                                $ssAvailParams = [
+                                    ':lot' => $cLot,
+                                    ':p1'  => $partCode,
+                                    ':p2'  => $partCode,
+                                    ':p3'  => $partCode
+                                ];
+                                if (!empty($cRef)) $ssAvailParams[':ref'] = $cRef;
                                 $stmtSSAvailChk = $pdo->prepare("
                                     SELECT isl.id AS lot_id, s.id AS session_id, COALESCE(isl.qty, s.total_scanned_qty, 0) AS available_qty
                                     FROM inspection_session_lots isl
@@ -327,36 +354,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                       AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
                                       AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
                                       AND isl.qty > 0
-                                      AND UPPER(isl.ref_number) = :ref
+                                      AND UPPER(isl.lot_number) = UPPER(:lot)
+                                      " . (!empty($cRef) ? "AND UPPER(isl.ref_number) = UPPER(:ref)" : "") . "
                                       AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
                                     ORDER BY s.id DESC
                                     LIMIT 1
                                 ");
-                                $stmtSSAvailChk->execute([
-                                    ':ref' => $cRef,
-                                    ':p1'  => $partCode,
-                                    ':p2'  => $partCode,
-                                    ':p3'  => $partCode
-                                ]);
+                                $stmtSSAvailChk->execute($ssAvailParams);
                                 $activeSSRow = $stmtSSAvailChk->fetch(PDO::FETCH_ASSOC);
 
                                 if (!$activeSSRow) {
+                                    // Ambil status rekaman TERAKHIR dari box ini (Latest State)
+                                    // Jika record terakhir adalah rejected/ng, izinkan untuk diperiksa/disortir kembali
                                     $stmtChkPassed = $pdo->prepare("
-                                        SELECT s.id, ki.kanban_no 
+                                        SELECT s.id, s.status AS session_status, isl.lot_result, isl.lot_status, ki.kanban_no 
                                         FROM inspection_session_lots isl 
                                         JOIN inspection_sessions s ON s.id = isl.inspection_session_id 
                                         LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
-                                        WHERE UPPER(isl.ref_number) = :ref 
-                                          AND (isl.lot_result = 'passed' OR s.status = 'passed') 
+                                        WHERE UPPER(isl.lot_number) = :lot
+                                          " . (!empty($cRef) ? "AND UPPER(isl.ref_number) = :ref" : "") . "
+                                          AND s.status != 'in_progress'
                                           AND s.inspection_type = 'kanban'
+                                        ORDER BY isl.id DESC, s.id DESC
                                         LIMIT 1
                                     ");
-                                    $stmtChkPassed->execute([':ref' => $cRef]);
+                                    $chkPassParams = [':lot' => $cLot];
+                                    if (!empty($cRef)) $chkPassParams[':ref'] = $cRef;
+                                    $stmtChkPassed->execute($chkPassParams);
                                     $passSess = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
+
+                                    $isPassSessValid = false;
                                     if ($passSess) {
+                                        $isSessRejected = (
+                                            $passSess['lot_result'] === 'rejected' ||
+                                            $passSess['session_status'] === 'rejected' ||
+                                            in_array($passSess['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'rejected'])
+                                        );
+                                        if (!$isSessRejected && (in_array($passSess['lot_result'], ['passed', 'skipped']) || $passSess['session_status'] === 'passed')) {
+                                            $isPassSessValid = true;
+                                        }
+                                    }
+
+                                    if ($isPassSessValid) {
                                         echo json_encode([
                                             'success' => false,
-                                            'message' => "Label Ref '{$cRef}' SUDAH PERNAH diinspeksi dan dinyatakan PASSED pada Sesi #{$passSess['id']} (Kanban " . ($passSess['kanban_no'] ?: '-') . "). Tidak dapat digunakan kembali demi mencegah data ganda!"
+                                            'message' => "Label Lot '{$cLot}'" . (!empty($cRef) ? " (Ref '{$cRef}')" : "") . " SUDAH PERNAH diinspeksi dan dinyatakan PASSED pada Sesi #{$passSess['id']} (Kanban " . ($passSess['kanban_no'] ?: '-') . "). Tidak dapat digunakan kembali demi mencegah data ganda!"
                                         ]);
                                         exit;
                                     }
@@ -431,9 +473,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $lRaw = sanitize($lbl['raw'] ?? '');
 
                     if (!empty($lLot)) {
-                        // Cek apakah label ini merupakan label Safety Stock aktif
+                        // Cek apakah label ini merupakan label Safety Stock aktif (Wajib cocokkan lot_number dan ref_number)
                         $matchedSsLot = null;
-                        if (!empty($lRef) && $inspectionType === 'kanban') {
+                        if (!empty($lLot) && $inspectionType === 'kanban') {
                             $stmtChkSSMatch = $pdo->prepare("
                                 SELECT isl.id AS lot_id, s.id AS session_id, COALESCE(isl.qty, s.total_scanned_qty, 0) AS available_qty
                                 FROM inspection_session_lots isl
@@ -447,17 +489,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                   AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
                                   AND (isl.lot_result IS NULL OR isl.lot_result IN ('passed', 'skipped'))
                                   AND isl.qty > 0
-                                  AND UPPER(isl.ref_number) = UPPER(:ref)
+                                  AND UPPER(isl.lot_number) = UPPER(:lot)
+                                  " . (!empty($lRef) ? "AND UPPER(isl.ref_number) = UPPER(:ref)" : "") . "
                                   AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
                                 ORDER BY s.id DESC
                                 LIMIT 1
                             ");
-                            $stmtChkSSMatch->execute([
-                                ':ref' => $lRef,
+                            $mSSParams = [
+                                ':lot' => $lLot,
                                 ':p1'  => $partCode,
                                 ':p2'  => $partCode,
                                 ':p3'  => $partCode
-                            ]);
+                            ];
+                            if (!empty($lRef)) $mSSParams[':ref'] = $lRef;
+                            $stmtChkSSMatch->execute($mSSParams);
                             $matchedSsLot = $stmtChkSSMatch->fetch(PDO::FETCH_ASSOC);
                         }
 
@@ -472,8 +517,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         }
 
                         // Check duplicate ref_number for this session
-                        $stmtChkRef = $pdo->prepare("SELECT id FROM inspection_session_lots WHERE inspection_session_id = :sid AND (ref_number = :ref OR (ref_number IS NULL AND lot_number = :lot AND qty = :qty)) LIMIT 1");
-                        $stmtChkRef->execute([':sid' => $sessionId, ':ref' => $lRef ?: null, ':lot' => $lLot, ':qty' => $lQty]);
+                        $stmtChkRef = $pdo->prepare("SELECT id FROM inspection_session_lots WHERE inspection_session_id = :sid AND UPPER(lot_number) = UPPER(:lot) AND ((ref_number IS NOT NULL AND ref_number != '' AND UPPER(ref_number) = UPPER(:ref)) OR ((ref_number IS NULL OR ref_number = '') AND (:ref_empty IS NULL OR :ref_empty2 = ''))) LIMIT 1");
+                        $stmtChkRef->execute([':sid' => $sessionId, ':lot' => $lLot, ':ref' => $lRef ?: '', ':ref_empty' => $lRef ?: null, ':ref_empty2' => $lRef ?: '']);
                         if (!$stmtChkRef->fetch()) {
                             // Query AQL for this specific lot qty
                             $stmtAqlLot = $pdo->prepare("SELECT sample_code, sample_size, accept_number, reject_number FROM aql_standards WHERE inspection_level = :lvl AND :qty BETWEEN qty_min AND qty_max LIMIT 1");

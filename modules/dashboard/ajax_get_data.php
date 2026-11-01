@@ -55,7 +55,12 @@ $monthNames = [
 $filterType      = sanitize($_GET['filter_type'] ?? '');
 $selectedMonth   = isset($_GET['month']) && is_numeric($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
 $selectedYear    = isset($_GET['year']) && is_numeric($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
-$selectedTopRank = isset($_GET['top_rank']) && in_array((int)$_GET['top_rank'], [3, 5, 10]) ? (int)$_GET['top_rank'] : 3;
+$selectedTopRank    = isset($_GET['top_rank']) && in_array((int)$_GET['top_rank'], [3, 5, 10]) ? (int)$_GET['top_rank'] : 5;
+$selectedDefectRank = isset($_GET['defect_rank']) && in_array((int)$_GET['defect_rank'], [1, 3]) ? (int)$_GET['defect_rank'] : 3;
+$selectedSubResolution = sanitize($_GET['sub_resolution'] ?? 'weekly');
+if (!in_array($selectedSubResolution, ['weekly', 'daily'])) {
+    $selectedSubResolution = 'weekly';
+}
 
 // Fetch distinct years
 $dbYears = [];
@@ -78,8 +83,8 @@ if ($filterType === 'all_years') {
     $presetFilter = 'all_years';
     $trendSubtext = 'komparasi total per tahun (YoY)';
 } elseif ($filterType === 'month_year') {
-    $startDate = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
-    $endDate   = date('Y-m-t', strtotime($startDate));
+    $startDate = getWorkCycleMonthStartDate($selectedYear, $selectedMonth);
+    $endDate   = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth)));
     $presetFilter = 'month_year';
     $trendSubtext = 'per tanggal (' . ($monthNames[$selectedMonth] ?? $selectedMonth) . ' ' . $selectedYear . ')';
 } elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
@@ -96,7 +101,7 @@ if ($filterType === 'all_years') {
             $trendSubtext = 'per jam / hari';
             break;
         case 'mingguan':
-            $startDate = date('Y-m-d', strtotime('monday this week'));
+            $startDate = getWorkCycleWeekStartDate();
             $endDate   = date('Y-m-d');
             $trendSubtext = 'per hari';
             break;
@@ -107,7 +112,9 @@ if ($filterType === 'all_years') {
             break;
         default:
             $presetFilter = 'bulanan';
-            $startDate    = date('Y-m-01');
+            $curY = (int)date('Y');
+            $curM = (int)date('n');
+            $startDate    = getWorkCycleMonthStartDate($curY, $curM);
             $endDate      = date('Y-m-d');
             $trendSubtext = 'per tanggal';
     }
@@ -480,12 +487,95 @@ try {
         return ($defectTypeTotals[$b] ?? 0) <=> ($defectTypeTotals[$a] ?? 0);
     });
 
-    $otherNDefectTypes = []; // Hapus kategori Others
-
+    // ── Akumulasi Data Mingguan untuk Grafik Batang (Stacked Weekly W1-W4) ──
+    $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
     $stackedChartLabels = [];
-    foreach ($activeDefectPeriodKeys as $dk) {
-        $stackedChartLabels[] = $stackedPeriodLabels[$dk] ?? $dk;
+    $weeklyDateMap = []; // [W1 => ['start' => ..., 'end' => ..., 'label' => ...]]
+    foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+        $stackedChartLabels[] = $wInfo['shortLabel'];
+        $weeklyDateMap[$wKey] = $wInfo;
     }
+
+    // Hitung total sample & total defect per jenis per minggu
+    $weeklySampleTotals = [];
+    $weeklyNgTotals     = [];
+    $weeklyDefectQty    = []; // [WKey => [defect_name => qty]]
+    $weeklyDefectParts  = []; // [WKey => [defect_name => [part_meta...]]]
+
+    foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+        $wStart = $wInfo['start_date'];
+        $wEnd   = $wInfo['end_date'];
+        $wSample = 0;
+        $wNg = 0;
+
+        foreach ($trendMap as $dStr => $tData) {
+            if ($dStr >= $wStart && $dStr <= $wEnd) {
+                $wSample += (int)($tData['sample'] ?? 0);
+                $wNg     += (int)($tData['ng'] ?? 0);
+            }
+        }
+        $weeklySampleTotals[$wKey] = $wSample;
+        $weeklyNgTotals[$wKey]     = $wNg;
+        $weeklyDefectQty[$wKey]    = [];
+        $weeklyDefectParts[$wKey]  = [];
+
+        foreach ($rawDdsRows as $dr) {
+            $dDate = (string)$dr['date_key'];
+            if ($dDate >= $wStart && $dDate <= $wEnd) {
+                $dnm = (string)$dr['defect_name'];
+                $qty = (int)$dr['total_defect'];
+                $weeklyDefectQty[$wKey][$dnm] = ($weeklyDefectQty[$wKey][$dnm] ?? 0) + $qty;
+            }
+        }
+
+        foreach ($rawDdsPartRows as $pr) {
+            $dDate = (string)$pr['date_key'];
+            if ($dDate >= $wStart && $dDate <= $wEnd) {
+                $dnm = (string)$pr['defect_name'];
+                $weeklyDefectParts[$wKey][$dnm][] = [
+                    'code' => $pr['part_code'],
+                    'name' => $pr['part_name'],
+                    'qty'  => (int)$pr['part_defect_qty']
+                ];
+            }
+        }
+    }
+
+    // ── Tentukan Top N Defect PER-MINGGU (Dynamic Per-Week Ranking) ──
+    $selectedDefectsPerWeek = []; // [wKey => [defect_name, ...]]
+    $activeWeeklyDefectsMap = []; // [defect_name => true]
+
+    foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+        $wDefects = $weeklyDefectQty[$wKey] ?? [];
+        arsort($wDefects);
+        // Ambil defect teratas yang mendominasi di minggu ini
+        $topForWeek = array_slice(array_keys($wDefects), 0, $selectedDefectRank);
+        $selectedDefectsPerWeek[$wKey] = $topForWeek;
+        foreach ($topForWeek as $dnm) {
+            if (($wDefects[$dnm] ?? 0) > 0) {
+                $activeWeeklyDefectsMap[$dnm] = true;
+            }
+        }
+    }
+
+    // Hitung total akumulasi defect per jenis di seluruh minggu aktif
+    $weeklyDefectSummaryTotals = [];
+    foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+        foreach (($weeklyDefectQty[$wKey] ?? []) as $dnm => $qty) {
+            $weeklyDefectSummaryTotals[$dnm] = ($weeklyDefectSummaryTotals[$dnm] ?? 0) + (int)$qty;
+        }
+    }
+
+    // Urutkan seluruh defect yang pernah juara di salah satu minggu (terbanyak di indeks awal agar berada di posisi paling dasar tumpukan bar)
+    $topDefectTypesForChart = array_keys($activeWeeklyDefectsMap);
+    usort($topDefectTypesForChart, function($a, $b) use ($weeklyDefectSummaryTotals, $defectTypeTotals) {
+        $totA = $weeklyDefectSummaryTotals[$a] ?? ($defectTypeTotals[$a] ?? 0);
+        $totB = $weeklyDefectSummaryTotals[$b] ?? ($defectTypeTotals[$b] ?? 0);
+        if ($totA === $totB) {
+            return strcmp($a, $b);
+        }
+        return $totB <=> $totA;
+    });
 
     $stackedChartDatasetsPcs = [];
     $stackedChartDatasetsPpm = [];
@@ -496,9 +586,9 @@ try {
         $passedDataPpm   = [];
         $rejectedDataPpm = [];
 
-        foreach ($activeDefectPeriodKeys as $dk) {
-            $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-            $ng     = (int)($trendMap[$dk]['ng'] ?? 0);
+        foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+            $sample = (int)($weeklySampleTotals[$wKey] ?? 0);
+            $ng     = (int)($weeklyNgTotals[$wKey] ?? 0);
             $passed = max(0, $sample - $ng);
 
             $passedDataPcs[]   = $passed;
@@ -515,14 +605,14 @@ try {
             'data'            => $passedDataPcs,
             'backgroundColor' => '#059669',
             'stack'           => 'res_stack',
-            'borderRadius'    => 3
+            'borderRadius'    => 4
         ];
         $stackedChartDatasetsPcs[] = [
             'label'           => 'Rejected (' . $unitText . ')',
             'data'            => $rejectedDataPcs,
             'backgroundColor' => '#dc2626',
             'stack'           => 'res_stack',
-            'borderRadius'    => 3
+            'borderRadius'    => 4
         ];
 
         $stackedChartDatasetsPpm[] = [
@@ -530,50 +620,85 @@ try {
             'data'            => $passedDataPpm,
             'backgroundColor' => '#059669',
             'stack'           => 'res_stack',
-            'borderRadius'    => 3
+            'borderRadius'    => 4
         ];
         $stackedChartDatasetsPpm[] = [
             'label'           => 'Rejected (PPM)',
             'data'            => $rejectedDataPpm,
             'backgroundColor' => '#dc2626',
             'stack'           => 'res_stack',
-            'borderRadius'    => 3
+            'borderRadius'    => 4
         ];
     } else {
-        foreach ($topNDefectTypes as $idx => $dname) {
-            $c = $STACKED_DEFECT_PALETTE[$idx % count($STACKED_DEFECT_PALETTE)];
-            $dataPtsPcs  = [];
-            $dataPtsPpm  = [];
-            $partMetaPts = [];
+        // Assign warna tetap per jenis defect
+        $defectColorMap = [];
+        foreach ($topDefectTypesForChart as $cIdx => $dName) {
+            $defectColorMap[$dName] = $STACKED_DEFECT_PALETTE[$cIdx % count($STACKED_DEFECT_PALETTE)];
+        }
 
-            foreach ($activeDefectPeriodKeys as $dk) {
-                $isTopThisDay = in_array($dname, $selectedDefectsPerDay[$dk] ?? []);
-                $qty    = $isTopThisDay ? (int)($defectMatrix[$dk][$dname] ?? 0) : 0;
-                $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-                $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
+        // Layered Rank Stacking:
+        // Lapisan 0 = Defect Terbesar #1 per minggu (paling bawah di sumbu 0)
+        // Lapisan 1 = Defect Terbesar #2 per minggu (tengah)
+        // Lapisan 2 = Defect Terbesar #3 per minggu (paling atas)
+        $rankLayerLabels = [
+            0 => 'Defect Terbesar #1',
+            1 => 'Defect Terbesar #2',
+            2 => 'Defect Terbesar #3',
+            3 => 'Defect Terbesar #4',
+            4 => 'Defect Terbesar #5'
+        ];
 
-                $dataPtsPcs[]  = $qty;
-                $dataPtsPpm[]  = $ppm;
-                $partMetaPts[] = $isTopThisDay ? ($defectPartsMatrix[$dk][$dname] ?? []) : [];
+        for ($rk = 0; $rk < $selectedDefectRank; $rk++) {
+            $dataPtsPcs   = [];
+            $dataPtsPpm   = [];
+            $bgColors     = [];
+            $partMetaPts  = [];
+            $defectNames  = [];
+
+            foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+                $topForWeek = $selectedDefectsPerWeek[$wKey] ?? [];
+                $dname = $topForWeek[$rk] ?? null;
+
+                if ($dname !== null && ($weeklyDefectQty[$wKey][$dname] ?? 0) > 0) {
+                    $qty    = (int)($weeklyDefectQty[$wKey][$dname] ?? 0);
+                    $sample = (int)($weeklySampleTotals[$wKey] ?? 0);
+                    $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
+                    $c      = $defectColorMap[$dname] ?? '#64748b';
+
+                    $dataPtsPcs[]  = $qty;
+                    $dataPtsPpm[]  = $ppm;
+                    $bgColors[]    = $c;
+                    $defectNames[] = $dname;
+                    $partMetaPts[] = $weeklyDefectParts[$wKey][$dname] ?? [];
+                } else {
+                    $dataPtsPcs[]  = 0;
+                    $dataPtsPpm[]  = 0;
+                    $bgColors[]    = 'transparent';
+                    $defectNames[] = '';
+                    $partMetaPts[] = [];
+                }
             }
 
+            $layerName = $rankLayerLabels[$rk] ?? ('Peringkat Defect #' . ($rk + 1));
             $stackedChartDatasetsPcs[] = [
-                'label'           => $dname,
+                'label'           => $layerName,
+                'defect_names'    => $defectNames,
                 'data'            => $dataPtsPcs,
                 'raw_pcs'         => $dataPtsPcs,
                 'part_meta'       => $partMetaPts,
-                'backgroundColor' => $c,
+                'backgroundColor' => $bgColors,
                 'stack'           => 'defect_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
             $stackedChartDatasetsPpm[] = [
-                'label'           => $dname,
+                'label'           => $layerName,
+                'defect_names'    => $defectNames,
                 'data'            => $dataPtsPpm,
                 'raw_pcs'         => $dataPtsPcs,
                 'part_meta'       => $partMetaPts,
-                'backgroundColor' => $c,
+                'backgroundColor' => $bgColors,
                 'stack'           => 'defect_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
         }
     }
@@ -610,7 +735,8 @@ try {
     // 6. Top Models Distribution
     if ($selectedResult === 'passed') {
         $stmtM = $pdo->prepare("SELECT COALESCE(m.name, mp.model, 'NO MODEL') AS model_name, 
-                                       SUM(s.passed_lots) AS total_ng 
+                                       SUM(s.passed_lots) AS total_ng,
+                                       COUNT(s.id) AS total_cases
                                 FROM oqc_daily_summary s 
                                 LEFT JOIN master_parts mp ON s.part_id=mp.id 
                                 LEFT JOIN master_models m ON s.model_id=m.id 
@@ -622,7 +748,8 @@ try {
     } else {
         $colModel = ($selectedUnit === 'lot') ? "SUM(s.rejected_lots)" : "SUM(COALESCE(NULLIF(s.total_ng_pcs, 0), s.total_ng_samples, 0))";
         $stmtM = $pdo->prepare("SELECT COALESCE(m.name, mp.model, 'NO MODEL') AS model_name, 
-                                       {$colModel} AS total_ng 
+                                       {$colModel} AS total_ng,
+                                       COALESCE(SUM(s.rejected_lots), COUNT(DISTINCT s.id)) AS total_cases
                                 FROM oqc_daily_summary s 
                                 LEFT JOIN master_parts mp ON s.part_id=mp.id 
                                 LEFT JOIN master_models m ON s.model_id=m.id 
@@ -633,10 +760,27 @@ try {
                                 LIMIT {$selectedTopRank}");
     }
     $stmtM->execute($p);
+    $modelCases = [];
     foreach ($stmtM->fetchAll(PDO::FETCH_ASSOC) as $rM) {
         $modelLabels[] = $rM['model_name'];
         $modelCounts[] = (int)$rM['total_ng'];
+        $modelCases[]  = max(1, (int)($rM['total_cases'] ?? 1));
     }
+
+    // Distinct Total Counts of Defective Parts & Models (tanpa limit Top Rank)
+    if ($selectedResult === 'passed') {
+        $stmtCountP = $pdo->prepare("SELECT COUNT(DISTINCT s.part_id) FROM oqc_daily_summary s WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND s.passed_lots > 0");
+        $stmtCountM = $pdo->prepare("SELECT COUNT(DISTINCT COALESCE(m.name, mp.model, 'NO MODEL')) FROM oqc_daily_summary s LEFT JOIN master_parts mp ON s.part_id=mp.id LEFT JOIN master_models m ON s.model_id=m.id WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND s.passed_lots > 0");
+    } else {
+        $colNgCheck = ($selectedUnit === 'lot') ? "s.rejected_lots > 0" : "(s.total_ng_pcs > 0 OR s.total_ng_samples > 0 OR s.rejected_lots > 0)";
+        $stmtCountP = $pdo->prepare("SELECT COUNT(DISTINCT s.part_id) FROM oqc_daily_summary s WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND {$colNgCheck}");
+        $stmtCountM = $pdo->prepare("SELECT COUNT(DISTINCT COALESCE(m.name, mp.model, 'NO MODEL')) FROM oqc_daily_summary s LEFT JOIN master_parts mp ON s.part_id=mp.id LEFT JOIN master_models m ON s.model_id=m.id WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND {$colNgCheck}");
+    }
+    $stmtCountP->execute($p);
+    $totalDistinctPartsNg = (int)$stmtCountP->fetchColumn();
+
+    $stmtCountM->execute($p);
+    $totalDistinctModelsNg = (int)$stmtCountM->fetchColumn();
 
     // 7. Worst Parts Table Data
     if ($selectedResult === 'passed') {
@@ -677,7 +821,10 @@ try {
         $top3DefectNames = $stmtWPDefs->fetchAll(PDO::FETCH_COLUMN);
 
         foreach ($top3DefectNames as $defName) {
-            $pDef = array_merge($p, [':defname' => $defName]);
+            $pDef = array_merge($p, [
+                ':defname' => $defName
+            ]);
+
             $stmtWP = $pdo->prepare("SELECT 
                         COALESCE(mp.part_name, 'UNKNOWN PART') AS part_name,
                         COALESCE(mp.part_code, '-') AS part_code,
@@ -740,9 +887,21 @@ try {
         $startDate,
         $endDate,
         $selectedCustomer,
-        $targetPpm
+        $targetPpm,
+        $selectedDefectRank
     ]);
     $currentVersion = md5($rawToken);
+
+    // Multi-Horizon Quality PPM Trend (Annual -> Monthly -> Weekly/Daily Sunday Anchor)
+    $multiHorizonData = buildDashboardMultiHorizonTrend($pdo, [
+        'ref_year'       => $selectedYear,
+        'ref_month'      => $selectedMonth,
+        'customer'       => $selectedCustomer,
+        'unit'           => $selectedUnit,
+        'sample_basis'   => $selectedSampleBasis,
+        'result'         => $selectedResult,
+        'sub_resolution' => $selectedSubResolution
+    ]);
 
     // Return complete payload
     echo json_encode([
@@ -755,6 +914,7 @@ try {
         'sample_basis'   => $selectedSampleBasis,
         'is_passed'      => ($selectedResult === 'passed'),
         'kpi'            => $kpi,
+        'multi_horizon'  => $multiHorizonData,
         'trend'          => [
             'labels'  => $trendLabels,
             'sample'  => $trendSample,
@@ -778,12 +938,15 @@ try {
             'period_labels'=> $stackedPeriodLabels
         ],
         'pie_part'       => [
-            'labels' => $pieLabels,
-            'counts' => $pieCounts
+            'labels'         => $pieLabels,
+            'counts'         => $pieCounts,
+            'total_distinct' => $totalDistinctPartsNg
         ],
         'pie_model'      => [
-            'labels' => $modelLabels,
-            'counts' => $modelCounts
+            'labels'         => $modelLabels,
+            'counts'         => $modelCounts,
+            'cases'          => $modelCases,
+            'total_distinct' => $totalDistinctModelsNg
         ],
         'worst_parts'    => [
             'is_passed'   => ($selectedResult === 'passed'),

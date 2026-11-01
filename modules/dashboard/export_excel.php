@@ -8,6 +8,7 @@
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+require_once __DIR__ . '/../../config/summary_helper.php';
 require_once __DIR__ . '/../../vendor/autoload.php';
 
 require_menu_access('dashboard');
@@ -33,6 +34,9 @@ $selectedCustomer = sanitize($_REQUEST['customer'] ?? '');
 $selectedUnit     = sanitize($_REQUEST['unit'] ?? 'pcs');
 if (!in_array($selectedUnit, ['pcs', 'lot'])) $selectedUnit = 'pcs';
 
+$selectedSampleBasis = sanitize($_REQUEST['sample_basis'] ?? 'lot');
+if (!in_array($selectedSampleBasis, ['lot', 'session'])) $selectedSampleBasis = 'lot';
+
 $selectedResult = sanitize($_REQUEST['result'] ?? 'rejected');
 if (!in_array($selectedResult, ['rejected', 'passed'])) $selectedResult = 'rejected';
 
@@ -42,10 +46,22 @@ if ($selectedMetricScale === 'ppb') $selectedMetricScale = 'pct';
 $metricMultiplier    = ($selectedMetricScale === 'pct' || $selectedMetricScale === '%') ? 100 : 1000000;
 $metricScaleLabel    = ($selectedMetricScale === 'pct' || $selectedMetricScale === '%') ? '%' : strtoupper($selectedMetricScale);
 $selectedTopRank     = isset($_REQUEST['top_rank']) && in_array((int)$_REQUEST['top_rank'], [3, 5, 10]) ? (int)$_REQUEST['top_rank'] : 5;
+$selectedDefectRank  = isset($_REQUEST['defect_rank']) && in_array((int)$_REQUEST['defect_rank'], [1, 3]) ? (int)$_REQUEST['defect_rank'] : 3;
+$selectedSubResolution = sanitize($_REQUEST['sub_resolution'] ?? 'weekly');
+if (!in_array($selectedSubResolution, ['weekly', 'daily'])) $selectedSubResolution = 'weekly';
 
 $selectedDefectUnit  = strtolower(sanitize($_REQUEST['defect_unit'] ?? 'pcs'));
 if (!in_array($selectedDefectUnit, ['pcs', 'ppm'])) $selectedDefectUnit = 'pcs';
 $defectUnitLabel     = strtoupper($selectedDefectUnit);
+
+// ── Load Global Target Settings (Target PPM) ────────────────────────────────
+$dashboardTargetPpm = 0;
+if ($pdo) {
+    try {
+        $stmtTgt = $pdo->query("SELECT setting_value FROM app_settings WHERE setting_key = 'dashboard_target_ppm' LIMIT 1");
+        $dashboardTargetPpm = (float)($stmtTgt->fetchColumn() ?: 0);
+    } catch (Exception $e) {}
+}
 
 $dbYears = [];
 if ($pdo) {
@@ -102,7 +118,7 @@ if ($filterType === 'all_years') {
             $filterTitleDesc = "Hari Ini (" . date('d/m/Y') . ")";
             break;
         case 'mingguan':
-            $startDate = date('Y-m-d', strtotime('monday this week'));
+            $startDate = getWorkCycleWeekStartDate();
             $endDate   = date('Y-m-d');
             $filterTitleDesc = "Minggu Ini (" . date('d/m', strtotime($startDate)) . " - " . date('d/m/Y', strtotime($endDate)) . ")";
             break;
@@ -139,10 +155,14 @@ if ($pdo) {
 $cacheParamsString = implode('|', [
     $selectedCustomer,
     $selectedUnit,
+    $selectedSampleBasis,
     $selectedResult,
     $selectedMetricScale,
     $selectedTopRank,
+    $selectedDefectRank,
+    $selectedSubResolution,
     $selectedDefectUnit,
+    $dashboardTargetPpm,
     $startDate,
     $endDate,
     $latestDbUpdate
@@ -179,32 +199,68 @@ if ($pdo) {
             $p[':cust'] = $selectedCustomer;
         }
 
-        // 1, 2, 3: Total Inspected, Lots, NG
+        // 1, 2, 3: Fetch all KPIs in a single instant query matching web logic
         $stmtKpi = $pdo->prepare("SELECT 
-                                    COALESCE(SUM(total_sample_size), 0) AS total_inspected,
-                                    COALESCE(SUM(total_lots), 0) AS total_lot,
-                                    COALESCE(SUM(passed_lots), 0) AS pass_count,
-                                    COALESCE(SUM(rejected_lots), 0) AS rejected_count,
-                                    COALESCE(SUM(total_ng_samples), 0) AS total_ng
+                                    COALESCE(SUM(total_sample_size), 0) AS total_sample_size,
+                                    COALESCE(SUM(total_sample_size_lot), 0) AS total_sample_size_lot,
+                                    COALESCE(SUM(total_sample_size_session), 0) AS total_sample_size_session,
+                                    COALESCE(SUM(total_lots), 0) AS total_lots,
+                                    COALESCE(SUM(passed_lots), 0) AS passed_lots,
+                                    COALESCE(SUM(rejected_lots), 0) AS rejected_lots,
+                                    COALESCE(SUM(total_ng_pcs), 0) AS total_ng_pcs,
+                                    COALESCE(SUM(total_ng_samples), 0) AS total_ng_samples
                                   FROM oqc_daily_summary
                                   WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}");
         $stmtKpi->execute($p);
         $rowKpi = $stmtKpi->fetch(PDO::FETCH_ASSOC);
 
-        $kpi['total_inspected'] = (int)($rowKpi['total_inspected'] ?? 0);
-        $kpi['total_lot']       = (int)($rowKpi['total_lot'] ?? 0);
-        $kpi['pass_count']      = (int)($rowKpi['pass_count'] ?? 0);
-        $kpi['rejected_count']  = (int)($rowKpi['rejected_count'] ?? 0);
-        $kpi['pass_rate']       = $kpi['total_lot'] > 0 ? round($kpi['pass_count'] / $kpi['total_lot'] * 100, 1) : 0;
-        $kpi['total_ng']        = (int)($rowKpi['total_ng'] ?? 0);
+        $totalSampleLot     = (int)($rowKpi['total_sample_size_lot'] ?? 0);
+        if ($totalSampleLot <= 0) $totalSampleLot = (int)($rowKpi['total_sample_size'] ?? 0);
+        $totalSampleSession = (int)($rowKpi['total_sample_size_session'] ?? 0);
+        if ($totalSampleSession <= 0) $totalSampleSession = (int)($rowKpi['total_sample_size'] ?? 0);
 
-        // 4. Defect Rate Calculation (PPM / Persen)
-        $kpi['ppm_rate']    = $kpi['total_inspected'] > 0 ? round(($kpi['total_ng'] / $kpi['total_inspected']) * 1000000, 1) : 0;
-        $kpi['pct_rate']    = $kpi['total_inspected'] > 0 ? round(($kpi['total_ng'] / $kpi['total_inspected']) * 100, 2) : 0;
-        $kpi['rate_active'] = ($selectedMetricScale === 'pct' || $selectedMetricScale === '%') ? $kpi['pct_rate'] : $kpi['ppm_rate'];
-        $kpi['ng_rate']     = $kpi['rate_active'];
+        $effectiveSampleSize = ($selectedSampleBasis === 'session') ? $totalSampleSession : $totalSampleLot;
 
-        // 4. Trend Data (PPM Defect Rate / Sampling Performance)
+        $totalLots       = (int)($rowKpi['total_lots'] ?? 0);
+        $passedLots      = (int)($rowKpi['passed_lots'] ?? 0);
+        $rejectedLots    = (int)($rowKpi['rejected_lots'] ?? 0);
+        $totalNgPcs      = (int)($rowKpi['total_ng_pcs'] ?? 0);
+        $totalNgSamples  = (int)($rowKpi['total_ng_samples'] ?? 0);
+        $effectiveNgPcs  = max($totalNgPcs, $totalNgSamples);
+
+        $kpi['total_lot']       = $totalLots;
+        $kpi['pass_count']      = $passedLots;
+        $kpi['rejected_count']  = $rejectedLots;
+        $kpi['pass_rate']       = $totalLots > 0 ? round(($passedLots / $totalLots) * 100, 1) : 0;
+
+        if ($selectedUnit === 'lot') {
+            $kpi['total_inspected'] = $totalLots;
+            $kpi['total_ng']        = $rejectedLots;
+            $kpi['pct_rate']        = $totalLots > 0 ? round(($rejectedLots / $totalLots) * 100, 2) : 0;
+            $kpi['ppm_rate']        = $totalLots > 0 ? round(($rejectedLots / $totalLots) * 1000000, 1) : 0;
+            $kpi['rate_active']     = ($selectedMetricScale === 'pct' || $selectedMetricScale === '%') ? $kpi['pct_rate'] : $kpi['ppm_rate'];
+            $kpi['ng_rate']         = $kpi['rate_active'];
+        } else {
+            // Mode Pcs (Sampling PPM / % by selected basis)
+            $kpi['total_inspected'] = $effectiveSampleSize;
+            $kpi['total_ng']        = $effectiveNgPcs;
+            $kpi['ppm_rate']        = $effectiveSampleSize > 0 ? round(($effectiveNgPcs / $effectiveSampleSize) * 1000000, 1) : 0;
+            $kpi['pct_rate']        = $effectiveSampleSize > 0 ? round(($effectiveNgPcs / $effectiveSampleSize) * 100, 2) : 0;
+            $kpi['rate_active']     = ($selectedMetricScale === 'pct' || $selectedMetricScale === '%') ? $kpi['pct_rate'] : $kpi['ppm_rate'];
+            $kpi['ng_rate']         = $kpi['rate_active'];
+        }
+
+        // 4. Multi-Horizon Quality Trend (Annual -> Monthly -> Weekly Sunday Anchor)
+        $multiHorizonData = buildDashboardMultiHorizonTrend($pdo, [
+            'ref_year'       => $selectedYear,
+            'ref_month'      => $selectedMonth,
+            'customer'       => $selectedCustomer,
+            'unit'           => $selectedUnit,
+            'sample_basis'   => $selectedSampleBasis,
+            'result'         => $selectedResult,
+            'sub_resolution' => $selectedSubResolution
+        ]);
+
         $daysDiff = (strtotime($endDate) - strtotime($startDate)) / 86400;
         if ($presetFilter === 'all_years') {
             $minYear = min($dbYears);
@@ -217,8 +273,14 @@ if ($pdo) {
                 $trendMap[(string)$yr] = ['label' => (string)$yr, 'sample' => 0, 'ng' => 0, 'val' => 0];
             }
             $qTrend = "SELECT YEAR(summary_date) AS k, 
-                              COALESCE(SUM(total_sample_size), 0) AS total_sample,
-                              COALESCE(SUM(total_ng_samples), 0) AS total_ng
+                              COALESCE(SUM(total_sample_size_lot), 0) AS s_lot,
+                              COALESCE(SUM(total_sample_size_session), 0) AS s_sess,
+                              COALESCE(SUM(total_sample_size), 0) AS s_raw,
+                              COALESCE(SUM(total_lots), 0) AS t_lots,
+                              COALESCE(SUM(passed_lots), 0) AS p_lots,
+                              COALESCE(SUM(rejected_lots), 0) AS r_lots,
+                              COALESCE(SUM(total_ng_pcs), 0) AS ng_pcs,
+                              COALESCE(SUM(total_ng_samples), 0) AS ng_samples
                        FROM oqc_daily_summary
                        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}
                        GROUP BY k";
@@ -228,8 +290,14 @@ if ($pdo) {
             foreach (new DatePeriod($sp, DateInterval::createFromDateString('1 month'), $ep) as $dt)
                 $trendMap[$dt->format('Y-m')] = ['label' => $dt->format('M Y'), 'sample' => 0, 'ng' => 0, 'val' => 0];
             $qTrend = "SELECT DATE_FORMAT(summary_date, '%Y-%m') AS k, 
-                              COALESCE(SUM(total_sample_size), 0) AS total_sample,
-                              COALESCE(SUM(total_ng_samples), 0) AS total_ng
+                              COALESCE(SUM(total_sample_size_lot), 0) AS s_lot,
+                              COALESCE(SUM(total_sample_size_session), 0) AS s_sess,
+                              COALESCE(SUM(total_sample_size), 0) AS s_raw,
+                              COALESCE(SUM(total_lots), 0) AS t_lots,
+                              COALESCE(SUM(passed_lots), 0) AS p_lots,
+                              COALESCE(SUM(rejected_lots), 0) AS r_lots,
+                              COALESCE(SUM(total_ng_pcs), 0) AS ng_pcs,
+                              COALESCE(SUM(total_ng_samples), 0) AS ng_samples
                        FROM oqc_daily_summary
                        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}
                        GROUP BY k";
@@ -238,8 +306,14 @@ if ($pdo) {
             foreach (new DatePeriod($sp, DateInterval::createFromDateString('1 day'), $ep) as $dt)
                 $trendMap[$dt->format('Y-m-d')] = ['label' => $dt->format('d M'), 'sample' => 0, 'ng' => 0, 'val' => 0];
             $qTrend = "SELECT summary_date AS k, 
-                              COALESCE(SUM(total_sample_size), 0) AS total_sample,
-                              COALESCE(SUM(total_ng_samples), 0) AS total_ng
+                              COALESCE(SUM(total_sample_size_lot), 0) AS s_lot,
+                              COALESCE(SUM(total_sample_size_session), 0) AS s_sess,
+                              COALESCE(SUM(total_sample_size), 0) AS s_raw,
+                              COALESCE(SUM(total_lots), 0) AS t_lots,
+                              COALESCE(SUM(passed_lots), 0) AS p_lots,
+                              COALESCE(SUM(rejected_lots), 0) AS r_lots,
+                              COALESCE(SUM(total_ng_pcs), 0) AS ng_pcs,
+                              COALESCE(SUM(total_ng_samples), 0) AS ng_samples
                        FROM oqc_daily_summary
                        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}
                        GROUP BY k";
@@ -250,18 +324,29 @@ if ($pdo) {
         foreach ($stTrend->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $k = (string)$r['k'];
             if (isset($trendMap[$k])) {
-                $trendMap[$k]['sample'] = (int)$r['total_sample'];
-                $trendMap[$k]['ng']     = (int)$r['total_ng'];
+                if ($selectedUnit === 'lot') {
+                    $trendMap[$k]['sample'] = (int)$r['t_lots'];
+                    $trendMap[$k]['ng']     = (int)$r['r_lots'];
+                    $trendMap[$k]['passed'] = (int)$r['p_lots'];
+                } else {
+                    $sLot  = (int)$r['s_lot'] ?: (int)$r['s_raw'];
+                    $sSess = (int)$r['s_sess'] ?: (int)$r['s_raw'];
+                    $trendMap[$k]['sample'] = ($selectedSampleBasis === 'session') ? $sSess : $sLot;
+                    $trendMap[$k]['ng']     = max((int)$r['ng_pcs'], (int)$r['ng_samples']);
+                    $trendMap[$k]['passed'] = max(0, $trendMap[$k]['sample'] - $trendMap[$k]['ng']);
+                }
             }
         }
 
-        // 3. Compute PPM / PPB
+        // 3. Compute PPM / PCT Rate
         foreach ($trendMap as $k => $item) {
+            $smp = (int)$item['sample'];
+            $ng  = (int)$item['ng'];
+            $pss = (int)($item['passed'] ?? max(0, $smp - $ng));
             if ($selectedResult === 'passed') {
-                $passedCount = max(0, $item['sample'] - $item['ng']);
-                $trendMap[$k]['val'] = $item['sample'] > 0 ? round(($passedCount / $item['sample']) * $metricMultiplier, 1) : 0;
+                $trendMap[$k]['val'] = ($smp > 0) ? round(($pss / $smp) * $metricMultiplier, ($selectedMetricScale === 'pct' || $selectedMetricScale === '%' || $selectedUnit === 'lot') ? 2 : 1) : 0;
             } else {
-                $trendMap[$k]['val'] = $item['sample'] > 0 ? round(($item['ng'] / $item['sample']) * $metricMultiplier, 1) : 0;
+                $trendMap[$k]['val'] = ($smp > 0) ? round(($ng / $smp) * $metricMultiplier, ($selectedMetricScale === 'pct' || $selectedMetricScale === '%' || $selectedUnit === 'lot') ? 2 : 1) : 0;
             }
         }
 
@@ -407,8 +492,31 @@ if ($pdo) {
                 $stWD->execute($p);
                 $top3 = $stWD->fetchAll(PDO::FETCH_COLUMN);
                 foreach ($top3 as $dn) {
-                    $pD = array_merge($p, [':defname' => $dn]);
-                    $stW = $pdo->prepare("SELECT COALESCE(mp.part_name,'UNKNOWN PART') AS part_name, COALESCE(mp.part_code,'-') AS part_code, COALESCE(m.name,mp.model,'-') AS model, SUM(dds.lot_count) AS lot_case, SUM(dds.lot_count) AS ng_case FROM oqc_daily_defect_summary dds INNER JOIN defect_types dt ON dds.defect_type_id=dt.id LEFT JOIN master_parts mp ON dds.part_id=mp.id LEFT JOIN master_models m ON mp.model_id=m.id WHERE dt.name=:defname AND dds.summary_date >= :sd AND dds.summary_date < :ed_next {$sumCustCond} GROUP BY mp.id, mp.part_name, mp.part_code, m.id, m.name, mp.model ORDER BY ng_case DESC,lot_case DESC LIMIT 3");
+                    $sumCustCondTot = "";
+                    $pD = array_merge($p, [
+                        ':defname'     => $dn,
+                        ':sd_tot'      => $startDate,
+                        ':ed_next_tot' => $edNext
+                    ]);
+                    if ($selectedCustomer !== '') {
+                        $sumCustCondTot = " AND customer = :cust_tot ";
+                        $pD[':cust_tot'] = $selectedCustomer;
+                    }
+
+                    $stW = $pdo->prepare("SELECT 
+                        COALESCE(mp.part_name,'UNKNOWN PART') AS part_name, 
+                        COALESCE(mp.part_code,'-') AS part_code, 
+                        COALESCE(m.name,mp.model,'-') AS model, 
+                        SUM(dds.lot_count) AS lot_case, 
+                        SUM(dds.qty_ng) AS ng_case 
+                    FROM oqc_daily_defect_summary dds 
+                    INNER JOIN defect_types dt ON dds.defect_type_id=dt.id 
+                    LEFT JOIN master_parts mp ON dds.part_id=mp.id 
+                    LEFT JOIN master_models m ON mp.model_id=m.id 
+                    WHERE dt.name=:defname AND dds.summary_date >= :sd AND dds.summary_date < :ed_next {$sumCustCond} 
+                    GROUP BY mp.id, mp.part_name, mp.part_code, m.id, m.name, mp.model 
+                    ORDER BY ng_case DESC,lot_case DESC 
+                    LIMIT 3");
                     $stW->execute($pD);
                     $worstPartsGrouped[$dn] = $stW->fetchAll(PDO::FETCH_ASSOC);
                 }
@@ -464,29 +572,44 @@ $ws1->setTitle("Summary & KPI");
 $ws1->getRowDimension(1)->setRowHeight(40);
 $ws1->getRowDimension(2)->setRowHeight(22);
 
-foreach (['A'=>28,'B'=>24,'C'=>22,'D'=>22,'E'=>22,'F'=>22] as $col=>$w)
+foreach (['A'=>32,'B'=>26,'C'=>22,'D'=>22,'E'=>22,'F'=>22] as $col=>$w)
     $ws1->getColumnDimension($col)->setWidth($w);
 
 $ws1->mergeCells('A1:F1');
 $ws1->setCellValue('A1', 'PT. SURYA TECHNOLOGY INDUSTRI — QUALITY CONTROL DIVISION');
 applyStyle($ws1,'A1',['font'=>['bold'=>true,'size'=>16,'color'=>['argb'=>'FF0F172A']],'fill'=>['fillType'=>Fill::FILL_SOLID,'startColor'=>['argb'=>'FFDBEAFE']],'alignment'=>['horizontal'=>Alignment::HORIZONTAL_CENTER,'vertical'=>Alignment::VERTICAL_CENTER],'borders'=>['allBorders'=>['borderStyle'=>Border::BORDER_THIN,'color'=>['argb'=>'FF93C5FD']]]]);
 
+$sampleBasisDesc = ($selectedSampleBasis === 'session') ? 'Basis Sesi (Kanban)' : 'Basis Lot (Box Fisik)';
 $ws1->mergeCells('A2:F2');
-$ws1->setCellValue('A2', 'REKAPITULASI DASHBOARD INSPEKSI OQC  |  PERIODE: '.strtoupper($filterTitleDesc).'  |  STATUS: '.$statusText.'  |  SATUAN: '.strtoupper($selectedUnit));
+$ws1->setCellValue('A2', 'REKAPITULASI DASHBOARD INSPEKSI OQC  |  PERIODE: '.strtoupper($filterTitleDesc).'  |  STATUS: '.$statusText.'  |  SATUAN: '.strtoupper($selectedUnit).' ('.$sampleBasisDesc.')');
 applyStyle($ws1,'A2',['font'=>['bold'=>true,'size'=>10,'color'=>['argb'=>'FF1E40AF']],'fill'=>['fillType'=>Fill::FILL_SOLID,'startColor'=>['argb'=>'FFEFF6FF']],'alignment'=>['horizontal'=>Alignment::HORIZONTAL_CENTER,'vertical'=>Alignment::VERTICAL_CENTER]]);
 
-$ws1->setCellValue('A4','METRIC KPI');
+$ws1->setCellValue('A4','METRIC KPI RESMI');
 $ws1->setCellValue('B4','NILAI');
 applyStyle($ws1,'A4:B4',hdrStyle('0F172A'));
 
+$labelSampleInspected = ($selectedUnit === 'lot') 
+    ? 'Total Lot Inspected' 
+    : ('Total Sample Inspected (Basis ' . ($selectedSampleBasis === 'session' ? 'Sesi' : 'Lot') . ')');
+
+$labelNgInspected = ($selectedUnit === 'lot') 
+    ? 'Total Lot Reject' 
+    : 'Total NG Pcs';
+
+$labelRate = ($selectedUnit === 'lot') 
+    ? 'Lot Reject Rate (%)' 
+    : ('Defect Rate (' . $metricScaleLabel . ')');
+
 $kpiData = [
-    ['Total Inspected (Pcs)', number_format($kpi['total_inspected']).' pcs'],
-    ['Total NG Inspected (Pcs)', number_format($kpi['total_ng']).' pcs'],
-    ['Defect Rate ('.$metricScaleLabel.')', number_format($kpi['rate_active'], 1).' '.$metricScaleLabel],
-    ['Total LOT Session', number_format($kpi['total_lot']).' lot'],
-    ['Total NG Lot (Rejected)', number_format($kpi['rejected_count']).' lot'],
-    ['Customer Filter', $selectedCustomer ?: 'Semua Customer'],
-    ['Periode', $filterTitleDesc.' ('.date('d/m/Y', strtotime($startDate)).' s.d '.date('d/m/Y', strtotime($endDate)).')'],
+    [$labelSampleInspected, number_format($kpi['total_inspected']).' '.($selectedUnit === 'lot' ? 'lot' : 'pcs')],
+    [$labelNgInspected, number_format($kpi['total_ng']).' '.($selectedUnit === 'lot' ? 'lot' : 'pcs')],
+    [$labelRate, number_format($kpi['rate_active'], ($selectedMetricScale === 'pct' || $selectedMetricScale === '%' || $selectedUnit === 'lot') ? 2 : 1).' '.$metricScaleLabel],
+    ['Total LOT (Label / Box Discan)', number_format($kpi['total_lot']).' lot'],
+    [($selectedResult === 'passed' ? 'Total Passed Lot' : 'Total NG Lot'), number_format($selectedResult === 'passed' ? $kpi['pass_count'] : $kpi['rejected_count']).' lot (Pass: '.$kpi['pass_rate'].'%)'],
+    ['Customer Filter', $selectedCustomer ?: 'Semua Customer (All)'],
+    ['Satuan & Basis Sampel', strtoupper($selectedUnit).' · '.($selectedSampleBasis === 'session' ? 'Basis Sesi (Kanban)' : 'Basis Lot (Fisik)')],
+    ['Target Kualitas PPM', ($dashboardTargetPpm > 0 ? number_format($dashboardTargetPpm).' PPM' : 'Belum Diatur')],
+    ['Periode Inspeksi', $filterTitleDesc.' ('.date('d/m/Y', strtotime($startDate)).' s.d '.date('d/m/Y', strtotime($endDate)).')'],
     ['Dicetak pada', date('d/m/Y H:i:s').' WIB'],
 ];
 
@@ -496,9 +619,19 @@ foreach ($kpiData as $i => [$label,$val]) {
     $ws1->setCellValue("B{$row}", $val);
     $rowBg = ($i % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
     $valBg = $rowBg; $valFg = '1E293B'; $bold = false;
-    if (strpos($label, 'Defect Rate') !== false) { $valFg = ($kpi['rate_active'] == 0) ? '059669' : (($kpi['rate_active'] <= 10000.0) ? 'D97706' : 'DC2626'); $bold = true; }
-    if ($label === 'Total NG Inspected (Pcs)') { $valFg = 'DC2626'; $bold = true; }
-    if ($label === 'Total NG Lot (Rejected)') { $valBg = 'FFF1F2'; $valFg = 'DC2626'; $bold = true; }
+    if (strpos($label, 'Defect Rate') !== false || strpos($label, 'Reject Rate') !== false) { 
+        $valFg = ($kpi['rate_active'] == 0) ? '059669' : (($kpi['rate_active'] <= 10000.0) ? 'D97706' : 'DC2626'); 
+        $bold = true; 
+    }
+    if (strpos($label, 'Total NG') !== false || strpos($label, 'Lot Reject') !== false) { 
+        $valFg = 'DC2626'; 
+        $bold = true; 
+    }
+    if (strpos($label, 'Total Passed') !== false) { 
+        $valBg = 'F0FDF4'; 
+        $valFg = '059669'; 
+        $bold = true; 
+    }
     applyStyle($ws1,"A{$row}",dataStyle($rowBg,'334155',true));
     applyStyle($ws1,"B{$row}",dataStyle($valBg,$valFg,$bold,Alignment::HORIZONTAL_RIGHT));
     $row++;
@@ -507,54 +640,88 @@ foreach ($kpiData as $i => [$label,$val]) {
 // ═══════════════════════════════════════════════════════════════════════════
 // SHEET 2: DATA TREN (Source for Bar/Line Chart)
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// SHEET 2: DATA TREN MULTI-HORIZON & PERIODE
+// ═══════════════════════════════════════════════════════════════════════════
 $ws2 = $spreadsheet->createSheet();
 $ws2->setTitle("Tren Waktu");
 
 $ws2->getColumnDimension('A')->setWidth(8);
-$ws2->getColumnDimension('B')->setWidth(18);
-$ws2->getColumnDimension('C')->setWidth(22);
+$ws2->getColumnDimension('B')->setWidth(24);
+$ws2->getColumnDimension('C')->setWidth(20);
 $ws2->getColumnDimension('D')->setWidth(18);
 $ws2->getColumnDimension('E')->setWidth(22);
+$ws2->getColumnDimension('F')->setWidth(20);
 $ws2->getRowDimension(1)->setRowHeight(30);
 
-$trendTitle = ($selectedResult === 'passed' ? 'PASSED / YIELD RATE ('.$metricScaleLabel.')' : 'DEFECT RATE ('.$metricScaleLabel.')') . ' PER WAKTU';
-$ws2->mergeCells('A1:E1');
-$ws2->setCellValue('A1', 'DATA TREN KUALITAS INSPEKSI — '.$trendTitle);
+$trendTitle = ($selectedResult === 'passed' ? 'PASSED / YIELD RATE ('.$metricScaleLabel.')' : 'DEFECT RATE ('.$metricScaleLabel.')') . ' MULTI-HORIZON';
+$ws2->mergeCells('A1:F1');
+$ws2->setCellValue('A1', 'TREN & KOMPARASI KUALITAS MUTU (TAHUNAN → BULANAN → MINGGUAN)');
 applyStyle($ws2,'A1',hdrStyle('0F172A'));
 
 $ws2->setCellValue('A2','NO');
-$ws2->setCellValue('B2','PERIODE');
-$ws2->setCellValue('C2','SAMPLING (PCS)');
-$ws2->setCellValue('D2','NG (PCS)');
+$ws2->setCellValue('B2','HORIZON / PERIODE');
+$ws2->setCellValue('C2','SAMPLING ('.strtoupper($unitText).')');
+$ws2->setCellValue('D2','NG ('.strtoupper($unitText).')');
 $ws2->setCellValue('E2', $selectedResult === 'passed' ? 'YIELD ('.$metricScaleLabel.')' : 'DEFECT RATE ('.$metricScaleLabel.')');
-applyStyle($ws2,'A2:E2',hdrStyle('334155'));
+$ws2->setCellValue('F2','TARGET (PPM)');
+applyStyle($ws2,'A2:F2',hdrStyle('334155'));
 
 $tRow = 3; $tNo = 1;
 $trendDataStartRow = $tRow;
-foreach ($trendMap as $tVal) {
-    $ws2->setCellValue("A{$tRow}", $tNo++);
-    $ws2->setCellValue("B{$tRow}", $tVal['label']);
-    $ws2->setCellValue("C{$tRow}", (int)$tVal['sample']);
-    $ws2->setCellValue("D{$tRow}", (int)$tVal['ng']);
-    $ws2->setCellValue("E{$tRow}", (float)$tVal['val']);
-    $bg = ($tNo % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
-    applyStyle($ws2,"A{$tRow}",dataStyle($bg,'64748B',false,Alignment::HORIZONTAL_CENTER));
-    applyStyle($ws2,"B{$tRow}",dataStyle($bg,'1E293B',true));
-    applyStyle($ws2,"C{$tRow}",dataStyle($bg,'334155',false,Alignment::HORIZONTAL_RIGHT));
-    applyStyle($ws2,"D{$tRow}",dataStyle($bg,'DC2626',false,Alignment::HORIZONTAL_RIGHT));
-    applyStyle($ws2,"E{$tRow}",dataStyle($bg,'1D4ED8',true,Alignment::HORIZONTAL_RIGHT));
-    $tRow++;
+
+$horizonLabels  = !empty($multiHorizonData['labels']) ? $multiHorizonData['labels'] : [];
+$horizonRates   = !empty($multiHorizonData['rates']) ? $multiHorizonData['rates'] : [];
+$horizonSamples = !empty($multiHorizonData['samples']) ? $multiHorizonData['samples'] : [];
+$horizonNGs     = !empty($multiHorizonData['ngs']) ? $multiHorizonData['ngs'] : [];
+$horizonTooltips= !empty($multiHorizonData['tooltips']) ? $multiHorizonData['tooltips'] : [];
+
+if (!empty($horizonLabels)) {
+    foreach ($horizonLabels as $hIdx => $hLbl) {
+        $fullTooltip = $horizonTooltips[$hIdx] ?? $hLbl;
+        $ws2->setCellValue("A{$tRow}", $tNo++);
+        $ws2->setCellValue("B{$tRow}", $fullTooltip);
+        $ws2->setCellValue("C{$tRow}", (int)($horizonSamples[$hIdx] ?? 0));
+        $ws2->setCellValue("D{$tRow}", (int)($horizonNGs[$hIdx] ?? 0));
+        $ws2->setCellValue("E{$tRow}", (float)($horizonRates[$hIdx] ?? 0));
+        $ws2->setCellValue("F{$tRow}", (float)$dashboardTargetPpm);
+        $bg = ($tNo % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
+        applyStyle($ws2,"A{$tRow}",dataStyle($bg,'64748B',false,Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2,"B{$tRow}",dataStyle($bg,'1E293B',true));
+        applyStyle($ws2,"C{$tRow}",dataStyle($bg,'334155',false,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"D{$tRow}",dataStyle($bg,'DC2626',false,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"E{$tRow}",dataStyle($bg,'1D4ED8',true,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"F{$tRow}",dataStyle($bg,'EF4444',false,Alignment::HORIZONTAL_RIGHT));
+        $tRow++;
+    }
+} else {
+    foreach ($trendMap as $tVal) {
+        $ws2->setCellValue("A{$tRow}", $tNo++);
+        $ws2->setCellValue("B{$tRow}", $tVal['label']);
+        $ws2->setCellValue("C{$tRow}", (int)$tVal['sample']);
+        $ws2->setCellValue("D{$tRow}", (int)$tVal['ng']);
+        $ws2->setCellValue("E{$tRow}", (float)$tVal['val']);
+        $ws2->setCellValue("F{$tRow}", (float)$dashboardTargetPpm);
+        $bg = ($tNo % 2 === 0) ? 'F8FAFC' : 'FFFFFF';
+        applyStyle($ws2,"A{$tRow}",dataStyle($bg,'64748B',false,Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws2,"B{$tRow}",dataStyle($bg,'1E293B',true));
+        applyStyle($ws2,"C{$tRow}",dataStyle($bg,'334155',false,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"D{$tRow}",dataStyle($bg,'DC2626',false,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"E{$tRow}",dataStyle($bg,'1D4ED8',true,Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws2,"F{$tRow}",dataStyle($bg,'EF4444',false,Alignment::HORIZONTAL_RIGHT));
+        $tRow++;
+    }
 }
 $trendDataEndRow = $tRow - 1;
+$trendCount = $trendDataEndRow - $trendDataStartRow + 1;
 
-// Bar/Line Chart: Tren Waktu
-$trendCount = count($trendMap);
+// Bar/Line Chart: Multi-Horizon Kualitas
 if ($trendCount > 0) {
-    $chartType = ($trendCount <= 10) ? DataSeries::TYPE_BARCHART : DataSeries::TYPE_LINECHART;
-    $barDir    = ($trendCount <= 10) ? DataSeries::DIRECTION_COL : null;
+    $chartType = DataSeries::TYPE_BARCHART;
+    $barDir    = DataSeries::DIRECTION_COL;
 
-    $labelsRef  = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Tren Waktu'!\$B\${$trendDataStartRow}:\$B\${$trendDataEndRow}", null, $trendCount);
-    $dataValues = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Tren Waktu'!\$E\${$trendDataStartRow}:\$E\${$trendDataEndRow}", null, $trendCount);
+    $labelsRef   = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Tren Waktu'!\$B\${$trendDataStartRow}:\$B\${$trendDataEndRow}", null, $trendCount);
+    $dataValues  = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Tren Waktu'!\$E\${$trendDataStartRow}:\$E\${$trendDataEndRow}", null, $trendCount);
     $seriesLabel = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Tren Waktu'!\$E\$2", null, 1);
     if ($selectedResult === 'passed') {
         $dataValues->setFillColor('059669');
@@ -562,7 +729,19 @@ if ($trendCount > 0) {
         $dataValues->setFillColor('2563EB');
     }
 
-    $series = new DataSeries($chartType, $barDir ? DataSeries::GROUPING_CLUSTERED : DataSeries::GROUPING_STANDARD, [0], [$seriesLabel], [$labelsRef], [$dataValues]);
+    $seriesArr = [$seriesLabel];
+    $valArr    = [$dataValues];
+
+    // Sertakan garis target PPM jika ada target
+    if ($dashboardTargetPpm > 0 && $selectedResult !== 'passed') {
+        $targetLabelRef  = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'Tren Waktu'!\$F\$2", null, 1);
+        $targetValuesRef = new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'Tren Waktu'!\$F\${$trendDataStartRow}:\$F\${$trendDataEndRow}", null, $trendCount);
+        $targetValuesRef->setFillColor('EF4444');
+        $seriesArr[] = $targetLabelRef;
+        $valArr[]    = $targetValuesRef;
+    }
+
+    $series = new DataSeries($chartType, DataSeries::GROUPING_CLUSTERED, range(0, count($valArr) - 1), $seriesArr, [$labelsRef], $valArr);
     if ($barDir) $series->setPlotDirection($barDir);
 
     $tLayout = new Layout();
@@ -571,8 +750,8 @@ if ($trendCount > 0) {
     $plotArea  = new PlotArea($tLayout, [$series]);
     $legend    = new Legend(Legend::POSITION_BOTTOM, null, false);
     $chartObj  = new Chart('chartTrend', new Title($trendTitle), $legend, $plotArea, true);
-    $chartObj->setTopLeftPosition('G2');
-    $chartObj->setBottomRightPosition('P'.max(18, $trendDataEndRow + 3));
+    $chartObj->setTopLeftPosition('H2');
+    $chartObj->setBottomRightPosition('R'.max(20, $trendDataEndRow + 3));
     $ws2->addChart($chartObj);
 }
 
@@ -938,7 +1117,7 @@ $ws6->setCellValue('A1', $selectedResult === 'passed' ? 'BEST PERFORMANCE PART O
 applyStyle($ws6,'A1',hdrStyle($selectedResult === 'passed' ? '059669' : 'DC2626'));
 
 $ws6->setCellValue('A2','NO'); $ws6->setCellValue('B2','PART NAME'); $ws6->setCellValue('C2','PART CODE');
-$ws6->setCellValue('D2','MODEL'); $ws6->setCellValue('E2','TOTAL LOT'); $ws6->setCellValue('F2', $selectedResult === 'passed' ? 'PASSED LOT' : 'NG CASE');
+$ws6->setCellValue('D2','MODEL'); $ws6->setCellValue('E2', $selectedResult === 'passed' ? 'TOTAL LOT' : 'LOT NG (X)'); $ws6->setCellValue('F2', $selectedResult === 'passed' ? 'PASSED LOT' : 'QTY NG (PCS)');
 applyStyle($ws6,'A2:F2',hdrStyle('334155'));
 
 $w6Row = 3;
@@ -968,6 +1147,27 @@ if ($selectedResult === 'passed') {
             applyStyle($ws6,"F{$w6Row}",dataStyle('ECFDF5','059669',true,Alignment::HORIZONTAL_CENTER));
             $w6Row++;
         }
+
+        // Emerald Conclusion Box
+        $top3BestNames = [];
+        foreach ($bestPartsPassed as $bP) {
+            if (!empty($bP['part_name'])) {
+                $top3BestNames[] = $bP['part_name'];
+                if (count($top3BestNames) >= 3) break;
+            }
+        }
+        $top3PartsSummaryStr = !empty($top3BestNames) ? implode(', ', $top3BestNames) : 'Belum Ada Data Sesi Passed';
+
+        $w6Row++;
+        $ws6->mergeCells("A{$w6Row}:F{$w6Row}");
+        $ws6->setCellValue("A{$w6Row}", 'CONCLUSION: 3 best performing parts are ' . $top3PartsSummaryStr);
+        applyStyle($ws6,"A{$w6Row}",[
+            'font'      => ['bold'=>true,'color'=>['argb'=>'FF166534'],'size'=>10],
+            'fill'      => ['fillType'=>Fill::FILL_SOLID,'startColor'=>['argb'=>'FFF0FDF4']],
+            'alignment' => ['horizontal'=>Alignment::HORIZONTAL_LEFT,'vertical'=>Alignment::VERTICAL_CENTER],
+            'borders'   => ['allBorders'=>['borderStyle'=>Border::BORDER_THIN,'color'=>['argb'=>'FFBBF7D0']]]
+        ]);
+        $ws6->getRowDimension($w6Row)->setRowHeight(24);
     }
 } else {
     if (empty($worstPartsGrouped)) {
@@ -1001,6 +1201,26 @@ if ($selectedResult === 'passed') {
                 $w6Row++;
             }
         }
+
+        // Soft Blue Conclusion Box (Matching Presentation Slide)
+        $top3PartsNames = [];
+        foreach ($worstPartsGrouped as $dName => $parts) {
+            if (!empty($parts[0]['part_name'])) {
+                $top3PartsNames[] = $parts[0]['part_name'] . " (" . strtolower($dName) . ")";
+            }
+        }
+        $top3PartsSummaryStr = !empty($top3PartsNames) ? implode(', ', $top3PartsNames) : 'Belum Ada Part Reject';
+
+        $w6Row++;
+        $ws6->mergeCells("A{$w6Row}:F{$w6Row}");
+        $ws6->setCellValue("A{$w6Row}", 'CONCLUSION: 3 worst parts are ' . $top3PartsSummaryStr);
+        applyStyle($ws6,"A{$w6Row}",[
+            'font'      => ['bold'=>true,'color'=>['argb'=>'FF1E40AF'],'size'=>10],
+            'fill'      => ['fillType'=>Fill::FILL_SOLID,'startColor'=>['argb'=>'FFEFF6FF']],
+            'alignment' => ['horizontal'=>Alignment::HORIZONTAL_LEFT,'vertical'=>Alignment::VERTICAL_CENTER],
+            'borders'   => ['allBorders'=>['borderStyle'=>Border::BORDER_THIN,'color'=>['argb'=>'FFDBEAFE']]]
+        ]);
+        $ws6->getRowDimension($w6Row)->setRowHeight(24);
     }
 }
 

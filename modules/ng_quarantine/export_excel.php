@@ -325,15 +325,10 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
     $latestRow  = $groupRows[0];
     $roundCount = count($groupRows);
 
-    $groupClosure = null;
-    foreach ($groupRows as $gRow) {
-        $gLotId = (int)$gRow['lot_id'];
-        if (isset($closuresByLot[$gLotId])) {
-            $groupClosure = $closuresByLot[$gLotId];
-            break;
-        }
-    }
-    $latestRow['closure_info'] = $groupClosure;
+    // Closure & Status harus berpatokan pada putaran/sesi TERBARU ($latestRow)
+    $latestLotId = (int)$latestRow['lot_id'];
+    $latestClosure = $closuresByLot[$latestLotId] ?? null;
+    $latestRow['closure_info'] = $latestClosure;
 
     // Aggregate defects
     $aggregatedDefects = [];
@@ -359,12 +354,14 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
     $latestRow['defect_text'] = !empty($defTextArr) ? implode(', ', $defTextArr) : 'Defect Terdeteksi (' . (int)($latestRow['qty_lot']) . ' pcs)';
     $latestRow['ng_count']    = $totalNgCount > 0 ? $totalNgCount : (int)($latestRow['qty_lot'] ?? 0);
 
+    $resStatus = strtolower($latestRow['lot_result'] ?? '');
     $lotSt = strtolower($latestRow['lot_status'] ?? '');
-    $closureType = $groupClosure ? ($groupClosure['closure_type'] ?? 'action') : '';
+    $closureType = $latestClosure ? ($latestClosure['closure_type'] ?? 'action') : '';
     if ($lotSt === 'abolished') $closureType = 'abolish';
     elseif ($lotSt === 'action_closed') $closureType = 'action';
 
-    $isClosed = ($groupClosure !== null || in_array($lotSt, ['abolished', 'action_closed'], true));
+    $isPassed = ($resStatus === 'passed');
+    $isClosed = ($latestClosure !== null || in_array($lotSt, ['abolished', 'action_closed'], true) || $isPassed);
 
     $findingTs = !empty($latestRow['lot_created_at']) 
         ? strtotime($latestRow['lot_created_at']) 
@@ -377,6 +374,12 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
         if ($closureType === 'abolish') {
             $actionType = 'ABOLISH';
             $statsAbolished++;
+        } elseif ($closureType === 'action') {
+            $actionType = 'ACTION';
+            $statsAction++;
+        } elseif ($isPassed) {
+            $actionType = 'PASSED';
+            $statsAction++;
         } else {
             $actionType = 'ACTION';
             $statsAction++;
@@ -404,12 +407,14 @@ foreach ($groupedNgLotsMap as $groupKey => $groupRows) {
     $latestRow['action_type']      = $actionType;
     $latestRow['aging_bracket']    = $agingBracket;
     $latestRow['is_closed']        = $isClosed;
+    $latestRow['is_passed']        = $isPassed;
 
     // Apply Filter Status Handling
     if ($statusHandling === 'open' && $statusLifecycle !== 'OPEN') continue;
     if ($statusHandling === 'closed' && $statusLifecycle !== 'CLOSED') continue;
-    if ($statusHandling === 'action' && $actionType !== 'ACTION') continue;
+    if ($statusHandling === 'action' && $actionType !== 'ACTION' && $actionType !== 'PASSED') continue;
     if ($statusHandling === 'abolish' && $actionType !== 'ABOLISH') continue;
+    if ($statusHandling === 'passed' && $actionType !== 'PASSED') continue;
 
     // Apply Aging Filter
     if ($agingFilter !== 'all') {

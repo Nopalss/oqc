@@ -1,40 +1,12 @@
 <?php
-$breadcrumbCategory = "OPERASIONAL";
-$pageTitle          = "Dashboard Laporan";
-$pageSubtitle       = "Rekap hasil inspeksi outgoing quality control — PT. Surya Technology Industri";
-
-require_once __DIR__ . '/../../layouts/header.php';
-require_once __DIR__ . '/../../layouts/sidebar.php';
-
-require_menu_access('dashboard');
+// ── 0. Dependensi Dasar & Session Cache Metadata (SEBELUM header.php menutup write lock) ──
+require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/helper.php';
 
 $pdo = getDB();
 
-// ── Filter Resolvers (Date, Customer, Unit, Sample Basis & Result) ───────────
-$selectedCustomer    = sanitize($_GET['customer'] ?? '');
-$selectedUnit        = sanitize($_GET['unit'] ?? 'pcs');
-if (!in_array($selectedUnit, ['pcs', 'lot'])) {
-    $selectedUnit = 'pcs';
-}
-
-$selectedSampleBasis = sanitize($_GET['sample_basis'] ?? 'lot');
-if (!in_array($selectedSampleBasis, ['lot', 'session'])) {
-    $selectedSampleBasis = 'lot';
-}
-
-$selectedResult      = sanitize($_GET['result'] ?? 'rejected');
-if (!in_array($selectedResult, ['rejected', 'passed'])) {
-    $selectedResult = 'rejected';
-}
-
-$monthNames = [
-    1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
-    5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
-    9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember'
-];
-
-// ── Session Cache untuk metadata ringan (years & customers) ─────────────────
-// Cache per-jam agar tidak query DB setiap page load
+// Cache metadata ringan (years & customers) per-jam agar tersimpan permanen di session
 $_metaCacheKey = 'oqc_dash_meta_' . date('YmdH');
 if (!isset($_SESSION[$_metaCacheKey]) && $pdo) {
     $_cache = [];
@@ -60,6 +32,38 @@ if (!isset($_SESSION[$_metaCacheKey]) && $pdo) {
 }
 $_meta = $_SESSION[$_metaCacheKey] ?? ['years' => [], 'customers' => []];
 
+$breadcrumbCategory = "OPERASIONAL";
+$pageTitle          = "Dashboard Laporan";
+$pageSubtitle       = "Rekap hasil inspeksi outgoing quality control — PT. Surya Technology Industri";
+
+require_once __DIR__ . '/../../layouts/header.php';
+require_once __DIR__ . '/../../layouts/sidebar.php';
+
+require_menu_access('dashboard');
+
+// ── Filter Resolvers (Date, Customer, Unit, Sample Basis & Result) ───────────
+$selectedCustomer    = sanitize($_GET['customer'] ?? '');
+$selectedUnit        = sanitize($_GET['unit'] ?? 'pcs');
+if (!in_array($selectedUnit, ['pcs', 'lot'])) {
+    $selectedUnit = 'pcs';
+}
+
+$selectedSampleBasis = sanitize($_GET['sample_basis'] ?? 'lot');
+if (!in_array($selectedSampleBasis, ['lot', 'session'])) {
+    $selectedSampleBasis = 'lot';
+}
+
+$selectedResult      = sanitize($_GET['result'] ?? 'rejected');
+if (!in_array($selectedResult, ['rejected', 'passed'])) {
+    $selectedResult = 'rejected';
+}
+
+$monthNames = [
+    1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
+    5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
+    9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember'
+];
+
 $dbYears = !empty($_meta['years']) ? $_meta['years'] : [(int)date('Y')];
 
 $availableYears = $dbYears;
@@ -73,7 +77,8 @@ $availableYears = array_values(array_unique(array_map('intval', $availableYears)
 $filterType = sanitize($_GET['filter_type'] ?? '');
 $selectedMonth = isset($_GET['month']) && is_numeric($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
 $selectedYear  = isset($_GET['year']) && is_numeric($_GET['year']) ? (int)$_GET['year'] : (int)date('Y');
-$selectedTopRank = isset($_GET['top_rank']) && in_array((int)$_GET['top_rank'], [3, 5, 10]) ? (int)$_GET['top_rank'] : 3;
+$selectedTopRank    = isset($_GET['top_rank']) && in_array((int)$_GET['top_rank'], [3, 5, 10]) ? (int)$_GET['top_rank'] : 5;
+$selectedDefectRank = isset($_GET['defect_rank']) && in_array((int)$_GET['defect_rank'], [1, 3]) ? (int)$_GET['defect_rank'] : 3;
 
 if ($filterType === 'all_years') {
     $minYear = min($dbYears);
@@ -87,10 +92,10 @@ if ($filterType === 'all_years') {
     $filterTitleDesc = ($minYear !== $maxYear) ? ("Komparasi Semua Tahun (" . $minYear . " – " . $maxYear . ")") : ("Komparasi Tahunan (" . $minYear . ")");
     $trendSubtext = 'komparasi total per tahun (YoY)';
 } elseif ($filterType === 'month_year') {
-    $startDate = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
-    $endDate   = date('Y-m-t', strtotime($startDate));
+    $startDate = getWorkCycleMonthStartDate($selectedYear, $selectedMonth);
+    $endDate   = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth)));
     $presetFilter = 'month_year';
-    $filterTitleDesc = "Bulan " . ($monthNames[$selectedMonth] ?? $selectedMonth) . " " . $selectedYear;
+    $filterTitleDesc = "Bulan " . ($monthNames[$selectedMonth] ?? $selectedMonth) . " " . $selectedYear . " (Siklus: " . date('d M', strtotime($startDate)) . " – " . date('d M Y', strtotime($endDate)) . ")";
     $trendSubtext = 'per tanggal (' . ($monthNames[$selectedMonth] ?? $selectedMonth) . ' ' . $selectedYear . ')';
 } elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
     $startDate    = sanitize($_GET['start_date'] ?? date('Y-m-01'));
@@ -109,7 +114,7 @@ if ($filterType === 'all_years') {
             $trendSubtext = 'per jam / hari';
             break;
         case 'mingguan':
-            $startDate = date('Y-m-d', strtotime('monday this week'));
+            $startDate = getWorkCycleWeekStartDate();
             $endDate   = date('Y-m-d');
             $filterTitleDesc = "Minggu Ini (" . date('d M', strtotime($startDate)) . " – " . date('d M Y', strtotime($endDate)) . ")";
             $trendSubtext = 'per hari';
@@ -122,9 +127,11 @@ if ($filterType === 'all_years') {
             break;
         default:
             $presetFilter = 'bulanan';
-            $startDate    = date('Y-m-01');
+            $curY = (int)date('Y');
+            $curM = (int)date('n');
+            $startDate    = getWorkCycleMonthStartDate($curY, $curM);
             $endDate      = date('Y-m-d');
-            $filterTitleDesc = "Bulan Ini (" . ($monthNames[(int)date('n')] ?? date('F')) . " " . date('Y') . ")";
+            $filterTitleDesc = "Bulan Ini (" . date('d M', strtotime($startDate)) . " – " . date('d M Y', strtotime($endDate)) . ")";
             $trendSubtext = 'per tanggal';
     }
 }
@@ -165,6 +172,8 @@ $pieCounts         = [];
 $modelLabels       = [];
 $modelCounts       = [];
 $worstPartsGrouped = [];
+$totalDistinctModelsNg = 0;
+$totalDistinctPartsNg  = 0;
 
 $STD_PALETTE    = ['#2563eb','#0ea5e9','#6366f1','#f59e0b','#10b981','#ef4444','#8b5cf6','#ec4899'];
 $PASS_PALETTE   = ['#059669','#10b981','#34d399','#0284c7','#3b82f6','#6366f1','#8b5cf6','#06b6d4'];
@@ -172,12 +181,6 @@ $PALETTE        = ($selectedResult === 'passed') ? $PASS_PALETTE : $STD_PALETTE;
 
 if ($pdo) {
     try {
-        // Auto-heal / self-backfill if summary is empty (instant O(1) existence check)
-        $hasSummary = (bool)$pdo->query("SELECT 1 FROM oqc_daily_summary LIMIT 1")->fetchColumn();
-        if (!$hasSummary) {
-            backfillAllDailySummaries($pdo);
-        }
-
         $edNext = date('Y-m-d', strtotime($endDate . ' +1 day'));
         $p = [':sd' => $startDate, ':ed_next' => $edNext];
         $sumCustCond = "";
@@ -485,31 +488,37 @@ if ($pdo) {
         $stmtDdsTimeline->execute($p);
         $rawDdsRows = $stmtDdsTimeline->fetchAll(PDO::FETCH_ASSOC);
 
-        // Ambil rincian Part Code & Part Name per jenis defect & tanggal untuk hover tooltip
-        $stmtDdsParts = $pdo->prepare("SELECT {$dateExpr} AS date_key, 
-                                              dt.name AS defect_name, 
-                                              COALESCE(mp.part_code, '-') AS part_code,
-                                              COALESCE(mp.part_name, 'UNKNOWN PART') AS part_name,
-                                              {$metricCol} AS part_defect_qty
-                                       FROM oqc_daily_defect_summary dds
-                                       INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
-                                       LEFT JOIN master_parts mp ON dds.part_id = mp.id
-                                       WHERE dds.summary_date >= :sd AND dds.summary_date < :ed_next {$sumCustCond}
-                                       GROUP BY date_key, dt.id, dt.name, mp.id, mp.part_code, mp.part_name
-                                       HAVING part_defect_qty > 0
-                                       ORDER BY date_key ASC, part_defect_qty DESC");
-        $stmtDdsParts->execute($p);
-        $rawDdsPartRows = $stmtDdsParts->fetchAll(PDO::FETCH_ASSOC);
-
+        $isLongPeriod = ($presetFilter === 'all_years' || $daysDiff > 90);
+        $rawDdsPartRows = [];
         $defectPartsMatrix = []; // [date_key => [defect_name => [ ['code' => ..., 'name' => ..., 'qty' => ...], ... ]]]
-        foreach ($rawDdsPartRows as $pr) {
-            $dk   = (string)$pr['date_key'];
-            $dnm  = (string)$pr['defect_name'];
-            $defectPartsMatrix[$dk][$dnm][] = [
-                'code' => $pr['part_code'],
-                'name' => $pr['part_name'],
-                'qty'  => (int)$pr['part_defect_qty']
-            ];
+
+        // Ambil rincian Part Code & Part Name per jenis defect & tanggal untuk hover tooltip hanya jika rentang <= 90 hari
+        // Ini menghemat alokasi memori PHP dan waktu eksekusi DB secara signifikan pada mode komparasi tahunan
+        if (!$isLongPeriod) {
+            $stmtDdsParts = $pdo->prepare("SELECT {$dateExpr} AS date_key, 
+                                                  dt.name AS defect_name, 
+                                                  COALESCE(mp.part_code, '-') AS part_code, 
+                                                  COALESCE(mp.part_name, 'UNKNOWN PART') AS part_name, 
+                                                  {$metricCol} AS part_defect_qty
+                                           FROM oqc_daily_defect_summary dds
+                                           INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
+                                           LEFT JOIN master_parts mp ON dds.part_id = mp.id
+                                           WHERE dds.summary_date >= :sd AND dds.summary_date < :ed_next {$sumCustCond}
+                                           GROUP BY date_key, dt.id, dt.name, mp.id, mp.part_code, mp.part_name
+                                           HAVING part_defect_qty > 0
+                                           ORDER BY date_key ASC, part_defect_qty DESC");
+            $stmtDdsParts->execute($p);
+            $rawDdsPartRows = $stmtDdsParts->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($rawDdsPartRows as $pr) {
+                $dk   = (string)$pr['date_key'];
+                $dnm  = (string)$pr['defect_name'];
+                $defectPartsMatrix[$dk][$dnm][] = [
+                    'code' => $pr['part_code'],
+                    'name' => $pr['part_name'],
+                    'qty'  => (int)$pr['part_defect_qty']
+                ];
+            }
         }
 
         $distinctDefectTypes = [];
@@ -579,15 +588,100 @@ if ($pdo) {
 
         $otherNDefectTypes = []; // Hapus kategori Others
 
-        $stackedChartLabels = [];
-        foreach ($activeDefectPeriodKeys as $dk) {
-            $stackedChartLabels[] = $stackedPeriodLabels[$dk] ?? $dk;
-        }
-
         $grandTotSample = 0;
         foreach ($activeDefectPeriodKeys as $dk) {
             $grandTotSample += (int)($trendMap[$dk]['sample'] ?? 0);
         }
+
+        // ── Akumulasi Data Mingguan untuk Grafik Batang (Stacked Weekly W1-W4) ──
+        $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
+        $stackedChartLabels = [];
+        $weeklyDateMap = []; // [W1 => ['start' => ..., 'end' => ..., 'label' => ...]]
+        foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+            $stackedChartLabels[] = $wInfo['shortLabel'];
+            $weeklyDateMap[$wKey] = $wInfo;
+        }
+
+        // Hitung total sample & total defect per jenis per minggu
+        $weeklySampleTotals = [];
+        $weeklyNgTotals     = [];
+        $weeklyDefectQty    = []; // [WKey => [defect_name => qty]]
+        $weeklyDefectParts  = []; // [WKey => [defect_name => [part_meta...]]]
+
+        foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+            $wStart = $wInfo['start_date'];
+            $wEnd   = $wInfo['end_date'];
+            $wSample = 0;
+            $wNg = 0;
+
+            foreach ($trendMap as $dStr => $tData) {
+                if ($dStr >= $wStart && $dStr <= $wEnd) {
+                    $wSample += (int)($tData['sample'] ?? 0);
+                    $wNg     += (int)($tData['ng'] ?? 0);
+                }
+            }
+            $weeklySampleTotals[$wKey] = $wSample;
+            $weeklyNgTotals[$wKey]     = $wNg;
+            $weeklyDefectQty[$wKey]    = [];
+            $weeklyDefectParts[$wKey]  = [];
+
+            foreach ($rawDdsRows as $dr) {
+                $dDate = (string)$dr['date_key'];
+                if ($dDate >= $wStart && $dDate <= $wEnd) {
+                    $dnm = (string)$dr['defect_name'];
+                    $qty = (int)$dr['total_defect'];
+                    $weeklyDefectQty[$wKey][$dnm] = ($weeklyDefectQty[$wKey][$dnm] ?? 0) + $qty;
+                }
+            }
+
+            foreach ($rawDdsPartRows as $pr) {
+                $dDate = (string)$pr['date_key'];
+                if ($dDate >= $wStart && $dDate <= $wEnd) {
+                    $dnm = (string)$pr['defect_name'];
+                    $weeklyDefectParts[$wKey][$dnm][] = [
+                        'code' => $pr['part_code'],
+                        'name' => $pr['part_name'],
+                        'qty'  => (int)$pr['part_defect_qty']
+                    ];
+                }
+            }
+        }
+
+        // ── Tentukan Top N Defect PER-MINGGU (Dynamic Per-Week Ranking) ──
+        $selectedDefectsPerWeek = []; // [wKey => [defect_name, ...]]
+        $activeWeeklyDefectsMap = []; // [defect_name => true]
+
+        foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+            $wDefects = $weeklyDefectQty[$wKey] ?? [];
+            arsort($wDefects);
+            // Ambil defect teratas yang mendominasi di minggu ini
+            $topForWeek = array_slice(array_keys($wDefects), 0, $selectedDefectRank);
+            $selectedDefectsPerWeek[$wKey] = $topForWeek;
+            foreach ($topForWeek as $dnm) {
+                if (($wDefects[$dnm] ?? 0) > 0) {
+                    $activeWeeklyDefectsMap[$dnm] = true;
+                }
+            }
+        }
+
+        // Hitung total akumulasi defect per jenis di seluruh minggu aktif
+        $weeklyDefectSummaryTotals = [];
+        foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+            foreach (($weeklyDefectQty[$wKey] ?? []) as $dnm => $qty) {
+                $weeklyDefectSummaryTotals[$dnm] = ($weeklyDefectSummaryTotals[$dnm] ?? 0) + (int)$qty;
+            }
+        }
+
+        // Urutkan seluruh defect yang pernah juara di salah satu minggu (terbanyak di indeks awal agar berada di posisi paling dasar tumpukan bar)
+        $topDefectTypesForChart = array_keys($activeWeeklyDefectsMap);
+        usort($topDefectTypesForChart, function($a, $b) use ($weeklyDefectSummaryTotals, $defectTypeTotals) {
+            $totA = $weeklyDefectSummaryTotals[$a] ?? ($defectTypeTotals[$a] ?? 0);
+            $totB = $weeklyDefectSummaryTotals[$b] ?? ($defectTypeTotals[$b] ?? 0);
+            if ($totA === $totB) {
+                return strcmp($a, $b);
+            }
+            return $totB <=> $totA;
+        });
 
         $stackedChartDatasetsPcs = [];
         $stackedChartDatasetsPpm = [];
@@ -598,9 +692,9 @@ if ($pdo) {
             $passedDataPpm   = [];
             $rejectedDataPpm = [];
 
-            foreach ($activeDefectPeriodKeys as $dk) {
-                $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-                $ng     = (int)($trendMap[$dk]['ng'] ?? 0);
+            foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+                $sample = (int)($weeklySampleTotals[$wKey] ?? 0);
+                $ng     = (int)($weeklyNgTotals[$wKey] ?? 0);
                 $passed = max(0, $sample - $ng);
 
                 $passedDataPcs[]   = $passed;
@@ -617,14 +711,14 @@ if ($pdo) {
                 'data'            => $passedDataPcs,
                 'backgroundColor' => '#059669',
                 'stack'           => 'res_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
             $stackedChartDatasetsPcs[] = [
                 'label'           => 'Rejected (' . $unitText . ')',
                 'data'            => $rejectedDataPcs,
                 'backgroundColor' => '#dc2626',
                 'stack'           => 'res_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
 
             $stackedChartDatasetsPpm[] = [
@@ -632,50 +726,85 @@ if ($pdo) {
                 'data'            => $passedDataPpm,
                 'backgroundColor' => '#059669',
                 'stack'           => 'res_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
             $stackedChartDatasetsPpm[] = [
                 'label'           => 'Rejected (PPM)',
                 'data'            => $rejectedDataPpm,
                 'backgroundColor' => '#dc2626',
                 'stack'           => 'res_stack',
-                'borderRadius'    => 3
+                'borderRadius'    => 4
             ];
         } else {
-            foreach ($topNDefectTypes as $idx => $dname) {
-                $c = $STACKED_DEFECT_PALETTE[$idx % count($STACKED_DEFECT_PALETTE)];
-                $dataPtsPcs  = [];
-                $dataPtsPpm  = [];
-                $partMetaPts = [];
+            // Assign warna tetap per jenis defect
+            $defectColorMap = [];
+            foreach ($topDefectTypesForChart as $cIdx => $dName) {
+                $defectColorMap[$dName] = $STACKED_DEFECT_PALETTE[$cIdx % count($STACKED_DEFECT_PALETTE)];
+            }
 
-                foreach ($activeDefectPeriodKeys as $dk) {
-                    $isTopThisDay = in_array($dname, $selectedDefectsPerDay[$dk] ?? []);
-                    $qty    = $isTopThisDay ? (int)($defectMatrix[$dk][$dname] ?? 0) : 0;
-                    $sample = (int)($trendMap[$dk]['sample'] ?? 0);
-                    $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
+            // Layered Rank Stacking:
+            // Lapisan 0 = Defect Terbesar #1 per minggu (paling bawah di sumbu 0)
+            // Lapisan 1 = Defect Terbesar #2 per minggu (tengah)
+            // Lapisan 2 = Defect Terbesar #3 per minggu (paling atas)
+            $rankLayerLabels = [
+                0 => 'Defect Terbesar #1',
+                1 => 'Defect Terbesar #2',
+                2 => 'Defect Terbesar #3',
+                3 => 'Defect Terbesar #4',
+                4 => 'Defect Terbesar #5'
+            ];
 
-                    $dataPtsPcs[]  = $qty;
-                    $dataPtsPpm[]  = $ppm;
-                    $partMetaPts[] = $isTopThisDay ? ($defectPartsMatrix[$dk][$dname] ?? []) : [];
+            for ($rk = 0; $rk < $selectedDefectRank; $rk++) {
+                $dataPtsPcs   = [];
+                $dataPtsPpm   = [];
+                $bgColors     = [];
+                $partMetaPts  = [];
+                $defectNames  = [];
+
+                foreach ($weeklyBucketsDef as $wKey => $wInfo) {
+                    $topForWeek = $selectedDefectsPerWeek[$wKey] ?? [];
+                    $dname = $topForWeek[$rk] ?? null;
+
+                    if ($dname !== null && ($weeklyDefectQty[$wKey][$dname] ?? 0) > 0) {
+                        $qty    = (int)($weeklyDefectQty[$wKey][$dname] ?? 0);
+                        $sample = (int)($weeklySampleTotals[$wKey] ?? 0);
+                        $ppm    = ($sample > 0) ? round(($qty / $sample) * 1000000, 1) : 0;
+                        $c      = $defectColorMap[$dname] ?? '#64748b';
+
+                        $dataPtsPcs[]  = $qty;
+                        $dataPtsPpm[]  = $ppm;
+                        $bgColors[]    = $c;
+                        $defectNames[] = $dname;
+                        $partMetaPts[] = $weeklyDefectParts[$wKey][$dname] ?? [];
+                    } else {
+                        $dataPtsPcs[]  = 0;
+                        $dataPtsPpm[]  = 0;
+                        $bgColors[]    = 'transparent';
+                        $defectNames[] = '';
+                        $partMetaPts[] = [];
+                    }
                 }
 
+                $layerName = $rankLayerLabels[$rk] ?? ('Peringkat Defect #' . ($rk + 1));
                 $stackedChartDatasetsPcs[] = [
-                    'label'           => $dname,
+                    'label'           => $layerName,
+                    'defect_names'    => $defectNames,
                     'data'            => $dataPtsPcs,
                     'raw_pcs'         => $dataPtsPcs,
                     'part_meta'       => $partMetaPts,
-                    'backgroundColor' => $c,
+                    'backgroundColor' => $bgColors,
                     'stack'           => 'defect_stack',
-                    'borderRadius'    => 3
+                    'borderRadius'    => 4
                 ];
                 $stackedChartDatasetsPpm[] = [
-                    'label'           => $dname,
+                    'label'           => $layerName,
+                    'defect_names'    => $defectNames,
                     'data'            => $dataPtsPpm,
                     'raw_pcs'         => $dataPtsPcs,
                     'part_meta'       => $partMetaPts,
-                    'backgroundColor' => $c,
+                    'backgroundColor' => $bgColors,
                     'stack'           => 'defect_stack',
-                    'borderRadius'    => 3
+                    'borderRadius'    => 4
                 ];
             }
         }
@@ -720,7 +849,8 @@ if ($pdo) {
         // 6b. Distribusi per Model (Passed vs Rejected Mode) - Dynamic Rank Filter
         if ($selectedResult === 'passed') {
             $stmtM = $pdo->prepare("SELECT COALESCE(m.name, mp.model, 'NO MODEL') AS model_name, 
-                                           SUM(s.passed_lots) AS total_ng 
+                                           SUM(s.passed_lots) AS total_ng,
+                                           COUNT(s.id) AS total_cases
                                     FROM oqc_daily_summary s 
                                     LEFT JOIN master_parts mp ON s.part_id=mp.id 
                                     LEFT JOIN master_models m ON s.model_id=m.id 
@@ -732,7 +862,8 @@ if ($pdo) {
         } else {
             if ($selectedUnit === 'lot') {
                 $stmtM = $pdo->prepare("SELECT COALESCE(m.name, mp.model, 'NO MODEL') AS model_name, 
-                                               SUM(s.rejected_lots) AS total_ng 
+                                               SUM(s.rejected_lots) AS total_ng,
+                                               SUM(s.rejected_lots) AS total_cases
                                         FROM oqc_daily_summary s 
                                         LEFT JOIN master_parts mp ON s.part_id=mp.id 
                                         LEFT JOIN master_models m ON s.model_id=m.id 
@@ -743,7 +874,8 @@ if ($pdo) {
                                         LIMIT {$selectedTopRank}");
             } else {
                 $stmtM = $pdo->prepare("SELECT COALESCE(m.name, mp.model, 'NO MODEL') AS model_name, 
-                                               SUM(COALESCE(NULLIF(s.total_ng_pcs, 0), s.total_ng_samples, 0)) AS total_ng 
+                                               SUM(COALESCE(NULLIF(s.total_ng_pcs, 0), s.total_ng_samples, 0)) AS total_ng,
+                                               COALESCE(SUM(s.rejected_lots), COUNT(DISTINCT s.id)) AS total_cases
                                         FROM oqc_daily_summary s 
                                         LEFT JOIN master_parts mp ON s.part_id=mp.id 
                                         LEFT JOIN master_models m ON s.model_id=m.id 
@@ -755,10 +887,27 @@ if ($pdo) {
             }
         }
         $stmtM->execute($p);
+        $modelCases = [];
         foreach ($stmtM->fetchAll() as $rM) {
             $modelLabels[] = htmlspecialchars($rM['model_name']);
             $modelCounts[] = (int)$rM['total_ng'];
+            $modelCases[]  = max(1, (int)($rM['total_cases'] ?? 1));
         }
+
+        // 6c. Total Distinct Parts & Models yang mengalami NG (tanpa pembatasan Top Rank)
+        if ($selectedResult === 'passed') {
+            $stmtCountP = $pdo->prepare("SELECT COUNT(DISTINCT s.part_id) FROM oqc_daily_summary s WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND s.passed_lots > 0");
+            $stmtCountM = $pdo->prepare("SELECT COUNT(DISTINCT COALESCE(m.name, mp.model, 'NO MODEL')) FROM oqc_daily_summary s LEFT JOIN master_parts mp ON s.part_id=mp.id LEFT JOIN master_models m ON s.model_id=m.id WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND s.passed_lots > 0");
+        } else {
+            $colNgCheck = ($selectedUnit === 'lot') ? "s.rejected_lots > 0" : "(s.total_ng_pcs > 0 OR s.total_ng_samples > 0 OR s.rejected_lots > 0)";
+            $stmtCountP = $pdo->prepare("SELECT COUNT(DISTINCT s.part_id) FROM oqc_daily_summary s WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND {$colNgCheck}");
+            $stmtCountM = $pdo->prepare("SELECT COUNT(DISTINCT COALESCE(m.name, mp.model, 'NO MODEL')) FROM oqc_daily_summary s LEFT JOIN master_parts mp ON s.part_id=mp.id LEFT JOIN master_models m ON s.model_id=m.id WHERE s.summary_date >= :sd AND s.summary_date < :ed_next {$sumCustCond} AND {$colNgCheck}");
+        }
+        $stmtCountP->execute($p);
+        $totalDistinctPartsNg = (int)$stmtCountP->fetchColumn();
+
+        $stmtCountM->execute($p);
+        $totalDistinctModelsNg = (int)$stmtCountM->fetchColumn();
 
         // 7. Section II Table: Worst Parts (Rejected) vs Best Performance Parts (Passed)
         if ($selectedResult === 'passed') {
@@ -798,9 +947,10 @@ if ($pdo) {
             $stmtWPDefs->execute($p);
             $top3DefectNames = $stmtWPDefs->fetchAll(PDO::FETCH_COLUMN);
 
-            foreach ($top3DefectNames as $defName) {
-                $pDef = array_merge($p, [':defname' => $defName]);
-                $stmtWP = $pdo->prepare("SELECT 
+            if (!empty($top3DefectNames)) {
+                $inPlaceholders = implode(',', array_fill(0, count($top3DefectNames), '?'));
+                $sqlWP = "SELECT 
+                            dt.name AS defect_name,
                             COALESCE(mp.part_name, 'UNKNOWN PART') AS part_name,
                             COALESCE(mp.part_code, '-') AS part_code,
                             COALESCE(m.name, mp.model, '-') AS model,
@@ -810,13 +960,29 @@ if ($pdo) {
                         INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
                         LEFT JOIN master_parts mp ON dds.part_id = mp.id
                         LEFT JOIN master_models m ON mp.model_id = m.id
-                        WHERE dt.name = :defname
-                          AND dds.summary_date >= :sd AND dds.summary_date < :ed_next {$sumCustCond} 
-                        GROUP BY mp.id, mp.part_name, mp.part_code, m.name, mp.model
-                        ORDER BY ng_case DESC, lot_case DESC
-                        LIMIT 3");
-                $stmtWP->execute($pDef);
-                $worstPartsGrouped[$defName] = $stmtWP->fetchAll();
+                        WHERE dt.name IN ({$inPlaceholders})
+                          AND dds.summary_date >= ? AND dds.summary_date < ? " . ($selectedCustomer !== '' ? " AND dds.customer = ? " : "") . "
+                        GROUP BY dt.id, dt.name, mp.id, mp.part_name, mp.part_code, m.name, mp.model
+                        ORDER BY ng_case DESC, lot_case DESC";
+
+                $paramsWP = array_merge($top3DefectNames, [$startDate, $edNext]);
+                if ($selectedCustomer !== '') {
+                    $paramsWP[] = $selectedCustomer;
+                }
+
+                $stmtWP = $pdo->prepare($sqlWP);
+                $stmtWP->execute($paramsWP);
+                $allWpRows = $stmtWP->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($top3DefectNames as $dName) {
+                    $worstPartsGrouped[$dName] = [];
+                }
+                foreach ($allWpRows as $wRow) {
+                    $dName = $wRow['defect_name'];
+                    if (isset($worstPartsGrouped[$dName]) && count($worstPartsGrouped[$dName]) < 3) {
+                        $worstPartsGrouped[$dName][] = $wRow;
+                    }
+                }
             }
 
             $top3PartsNames = [];
@@ -828,42 +994,22 @@ if ($pdo) {
             $top3PartsSummaryStr = !empty($top3PartsNames) ? implode(', ', $top3PartsNames) : 'Belum Ada Part Reject';
         }
 
+        // ── 8. Multi-Horizon Quality PPM Trend (Annual -> Monthly -> Weekly/Daily Sunday Anchor) ──
+        $initialSubResolution = 'weekly';
+        $multiHorizonData = buildDashboardMultiHorizonTrend($pdo, [
+            'ref_year'       => $selectedYear,
+            'ref_month'      => $selectedMonth,
+            'customer'       => $selectedCustomer,
+            'unit'           => $selectedUnit,
+            'sample_basis'   => $selectedSampleBasis,
+            'result'         => $selectedResult,
+            'sub_resolution' => $initialSubResolution
+        ]);
+
     } catch (PDOException $e) {}
 }
 
-// ── Compute initial version fingerprint for live sync ──────────────────────
-$initialDashboardVersion = '';
-if ($pdo) {
-    try {
-        $stmtSumV = $pdo->prepare("SELECT 
-            COALESCE(MAX(id), 0) AS max_sum_id,
-            COALESCE(MAX(updated_at), '1970-01-01') AS last_sum_update,
-            COUNT(id) AS sum_count
-        FROM oqc_daily_summary
-        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}");
-        $stmtSumV->execute($p);
-        $rSumV = $stmtSumV->fetch(PDO::FETCH_ASSOC);
-
-        $stmtSessV = $pdo->prepare("SELECT 
-            COALESCE(MAX(id), 0) AS max_sess_id,
-            COUNT(id) AS sess_count
-        FROM inspection_sessions
-        WHERE started_at >= :sd AND started_at < :ed_next");
-        $stmtSessV->execute([':sd' => $startDate, ':ed_next' => $edNext]);
-        $rSessV = $stmtSessV->fetch(PDO::FETCH_ASSOC);
-
-        $initialDashboardVersion = md5(implode('|', [
-            $rSumV['max_sum_id'] ?? 0,
-            $rSumV['last_sum_update'] ?? '',
-            $rSumV['sum_count'] ?? 0,
-            $rSessV['max_sess_id'] ?? 0,
-            $rSessV['sess_count'] ?? 0,
-            $startDate,
-            $endDate,
-            $selectedCustomer
-        ]));
-    } catch (Exception $eV) {}
-}
+$jsMultiHorizon = json_encode($multiHorizonData ?? ['labels' => [], 'rates' => [], 'sections' => []]);
 
 $jsLabels       = json_encode($trendLabels);
 $jsTrendPPM     = json_encode($trendPPM);
@@ -885,6 +1031,7 @@ $jsDefectColors = json_encode(array_values(array_slice($DEFECT_PALETTE, 0, max(c
 
 $jsModelLabels  = json_encode($modelLabels);
 $jsModelCounts  = json_encode($modelCounts);
+$jsModelCases   = json_encode($modelCases ?? []);
 $jsModelColors  = json_encode(array_values(array_slice($MODEL_PALETTE, 0, max(count($modelLabels), 1))));
 
 $jsPieLabels    = json_encode($pieLabels);
@@ -910,6 +1057,31 @@ $lineColor      = $isPassedMode ? '#059669' : '#2563eb';
 $lineBgColor    = $isPassedMode ? 'rgba(5,150,105,0.08)' : 'rgba(37,99,235,0.07)';
 
 // Compute initial dashboard version fingerprint for realtime sync & caching
+$initialDashboardVersion = '';
+$rSumV = ['max_sum_id' => 0, 'last_sum_update' => '', 'sum_count' => 0];
+$rSessV = ['max_sess_id' => 0, 'sess_count' => 0];
+
+if ($pdo) {
+    try {
+        $stmtSumV = $pdo->prepare("SELECT 
+            COALESCE(MAX(id), 0) AS max_sum_id,
+            COALESCE(MAX(updated_at), '1970-01-01') AS last_sum_update,
+            COUNT(id) AS sum_count
+        FROM oqc_daily_summary
+        WHERE summary_date >= :sd AND summary_date < :ed_next {$sumCustCond}");
+        $stmtSumV->execute($p);
+        $rSumV = $stmtSumV->fetch(PDO::FETCH_ASSOC) ?: $rSumV;
+
+        $stmtSessV = $pdo->prepare("SELECT 
+            COALESCE(MAX(id), 0) AS max_sess_id,
+            COUNT(id) AS sess_count
+        FROM inspection_sessions
+        WHERE started_at >= :sd AND started_at < :ed_next");
+        $stmtSessV->execute([':sd' => $startDate, ':ed_next' => $edNext]);
+        $rSessV = $stmtSessV->fetch(PDO::FETCH_ASSOC) ?: $rSessV;
+    } catch (Exception $eV) {}
+}
+
 $initialDashboardVersion = md5(implode('|', [
     $rSumV['max_sum_id'] ?? 0,
     $rSumV['last_sum_update'] ?? '',
@@ -919,7 +1091,8 @@ $initialDashboardVersion = md5(implode('|', [
     $startDate,
     $endDate,
     $selectedCustomer,
-    $dashboardTargetPpm
+    $dashboardTargetPpm,
+    $selectedDefectRank
 ]));
 ?>
 
@@ -942,7 +1115,7 @@ $initialDashboardVersion = md5(implode('|', [
                     <div>
                         <div style="font-size:16px;font-weight:900;color:#0f172a;letter-spacing:0.03em;text-transform:uppercase;">PT. SURYA TECHNOLOGY INDUSTRI</div>
                         <div style="font-size:11px;font-weight:700;color:#2563eb;letter-spacing:0.02em;">OUTGOING QUALITY CONTROL (OQC) DEPARTMENT</div>
-                        <div style="font-size:9.5px;color:#64748b;">Quality Assurance &amp; Inspection Monitoring System &middot; Official Quality Performance Report</div>
+                        <div style="font-size:9.5px;color:#64748b;">Periode : <?= htmlspecialchars($filterTitleDesc) ?> | Target Customer : <?= htmlspecialchars($selectedCustomer !== '' ? $selectedCustomer : 'Semua Customer (All)') ?></div>
                     </div>
                 </div>
                 <div style="text-align:right;">
@@ -955,28 +1128,6 @@ $initialDashboardVersion = md5(implode('|', [
                     <div style="font-size:9px;color:#64748b;">
                         Oleh: <strong><?= htmlspecialchars($_SESSION['user_name'] ?? 'Admin') ?></strong>
                     </div>
-                </div>
-            </div>
-
-            <!-- Report Title & Parameter Summary Bar -->
-            <div style="margin-top:10px;padding:8px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:10px;">
-                <div>
-                    <span style="color:#64748b;font-weight:600;display:block;">Periode Laporan:</span>
-                    <strong style="color:#0f172a;font-size:11px;"><?= htmlspecialchars($filterTitleDesc) ?></strong>
-                </div>
-                <div>
-                    <span style="color:#64748b;font-weight:600;display:block;">Target Customer:</span>
-                    <strong style="color:#0f172a;font-size:11px;"><?= htmlspecialchars($selectedCustomer !== '' ? $selectedCustomer : 'Semua Customer (All)') ?></strong>
-                </div>
-                <div>
-                    <span style="color:#64748b;font-weight:600;display:block;">Satuan &amp; Basis Sampel:</span>
-                    <strong style="color:#0f172a;font-size:11px;"><?= strtoupper($selectedUnit) ?> &middot; Basis <?= ($selectedSampleBasis === 'session') ? 'Per Sesi' : 'Per Lot' ?></strong>
-                </div>
-                <div>
-                    <span style="color:#64748b;font-weight:600;display:block;">Kategori Hasil:</span>
-                    <strong style="color:<?= $isPassedMode ? '#059669' : '#dc2626' ?>;font-size:11px;">
-                        <?= $isPassedMode ? 'PASSED (Lulus Mutu)' : 'REJECTED (Temuan Defect)' ?>
-                    </strong>
                 </div>
             </div>
         </div>
@@ -1084,6 +1235,14 @@ $initialDashboardVersion = md5(implode('|', [
 
                 <!-- Action Buttons: Live Sync Widget, Print Report & Export Excel -->
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <!-- Live / Pause Toggle Button -->
+                    <button type="button" id="btnToggleLiveSync" onclick="toggleLiveSyncState()" 
+                            style="border:1px solid #cbd5e1;background:#ffffff;cursor:pointer;padding:5px 10px;border-radius:8px;color:#0f172a;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,0.04);transition:all 0.15s;" 
+                            title="Nyalakan / Jeda Pembaruan Otomatis Realtime">
+                        <span id="dotLiveSyncIndicator" style="width:7px;height:7px;border-radius:50%;background:#10b981;display:inline-block;box-shadow:0 0 6px rgba(16,185,129,0.7);"></span>
+                        <span id="txtLiveSyncStatus">Live</span>
+                    </button>
+
                     <!-- Sync Button (Direct Refresh from Server) -->
                     <button type="button" id="btnLiveSyncManual" onclick="manualSyncNow()" 
                             style="border:1px solid #cbd5e1;background:#ffffff;cursor:pointer;padding:5px 12px;border-radius:8px;color:#1e293b;display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,0.04);transition:all 0.15s;" 
@@ -1210,7 +1369,7 @@ $initialDashboardVersion = md5(implode('|', [
                     <div style="min-width:0;flex:1;">
                         <div style="display:flex;align-items:center;justify-content:space-between;gap:4px;">
                             <div style="font-size:9.5px;font-weight:700;color:#94a3b8;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><?= $kitem['label'] ?></div>
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2.5" style="flex-shrink:0;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                            <svg class="kpi-drilldown-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2.5" style="flex-shrink:0;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                         </div>
                         <div style="font-size:20px;font-weight:900;color:<?= $kitem['valColor'] ?? '#0f172a' ?>;line-height:1.15;margin-top:2px;">
                             <span id="<?= $kitem['dom_id'] ?>"><?= $kitem['val'] ?></span><?php if($kitem['unit']): ?> <span style="font-size:11px;font-weight:500;color:#94a3b8;"><?= $kitem['unit'] ?></span><?php endif; ?>
@@ -1226,19 +1385,22 @@ $initialDashboardVersion = md5(implode('|', [
 
         </div>
 
-        <!-- ── Chart Row 1: Line (Height Enlarged) + Top5 ─── -->
-        <div style="display:grid;grid-template-columns:minmax(0, 1.25fr) minmax(0, 1fr);gap:12px;" id="dash-row-1">
+        <!-- ── Chart Row 1: Multi-Horizon PPM Trend (67% Width) + Defect Matrix (33% Width) ─── -->
+        <div style="display:grid;grid-template-columns:minmax(0, 2fr) minmax(0, 1fr);gap:12px;" id="dash-row-1">
 
-            <!-- Tren Chart (Formal Title, PPM/PPB Scale Switcher & Bar/Line Switcher) -->
+            <!-- Tren Chart Multi-Horizon (Tahunan -> Bulanan -> Mingguan/Harian Sunday Anchor) -->
             <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;min-width:0;">
                 <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;">
                     <div>
-                        <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:6px;">
-                            <span><?= $isPassedMode ? 'Tren Kualitas Mutu Yield' : 'Tren Kualitas Defect Rate' ?> (<span id="trendChartUnitText">PPM</span>)</span>
+                        <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                            <svg width="15" height="15" fill="none" stroke="#2563eb" stroke-width="2.5" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                            </svg>
+                            <span><?= $isPassedMode ? 'Tren & Komparasi Kualitas Mutu Yield' : 'Tren & Komparasi Defect Rate' ?> (<span id="trendChartUnitText">PPM</span>)</span>
                             <span id="trendChartBadgeText" class="badge" style="background:#eff6ff;color:#2563eb;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:6px;border:1px solid #bfdbfe;">Parts Per Million</span>
                         </div>
-                        <div style="font-size:10px;color:#94a3b8;margin-top:2px;">
-                            <?= htmlspecialchars($filterTitleDesc ?? (date('d M Y', strtotime($startDate)) . ' – ' . date('d M Y', strtotime($endDate)))) ?> &middot; Agregasi <?= htmlspecialchars($trendSubtext ?? 'per tanggal') ?><?= $selectedCustomer !== '' ? ' &middot; Customer: ' . htmlspecialchars($selectedCustomer) : '' ?>
+                        <div id="trendChartSubDesc" style="font-size:10px;color:#64748b;margin-top:2px;">
+                            <?= htmlspecialchars($multiHorizonData['sub_desc'] ?? 'Komparasi makro-ke-mikro: Tahunan → Bulanan → Mingguan.') ?><?= $selectedCustomer !== '' ? ' &middot; Customer: ' . htmlspecialchars($selectedCustomer) : '' ?>
                         </div>
                     </div>
                     
@@ -1279,6 +1441,18 @@ $initialDashboardVersion = md5(implode('|', [
                             </div>
                         </div>
 
+                        <!-- Selector Resolusi Mikro: Mingguan (W1-W4) vs Harian Siklus Kerja -->
+                        <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Resolusi Periode Mikro Bulan Terpilih">
+                            <button type="button" id="btnTrendResWeekly" onclick="switchTrendResolution('weekly')" 
+                                    style="padding:3px 9px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:#0f172a;color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,0.2);">
+                                Resolusi Mingguan
+                            </button>
+                            <button type="button" id="btnTrendResDaily" onclick="switchTrendResolution('daily')" 
+                                    style="padding:3px 9px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:transparent;color:#64748b;">
+                                Resolusi Harian
+                            </button>
+                        </div>
+
                         <!-- Metric Scale Switcher (PPM vs %) -->
                         <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Skala Pengukuran Kualitas">
                             <button type="button" id="btnMetricPPM" onclick="switchTrendMetricScale('ppm')" style="padding:3px 9px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
@@ -1290,24 +1464,20 @@ $initialDashboardVersion = md5(implode('|', [
                         </div>
 
                         <!-- Bar / Line Switcher Controls -->
-                        <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;">
-                            <button type="button" id="btnChartTypeLine" onclick="switchTrendChartType('line')" style="padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:6px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
-                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
-                                Line
-                            </button>
-                            <button type="button" id="btnChartTypeBar" onclick="switchTrendChartType('bar')" style="padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:6px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:transparent;color:#64748b;">
+                        <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Gaya Visualisasi Grafik">
+                            <button type="button" id="btnChartTypeBar" onclick="switchTrendChartType('bar')" style="padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:6px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
                                 <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                                Bar
+                                Batang
+                            </button>
+                            <button type="button" id="btnChartTypeLine" onclick="switchTrendChartType('line')" style="padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:6px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:transparent;color:#64748b;">
+                                <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+                                Garis
                             </button>
                         </div>
                     </div>
                 </div>
-                <div style="min-height:240px;height:240px;position:relative;">
-                    <?php if (empty($trendLabels)): ?>
-                        <div style="height:100%;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data inspeksi</div>
-                    <?php else: ?>
-                        <canvas id="chartTrendNG" style="width:100%;height:100%;"></canvas>
-                    <?php endif; ?>
+                <div style="min-height:240px;height:240px;position:relative;width:100%;overflow:hidden;" id="trendChartScrollContainer">
+                    <canvas id="chartTrendNG" style="width:100%;height:100%;"></canvas>
                 </div>
             </div>
 
@@ -1319,7 +1489,7 @@ $initialDashboardVersion = md5(implode('|', [
                             <span><?= $isPassedMode ? "Tren Hasil Mutu Harian" : "Tren Defect Harian" ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
                         </div>
                         <div style="font-size:10px;color:#94a3b8;margin-top:2px;">
-                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <?= $selectedTopRank ?> besar/hari
+                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <?= $selectedDefectRank ?> besar/minggu (Tabel Harian)
                         </div>
                     </div>
 
@@ -1337,13 +1507,13 @@ $initialDashboardVersion = md5(implode('|', [
                             </button>
                         </div>
 
-                        <!-- Rank Filter Pills (3, 5, 10) -->
+                        <!-- Rank Filter Pills (1, 3) -->
                         <div style="display:flex;align-items:center;gap:2px;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;" title="Pilih Jumlah Peringkat Teratas">
-                            <?php foreach ([3, 5, 10] as $rNum): 
-                                $isRActive = ($selectedTopRank === $rNum);
-                                $topRankUrl = '?' . http_build_query(array_merge($_GET, ['top_rank' => $rNum]));
+                            <?php foreach ([1, 3] as $rNum): 
+                                $isRActive = ($selectedDefectRank === $rNum);
+                                $defectRankUrl = '?' . http_build_query(array_merge($_GET, ['defect_rank' => $rNum]));
                             ?>
-                                <a href="<?= htmlspecialchars($topRankUrl) ?>"
+                                <a href="<?= htmlspecialchars($defectRankUrl) ?>"
                                    style="padding:2px 7px;border-radius:5px;font-size:10px;font-weight:800;text-decoration:none;transition:all 0.2s;
                                           background:<?= $isRActive ? '#2563eb' : 'transparent' ?>;
                                           color:<?= $isRActive ? '#ffffff' : '#64748b' ?>;
@@ -1356,14 +1526,14 @@ $initialDashboardVersion = md5(implode('|', [
                         <!-- View Switcher (Grafik vs Tabel) -->
                         <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Mode Tampilan">
                             <button type="button" id="btnDefectViewChart" onclick="switchDefectTimelineView('chart')"
-                                    style="padding:3px 8px;font-size:10px;font-weight:800;border-radius:5px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
+                                    style="padding:3px 8px;font-size:10px;font-weight:700;border-radius:5px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:transparent;color:#64748b;">
                                 <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
                                 </svg>
                                 Grafik
                             </button>
                             <button type="button" id="btnDefectViewTable" onclick="switchDefectTimelineView('table')"
-                                    style="padding:3px 8px;font-size:10px;font-weight:700;border-radius:5px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:transparent;color:#64748b;">
+                                    style="padding:3px 8px;font-size:10px;font-weight:800;border-radius:5px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s;background:#ffffff;color:#2563eb;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
                                 <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M3 14h18m-9-4v8m-7 4h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
                                 </svg>
@@ -1377,7 +1547,7 @@ $initialDashboardVersion = md5(implode('|', [
                 <div style="height:240px;min-height:240px;position:relative;">
                     
                     <!-- 1. VIEW GRAFIK (Stacked Bar Chart with Horizontal Scroll Container) -->
-                    <div id="defectTimelineChartView" style="height:100%;width:100%;display:flex;flex-direction:column;">
+                    <div id="defectTimelineChartView" style="height:100%;width:100%;max-width:100%;display:none;flex-direction:column;overflow:hidden;">
                         <?php if (empty($distinctDefectTypes) && !$isPassedMode): ?>
                             <div style="height:100%;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">
                                 Tidak ada catatan defect pada periode ini
@@ -1388,20 +1558,20 @@ $initialDashboardVersion = md5(implode('|', [
                             </div>
                         <?php else: ?>
                             <?php 
-                            $numPoints = count($activeDefectPeriodKeys);
-                            $minCanvasWidth = ($numPoints > 7) ? ($numPoints * 48) : '100%';
-                            $needsScroll = ($numPoints > 7);
+                            $numPoints = count($stackedChartLabels);
                             ?>
-                            <div style="flex:1;min-height:0;width:100%;overflow-x:<?= $needsScroll ? 'auto' : 'hidden' ?>;overflow-y:hidden;position:relative;">
-                                <div style="min-width:<?= is_numeric($minCanvasWidth) ? ($minCanvasWidth . 'px') : $minCanvasWidth ?>;width:100%;height:100%;position:relative;">
-                                    <canvas id="chartDefectStacked"></canvas>
+                            <div style="flex:1;min-height:0;width:100%;max-width:100%;overflow:hidden;position:relative;display:flex;flex-direction:column;">
+                                <div style="flex:1;min-height:0;width:100%;max-width:100%;overflow:hidden;position:relative;">
+                                    <canvas id="chartDefectStacked" style="width:100% !important;max-width:100% !important;height:100% !important;"></canvas>
                                 </div>
+                                <!-- Legend Chips Daftar Defect yang Muncul -->
+                                <div id="defectStackedLegendChips" style="flex-shrink:0;padding-top:4px;display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap;max-width:100%;min-height:24px;overflow:hidden;"></div>
                             </div>
                         <?php endif; ?>
                     </div>
 
                     <!-- 2. VIEW TABEL (Transposed Matrix Table: Rows = Jenis NG, Cols = Tanggal) -->
-                    <div id="defectTimelineTableView" style="height:100%;width:100%;display:none;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;">
+                    <div id="defectTimelineTableView" style="height:100%;width:100%;display:block;overflow:auto;border:1px solid #e2e8f0;border-radius:8px;">
                         <?php if (empty($distinctDefectTypes) && !$isPassedMode): ?>
                             <div style="height:100%;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;">
                                 Tidak ada catatan defect pada periode ini
@@ -1414,7 +1584,7 @@ $initialDashboardVersion = md5(implode('|', [
                             <table style="width:100%;border-collapse:collapse;font-size:10.5px;text-align:left;">
                                 <thead>
                                     <tr style="background:#1e293b;color:#ffffff;font-size:9.5px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;position:sticky;top:0;z-index:3;">
-                                        <th style="padding:6px 10px;white-space:nowrap;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:4;">
+                                        <th style="padding:6px 10px;width:130px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:4;" title="<?= $isPassedMode ? 'Status Hasil Mutu' : 'Jenis Cacat / Defect' ?>">
                                             <?= $isPassedMode ? 'STATUS HASIL' : 'JENIS NG' ?>
                                         </th>
                                         <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;">TOTAL</th>
@@ -1446,7 +1616,7 @@ $initialDashboardVersion = md5(implode('|', [
                                             $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
                                     ?>
                                         <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;" class="hover:bg-blue-50">
-                                            <td style="padding:5px 10px;font-weight:700;color:#1e293b;white-space:nowrap;position:sticky;left:0;background:#ffffff;z-index:2;">
+                                            <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:#ffffff;z-index:2;" title="<?= htmlspecialchars($rpm['label']) ?>">
                                                 <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $rpm['color'] ?>;margin-right:4px;vertical-align:middle;"></span>
                                                 <?= $rpm['label'] ?>
                                             </td>
@@ -1469,8 +1639,8 @@ $initialDashboardVersion = md5(implode('|', [
                                             $rowTotalPcs = (int)($defectTypeTotals[$dname] ?? 0);
                                             $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
-                                            <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;" class="hover:bg-blue-50">
-                                                <td style="padding:5px 10px;font-weight:700;color:#1e293b;white-space:nowrap;position:sticky;left:0;background:#ffffff;z-index:2;">
+                                            <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;cursor:pointer;" class="hover:bg-red-50" onclick="handleDonutLegendClick('defect', '<?= htmlspecialchars($dname, ENT_QUOTES) ?>')" title="Klik untuk memfilter Model & Part yang terdampak <?= htmlspecialchars($dname) ?>">
+                                                <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:inherit;z-index:2;" title="<?= htmlspecialchars($dname) ?>">
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $thColor ?>;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= htmlspecialchars($dname) ?>
                                                 </td>
@@ -1497,7 +1667,7 @@ $initialDashboardVersion = md5(implode('|', [
                                                 $rowTotalOtherPpm = ($grandTotSample > 0) ? round(($rowTotalOtherPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
                                             <tr style="border-bottom:1px solid #f1f5f9;background:#f8fafc;" class="hover:bg-slate-100">
-                                                <td style="padding:5px 10px;font-weight:700;color:#64748b;white-space:nowrap;position:sticky;left:0;background:#f8fafc;z-index:2;">
+                                                <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:inherit;z-index:2;" title="Others (<?= count($otherNDefectTypes) ?> jenis lainnya)">
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:#94a3b8;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= 'Others (' . count($otherNDefectTypes) . ' jenis lainnya)' ?>
                                                 </td>
@@ -1522,7 +1692,7 @@ $initialDashboardVersion = md5(implode('|', [
                                 </tbody>
                                 <tfoot>
                                     <tr style="background:#f8fafc;font-weight:800;border-top:2px solid #cbd5e1;position:sticky;bottom:0;z-index:2;">
-                                        <td style="padding:6px 10px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;">TOTAL</td>
+                                        <td style="padding:6px 10px;width:130px;max-width:130px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">TOTAL</td>
                                         <?php 
                                         $grandSumPcs = 0;
                                         $colSums = [];
@@ -1561,46 +1731,55 @@ $initialDashboardVersion = md5(implode('|', [
 
         </div>
 
-        <!-- Page Break for Clean 2-Page Print Layout -->
-        <div class="print-page-break"></div>
-
         <!-- ── Chart Row 2: Defect Donut + Model Pie + Part Pie (3 Distinct Visual Identities) ─────── -->
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;" id="dash-row-2">
+        <div style="display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:10px;" id="dash-row-2">
 
             <!-- Card 1: Breakdown Jenis Defect / Rasio Yield Status -->
-            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;border-top:3px solid <?= $isPassedMode ? '#059669' : '#ef4444' ?>;">
-                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;gap:8px;">
-                    <div style="width:28px;height:28px;border-radius:8px;background:<?= $isPassedMode ? '#d1fae5' : '#fee2e2' ?>;color:<?= $isPassedMode ? '#059669' : '#dc2626' ?>;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-                        <?php if ($isPassedMode): ?>
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.45 1-1 1H7"/><path d="M14 14.66V17c0 .55.45 1 1 1h2"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
-                        <?php else: ?>
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                        <?php endif; ?>
+            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;min-width:0;border-top:3px solid <?= $isPassedMode ? '#059669' : '#ef4444' ?>;">
+                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:28px;height:28px;border-radius:8px;background:<?= $isPassedMode ? '#d1fae5' : '#fee2e2' ?>;color:<?= $isPassedMode ? '#059669' : '#dc2626' ?>;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                            <?php if ($isPassedMode): ?>
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.45 1-1 1H7"/><path d="M14 14.66V17c0 .55.45 1 1 1h2"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+                            <?php else: ?>
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            <?php endif; ?>
+                        </div>
+                        <div>
+                            <div style="font-size:13px;font-weight:800;color:#1e293b;" id="titleDonutDefect"><?= $isPassedMode ? 'Rasio Status Inspeksi (Yield)' : ('Top <span id="lblRankDefect">5</span> Jenis Defect') ?></div>
+                            <div style="font-size:10px;color:#94a3b8;">Satuan: <?= strtolower($unitText) ?></div>
+                        </div>
                     </div>
-                    <div>
-                        <div style="font-size:13px;font-weight:800;color:#1e293b;"><?= $isPassedMode ? 'Rasio Status Inspeksi (Yield)' : ('Top ' . $selectedTopRank . ' Jenis Defect') ?></div>
-                        <div style="font-size:10px;color:#94a3b8;"><?= $isPassedMode ? 'Perbandingan hasil passed vs rejected' : ($selectedUnit === 'lot' ? 'Distribusi lot terinfeksi cacat' : 'Distribusi kuantitas cacat (pcs)') ?></div>
+                    <!-- Pill Filter Rank Defect [3, 5, 10] -->
+                    <?php if (!$isPassedMode): ?>
+                    <div style="display:inline-flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;gap:2px;" id="pillsRankDefect">
+                        <?php foreach ([3, 5, 10] as $rk): ?>
+                            <button type="button" onclick="changeDonutRank('defect', <?= $rk ?>)" id="btnRankDefect_<?= $rk ?>" style="padding:2px 7px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:<?= $rk === 5 ? '#ef4444' : 'transparent' ?>;color:<?= $rk === 5 ? '#ffffff' : '#64748b' ?>;">
+                                <?= $rk ?>
+                            </button>
+                        <?php endforeach; ?>
                     </div>
+                    <?php endif; ?>
                 </div>
                 <?php if (empty($defectCounts)): ?>
                     <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data</div>
                 <?php else: ?>
                     <div style="display:flex;gap:12px;align-items:center;min-height:160px;">
-                        <div style="width:130px;height:130px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
-                            <canvas id="chartDefect" style="width:100%;height:100%;"></canvas>
+                        <div style="width:142px;height:142px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
+                            <canvas id="chartDefect" style="width:100%;height:100%;cursor:pointer;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
                                 <span style="font-size:8.5px;font-weight:800;color:#94a3b8;text-transform:uppercase;letter-spacing:0.04em;"><?= $isPassedMode ? 'TOTAL' : 'TOTAL NG' ?></span>
-                                <span id="donutDefectTotalVal" style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.1;"><?= number_format(array_sum($defectCounts)) ?></span>
+                                <span id="donutDefectTotalVal" style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.1;"><?= number_format($kpi['total_ng'] ?? 0) ?></span>
                                 <span style="font-size:8.5px;font-weight:700;color:#64748b;"><?= strtolower($unitText) ?></span>
                             </div>
                         </div>
-                        <div id="defectTypeLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
-                            <?php $totalD = array_sum($defectCounts) ?: 1;
+                        <div id="defectTypeLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;overflow-x:hidden;">
+                            <?php $totalSampleSize = (int)($kpi['total_inspected'] ?? 0) ?: 1;
                             foreach ($defectLabels as $di => $dl):
-                                $dpct = round($defectCounts[$di]/$totalD*100,1);
+                                $dpct = round($defectCounts[$di]/$totalSampleSize*100, 2);
                                 $dc   = $DEFECT_PALETTE[$di%count($DEFECT_PALETTE)]; ?>
-                            <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid <?= $dc ?>;">
-                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">
+                            <div onclick="handleDonutLegendClick('defect', '<?= htmlspecialchars($dl, ENT_QUOTES) ?>')" data-legend-type="defect" data-legend-name="<?= htmlspecialchars($dl, ENT_QUOTES) ?>" style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:4px 8px;border-radius:6px;background:#f8fafc;border-left:3.5px solid <?= $dc ?>;cursor:pointer;transition:all 0.15s ease-in-out;border-top:1px solid transparent;border-right:1px solid transparent;border-bottom:1px solid transparent;min-width:0;" class="hover:bg-red-50 hover:shadow-xs group">
+                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;overflow:hidden;">
                                     <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;"><?= htmlspecialchars($dl) ?></span>
                                 </span>
                                 <span style="font-weight:800;color:#0f172a;flex-shrink:0;"><?= number_format($defectCounts[$di]) ?> <span style="font-weight:500;color:#64748b;"><?= strtolower($unitText) ?> (<?= $dpct ?>%)</span></span>
@@ -1612,44 +1791,70 @@ $initialDashboardVersion = md5(implode('|', [
             </div>
 
             <!-- Card 2: Distribusi NG per Model -->
-            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;border-top:3px solid #6366f1;">
-                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;gap:8px;">
-                    <div style="width:28px;height:28px;border-radius:8px;background:#e0e7ff;color:#4f46e5;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
-                    </div>
-                    <div>
-                        <div style="font-size:13px;font-weight:800;color:#1e293b;">
-                            <?php if ($isPassedMode): ?>
-                                <?= "Top {$selectedTopRank} Model (Passed)" ?>
-                            <?php else: ?>
-                                <?= "Top {$selectedTopRank} Model (NG)" ?>
-                            <?php endif; ?>
+            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;min-width:0;border-top:3px solid #6366f1;">
+                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:28px;height:28px;border-radius:8px;background:#e0e7ff;color:#4f46e5;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
                         </div>
-                        <div style="font-size:10px;color:#94a3b8;">Proporsi berdasarkan model produk (<?= strtolower($unitText) ?>)</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:5px;flex-wrap:wrap;" id="titleDonutModel">
+                                <span>Top <span id="lblRankModel">5</span> Model</span>
+                                <span id="badgeHeaderModelFilter" style="display:none;background:#fee2e2;color:#dc2626;border:1px solid #fecaca;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800;align-items:center;gap:4px;">
+                                    <span id="textHeaderModelFilter">Defect</span>
+                                    <button type="button" onclick="clearCascadeFilter('defect')" title="Hapus filter defect" style="background:none;border:none;cursor:pointer;color:#dc2626;font-weight:bold;padding:0 2px;line-height:1;">✕</button>
+                                </span>
+                                <span id="lblModelDefaultMode" style="color:#64748b;font-weight:700;">(<?= $isPassedMode ? 'Passed' : 'NG' ?>)</span>
+                            </div>
+                            <div id="subTitleDonutModel" style="font-size:10px;color:#94a3b8;">Satuan: <?= strtolower($unitText) ?></div>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <!-- Mode Switcher: PCS vs Frekuensi -->
+                        <div style="display:inline-flex;background:#f1f5f9;padding:2px;border-radius:6px;border:1px solid #e2e8f0;gap:2px;" title="Pilih Dasar Satuan: Kuantitas Cacat (PCS) atau Frekuensi Kasus Temuan (x/kali)">
+                            <button type="button" id="btnModelModePcs" onclick="switchModelMetricMode('pcs')" style="padding:2px 8px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:#6366f1;color:#ffffff;box-shadow:0 1px 2px rgba(99,102,241,0.25);transition:all 0.15s;">
+                                PCS
+                            </button>
+                            <button type="button" id="btnModelModeFreq" onclick="switchModelMetricMode('freq')" style="padding:2px 8px;font-size:10px;font-weight:700;border:none;border-radius:4px;cursor:pointer;background:transparent;color:#64748b;transition:all 0.15s;">
+                                X
+                            </button>
+                        </div>
+
+                        <!-- Pill Filter Rank Model [3, 5, 10] -->
+                        <div style="display:inline-flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;gap:2px;" id="pillsRankModel">
+                            <?php foreach ([3, 5, 10] as $rk): ?>
+                                <button type="button" onclick="changeDonutRank('model', <?= $rk ?>)" id="btnRankModel_<?= $rk ?>" style="padding:2px 7px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:<?= $rk === 5 ? '#6366f1' : 'transparent' ?>;color:<?= $rk === 5 ? '#ffffff' : '#64748b' ?>;">
+                                    <?= $rk ?>
+                                </button>
+                            <?php endforeach; ?>
+                        </div>
                     </div>
                 </div>
                 <?php if (empty($modelCounts)): ?>
                     <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data per model</div>
                 <?php else: ?>
                     <div style="display:flex;gap:12px;align-items:center;min-height:160px;">
-                        <div style="width:130px;height:130px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
-                            <canvas id="chartModelPie" style="width:100%;height:100%;"></canvas>
+                        <div style="width:142px;height:142px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
+                            <canvas id="chartModelPie" style="width:100%;height:100%;cursor:pointer;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
-                                <span style="font-size:8.5px;font-weight:800;color:#6366f1;text-transform:uppercase;letter-spacing:0.04em;">MODEL</span>
-                                <span id="donutModelTotalVal" style="font-size:15px;font-weight:900;color:#1e1b4b;line-height:1.1;"><?= count($modelCounts) ?></span>
-                                <span style="font-size:8.5px;font-weight:700;color:#64748b;">tipe</span>
+                                <span style="font-size:8px;font-weight:800;color:#6366f1;text-transform:uppercase;letter-spacing:0.04em;">MODEL</span>
+                                <div style="display:flex;align-items:baseline;justify-content:center;gap:2px;line-height:1;">
+                                    <span id="donutModelTotalVal" style="font-size:15px;font-weight:900;color:#1e1b4b;"><?= $totalDistinctModelsNg ?></span>
+                                    <span style="font-size:8.5px;font-weight:700;color:#64748b;">tipe</span>
+                                </div>
+                                <span id="donutModelQtyVal" style="font-size:8.5px;font-weight:800;color:#4338ca;margin-top:1px;">(<?= number_format(array_sum($modelCounts)) ?> <?= strtolower($unitText) ?>)</span>
                             </div>
                         </div>
-                        <div id="modelLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
-                            <?php $totalM = array_sum($modelCounts) ?: 1;
-                            foreach ($modelLabels as $mi => $ml):
-                                $mpct = round($modelCounts[$mi]/$totalM*100,1);
-                                $mc   = $MODEL_PALETTE[$mi%count($MODEL_PALETTE)]; ?>
-                            <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid <?= $mc ?>;">
-                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">
-                                    <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;"><?= htmlspecialchars($ml) ?></span>
+                        <div id="modelLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;overflow-x:hidden;">
+                            <?php foreach ($modelLabels as $mi => $ml):
+                                $mpct = round($modelCounts[$mi]/$totalSampleSize*100, 2);
+                                $mc   = $MODEL_PALETTE[$mi%count($MODEL_PALETTE)];
+                                $mcases = $modelCases[$mi] ?? 0; ?>
+                            <div onclick="handleDonutLegendClick('model', '<?= htmlspecialchars($ml, ENT_QUOTES) ?>')" data-legend-type="model" data-legend-name="<?= htmlspecialchars($ml, ENT_QUOTES) ?>" data-pcs="<?= (int)$modelCounts[$mi] ?>" data-cases="<?= (int)$mcases ?>" data-pct="<?= $mpct ?>" style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:4px 8px;border-radius:6px;background:#f8fafc;border-left:3.5px solid <?= $mc ?>;cursor:pointer;transition:all 0.15s ease-in-out;border-top:1px solid transparent;border-right:1px solid transparent;border-bottom:1px solid transparent;min-width:0;" class="hover:bg-indigo-50 hover:shadow-xs group">
+                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;overflow:hidden;">
+                                     <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;"><?= htmlspecialchars($ml) ?></span>
                                 </span>
-                                <span style="font-weight:800;color:#0f172a;flex-shrink:0;"><?= number_format($modelCounts[$mi]) ?> <span style="font-weight:500;color:#64748b;"><?= strtolower($unitText) ?> (<?= $mpct ?>%)</span></span>
+                                <span class="model-legend-val" style="font-weight:800;color:#0f172a;flex-shrink:0;"><?= number_format($modelCounts[$mi]) ?> <span style="font-weight:500;color:#64748b;"><?= strtolower($unitText) ?> (<?= $mpct ?>%)</span></span>
                             </div>
                             <?php endforeach; ?>
                         </div>
@@ -1658,41 +1863,54 @@ $initialDashboardVersion = md5(implode('|', [
             </div>
 
             <!-- Card 3: Distribusi NG per Part -->
-            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;border-top:3px solid #0d9488;">
-                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;gap:8px;">
-                    <div style="width:28px;height:28px;border-radius:8px;background:#ccfbf1;color:#0d9488;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-                    </div>
-                    <div>
-                        <div style="font-size:13px;font-weight:800;color:#1e293b;">
-                            <?php if ($isPassedMode): ?>
-                                <?= "Top {$selectedTopRank} Part (Passed)" ?>
-                            <?php else: ?>
-                                <?= "Top {$selectedTopRank} Part (NG)" ?>
-                            <?php endif; ?>
+            <div class="card" style="padding:14px 16px;display:flex;flex-direction:column;min-width:0;border-top:3px solid #0d9488;">
+                <div style="flex-shrink:0;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:28px;height:28px;border-radius:8px;background:#ccfbf1;color:#0d9488;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
                         </div>
-                        <div style="font-size:10px;color:#94a3b8;">Proporsi berdasarkan part (<?= strtolower($unitText) ?>)</div>
+                        <div>
+                            <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:5px;flex-wrap:wrap;" id="titleDonutPart">
+                                <span>Top <span id="lblRankPart">5</span> Part</span>
+                                <span id="badgeHeaderPartFilter" style="display:none;background:#fee2e2;color:#dc2626;border:1px solid #fecaca;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800;align-items:center;gap:4px;">
+                                    <span id="textHeaderPartFilter">Defect</span>
+                                    <button type="button" onclick="clearCascadeFilter('defect')" title="Hapus filter defect" style="background:none;border:none;cursor:pointer;color:#dc2626;font-weight:bold;padding:0 2px;line-height:1;">✕</button>
+                                </span>
+                                <span id="lblPartDefaultMode" style="color:#64748b;font-weight:700;">(<?= $isPassedMode ? 'Passed' : 'NG' ?>)</span>
+                            </div>
+                            <div id="subTitleDonutPart" style="font-size:10px;color:#94a3b8;">Satuan: <?= strtolower($unitText) ?></div>
+                        </div>
+                    </div>
+                    <!-- Pill Filter Rank Part [3, 5, 10] -->
+                    <div style="display:inline-flex;align-items:center;background:#f1f5f9;padding:2px;border-radius:6px;gap:2px;" id="pillsRankPart">
+                        <?php foreach ([3, 5, 10] as $rk): ?>
+                            <button type="button" onclick="changeDonutRank('part', <?= $rk ?>)" id="btnRankPart_<?= $rk ?>" style="padding:2px 7px;font-size:10px;font-weight:800;border:none;border-radius:4px;cursor:pointer;background:<?= $rk === 5 ? '#0d9488' : 'transparent' ?>;color:<?= $rk === 5 ? '#ffffff' : '#64748b' ?>;">
+                                <?= $rk ?>
+                            </button>
+                        <?php endforeach; ?>
                     </div>
                 </div>
                 <?php if (empty($pieCounts)): ?>
                     <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data per part</div>
                 <?php else: ?>
                     <div style="display:flex;gap:12px;align-items:center;min-height:160px;">
-                        <div style="width:130px;height:130px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
-                            <canvas id="chartPartPie" style="width:100%;height:100%;"></canvas>
+                        <div style="width:142px;height:142px;flex-shrink:0;position:relative;display:flex;align-items:center;justify-content:center;">
+                            <canvas id="chartPartPie" style="width:100%;height:100%;cursor:pointer;"></canvas>
                             <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;">
-                                <span style="font-size:8.5px;font-weight:800;color:#0d9488;text-transform:uppercase;letter-spacing:0.04em;">PART</span>
-                                <span id="donutPartTotalVal" style="font-size:15px;font-weight:900;color:#134e4a;line-height:1.1;"><?= count($pieCounts) ?></span>
-                                <span style="font-size:8.5px;font-weight:700;color:#64748b;">item</span>
+                                <span style="font-size:8px;font-weight:800;color:#0d9488;text-transform:uppercase;letter-spacing:0.04em;">PART</span>
+                                <div style="display:flex;align-items:baseline;justify-content:center;gap:2px;line-height:1;">
+                                    <span id="donutPartTotalVal" style="font-size:15px;font-weight:900;color:#134e4a;"><?= $totalDistinctPartsNg ?></span>
+                                    <span style="font-size:8.5px;font-weight:700;color:#64748b;">item</span>
+                                </div>
+                                <span id="donutPartQtyVal" style="font-size:8.5px;font-weight:800;color:#0f766e;margin-top:1px;">(<?= number_format(array_sum($pieCounts)) ?> <?= strtolower($unitText) ?>)</span>
                             </div>
                         </div>
-                        <div id="partLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;">
-                            <?php $totalP = array_sum($pieCounts) ?: 1;
-                            foreach ($pieLabels as $pi => $pl):
-                                $ppct = round($pieCounts[$pi]/$totalP*100,1);
+                        <div id="partLegendContainer" style="flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;max-height:160px;overflow-y:auto;overflow-x:hidden;">
+                            <?php foreach ($pieLabels as $pi => $pl):
+                                $ppct = round($pieCounts[$pi]/$totalSampleSize*100, 2);
                                 $pc   = $PART_PALETTE[$pi%count($PART_PALETTE)]; ?>
-                            <div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid <?= $pc ?>;">
-                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">
+                            <div onclick="handleDonutLegendClick('part', '<?= htmlspecialchars($pl, ENT_QUOTES) ?>')" data-legend-type="part" data-legend-name="<?= htmlspecialchars($pl, ENT_QUOTES) ?>" style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:4px 8px;border-radius:6px;background:#f8fafc;border-left:3.5px solid <?= $pc ?>;cursor:pointer;transition:all 0.15s ease-in-out;border-top:1px solid transparent;border-right:1px solid transparent;border-bottom:1px solid transparent;min-width:0;" class="hover:bg-teal-50 hover:shadow-xs group">
+                                <span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;overflow:hidden;">
                                     <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;"><?= htmlspecialchars($pl) ?></span>
                                 </span>
                                 <span style="font-weight:800;color:#0f172a;flex-shrink:0;"><?= number_format($pieCounts[$pi]) ?> <span style="font-weight:500;color:#64748b;"><?= strtolower($unitText) ?> (<?= $ppct ?>%)</span></span>
@@ -1705,13 +1923,66 @@ $initialDashboardVersion = md5(implode('|', [
 
         </div>
 
+        <!-- ── Section: Riwayat Temuan Cacat Terperinci (Cascading Drilldown Results) ─────── -->
+        <div id="cascadeFindingsSection" class="card" style="display:none;margin-top:10px;padding:16px 18px;border-top:3px solid #2563eb;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;flex-wrap:wrap;gap:8px;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <div style="width:28px;height:28px;border-radius:8px;background:#dbeafe;color:#2563eb;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                    </div>
+                    <div>
+                        <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                            <span>Riwayat Temuan Cacat Inspeksi Terperinci</span>
+                            <span id="badgeFindingsTotalCount" style="background:#1e1b4b;color:#ffffff;padding:2px 10px;border-radius:12px;font-size:10.5px;font-weight:800;letter-spacing:0.02em;box-shadow:0 1px 2px rgba(0,0,0,0.1);">0 Temuan</span>
+                        </div>
+                        <div style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;" id="descFindingsSubtitle">
+                            <span style="font-size:11px;color:#64748b;font-weight:600;">Hasil filter interaktif per jenis cacat, model, dan part</span>
+                        </div>
+                    </div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <input type="text" id="inputSearchFindings" placeholder="Cari part / model / customer / lot..." onkeyup="filterCascadeFindingsTable()" style="padding:4px 10px;font-size:11px;border:1px solid #cbd5e1;border-radius:6px;width:220px;outline:none;">
+                    <button type="button" onclick="closeCascadeFindingsSection()" style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;color:#64748b;cursor:pointer;">
+                        ✕ Tutup
+                    </button>
+                </div>
+            </div>
+
+            <!-- Table Container with Horizontal Scroll -->
+            <div style="overflow-x:auto;max-height:360px;border:1px solid #e2e8f0;border-radius:8px;">
+                <table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;" id="tableCascadeFindings">
+                    <thead>
+                        <tr style="background:#1e293b;color:#ffffff;font-size:9.5px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;position:sticky;top:0;z-index:3;">
+                            <th style="padding:8px 10px;white-space:nowrap;width:35px;">NO</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">TANGGAL & JAM</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">PART CODE & PART NAME</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">MODEL PRODUK</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">INSPEKSI</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">NO KANBAN / CUSTOMER</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">LOT NO / REF</th>
+                            <th style="padding:8px 10px;white-space:nowrap;">QC INSPECTOR</th>
+                            <th style="padding:8px 10px;text-align:right;white-space:nowrap;color:#fbbf24;">JUMLAH TEMUAN</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tbodyCascadeFindings">
+                        <tr>
+                            <td colspan="9" style="padding:20px;text-align:center;color:#94a3b8;">Pilih jenis defect, model, atau part di atas untuk melihat riwayat temuan detail</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Page Break for Clean 2-Page Print Layout (Halaman 1: Ringkasan & Semua Grafik, Halaman 2: Detail Part & Evaluasi) -->
+        <div class="print-page-break"></div>
+
         <!-- ── Section 3: II. WORST PART OQC vs BEST PERFORMANCE PART OQC ─────── -->
         <div id="sectionWorstBestPartsContainer" class="card" style="padding:16px 18px;">
             <?php if ($isPassedMode): ?>
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">
                     <div>
                         <h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;">
-                            <span style="color:#059669;">II.</span> BEST PERFORMANCE PART OQC
+                            <span style="color:#059669;"></span> BEST PERFORMANCE PART OQC
                         </h2>
                     </div>
                     <span style="font-size:11px;font-weight:600;color:#059669;">Top Part & Model Performa Lulus Terbaik</span>
@@ -1730,8 +2001,8 @@ $initialDashboardVersion = md5(implode('|', [
                                     <th style="padding:8px 12px;">PART NAME</th>
                                     <th style="padding:8px 12px;">PART CODE</th>
                                     <th style="padding:8px 12px;">MODEL</th>
-                                    <th style="padding:8px 12px;text-align:center;">LOT CASE</th>
-                                    <th style="padding:8px 12px;text-align:center;">PASSED CASE</th>
+                                    <th style="padding:8px 12px;text-align:center;">LOT CASE (X)</th>
+                                    <th style="padding:8px 12px;text-align:center;">PASSED CASE </th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1769,7 +2040,7 @@ $initialDashboardVersion = md5(implode('|', [
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">
                     <div>
                         <h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;">
-                            <span style="color:#2563eb;">II.</span> WORST PART OQC
+                            <span style="color:#2563eb;"></span> WORST PART OQC
                         </h2>
                     </div>
                     <span style="font-size:11px;font-weight:600;color:#94a3b8;">Breakdown per Defect Area</span>
@@ -1788,8 +2059,8 @@ $initialDashboardVersion = md5(implode('|', [
                                     <th style="padding:8px 12px;">PART NAME</th>
                                     <th style="padding:8px 12px;">PART CODE</th>
                                     <th style="padding:8px 12px;">MODEL</th>
-                                    <th style="padding:8px 12px;text-align:center;">LOT CASE</th>
-                                    <th style="padding:8px 12px;text-align:center;">NG CASE</th>
+                                    <th style="padding:8px 12px;text-align:center;">LOT NG (X)</th>
+                                    <th style="padding:8px 12px;text-align:center;">QTY NG (PCS)</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1880,7 +2151,7 @@ $initialDashboardVersion = md5(implode('|', [
             #filterTypeSelect,
             #modalKpiDrilldown,
             .kpi-clickable-card span[style*="underline"],
-            .kpi-clickable-card svg {
+            .kpi-clickable-card .kpi-drilldown-arrow {
                 display: none !important;
             }
 
@@ -1901,7 +2172,7 @@ $initialDashboardVersion = md5(implode('|', [
             html, body {
                 background: #ffffff !important;
                 color: #0f172a !important;
-                font-size: 8.5pt !important;
+                font-size: 8pt !important;
                 margin: 0 !important;
                 padding: 0 !important;
                 width: 100% !important;
@@ -1935,11 +2206,11 @@ $initialDashboardVersion = md5(implode('|', [
             .card {
                 box-shadow: none !important;
                 border: 1px solid #cbd5e1 !important;
-                border-radius: 8px !important;
+                border-radius: 6px !important;
                 background: #ffffff !important;
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
-                margin-bottom: 8px !important;
+                margin-bottom: 6px !important;
             }
 
             /* 5 Kartu KPI utama terbagi 5 kolom rapi */
@@ -1947,7 +2218,7 @@ $initialDashboardVersion = md5(implode('|', [
                 display: grid !important;
                 grid-template-columns: repeat(5, 1fr) !important;
                 gap: 8px !important;
-                margin-bottom: 10px !important;
+                margin-bottom: 8px !important;
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
             }
@@ -1960,25 +2231,90 @@ $initialDashboardVersion = md5(implode('|', [
                 padding: 6px 8px !important;
             }
 
-            /* Baris Grafik 1: Tren & Top Defect Matrix */
+            /* Baris Grafik 1: Tren & Top Defect Matrix (Diperbesar agar mengisi space) */
             #dash-row-1 {
                 display: grid !important;
                 grid-template-columns: 1.25fr 1fr !important;
-                gap: 10px !important;
+                gap: 8px !important;
+                margin-bottom: 8px !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+            }
+
+            #dash-row-1 > .card {
+                padding: 10px 12px !important;
+                margin-bottom: 0 !important;
+            }
+
+            #trendChartScrollContainer {
+                height: 255px !important;
+                min-height: 255px !important;
+            }
+
+            #chartTrendNG {
+                height: 255px !important;
+                max-height: 255px !important;
+            }
+
+            #dash-row-1 div[style*="height:240px;min-height:240px"] {
+                height: 255px !important;
+                min-height: 255px !important;
+            }
+
+            /* Baris Grafik 2: 3 Donut Charts (Defect, Model, Part) */
+            #dash-row-2 {
+                display: grid !important;
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: 8px !important;
+                margin-top: 0 !important;
                 margin-bottom: 0 !important;
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
             }
 
-            /* Baris Grafik 2: 3 Donut Charts */
-            #dash-row-2 {
-                display: grid !important;
-                grid-template-columns: repeat(3, 1fr) !important;
-                gap: 10px !important;
-                margin-top: 6px !important;
-                margin-bottom: 10px !important;
-                page-break-inside: avoid !important;
-                break-inside: avoid !important;
+            #dash-row-2 > .card {
+                padding: 8px 10px !important;
+                margin-bottom: 0 !important;
+                min-width: 0 !important;
+            }
+
+            #dash-row-2 div[style*="min-height:160px"] {
+                min-height: 145px !important;
+                display: flex !important;
+                align-items: center !important;
+                gap: 8px !important;
+            }
+
+            #dash-row-2 div[style*="width:142px;height:142px"] {
+                width: 125px !important;
+                height: 125px !important;
+                flex-shrink: 0 !important;
+            }
+
+            #dash-row-2 canvas {
+                width: 125px !important;
+                height: 125px !important;
+            }
+
+            /* Tampilkan seluruh Top 10 secara penuh tanpa scrollbar */
+            #dash-row-2 div[id*="LegendContainer"] {
+                max-height: none !important;
+                height: auto !important;
+                overflow: visible !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 2.5px !important;
+            }
+
+            #dash-row-2 div[id*="LegendContainer"] > div {
+                padding: 1.5px 5px !important;
+                font-size: 8.5px !important;
+                border-radius: 4px !important;
+                line-height: 1.25 !important;
+            }
+
+            #dash-row-2 div[id*="LegendContainer"] > div span {
+                font-size: 8.5px !important;
             }
 
             /* Chart & Table Matrix */
@@ -1986,11 +2322,16 @@ $initialDashboardVersion = md5(implode('|', [
                 max-width: 100% !important;
             }
 
-            #defectTimelineChartView,
+            #defectTimelineChartView {
+                overflow: hidden !important;
+                height: 255px !important;
+                max-height: 255px !important;
+            }
+
             #defectTimelineTableView {
                 overflow: visible !important;
-                height: auto !important;
-                max-height: none !important;
+                height: 255px !important;
+                max-height: 255px !important;
             }
 
             /* Tabel evaluasi part */
@@ -2005,2168 +2346,84 @@ $initialDashboardVersion = md5(implode('|', [
             thead {
                 display: table-header-group !important;
             }
+
+            /* Riwayat Temuan Cacat Inspeksi Terperinci (Mode Cetak: Tampilkan Full Tanpa Scroll) */
+            #cascadeFindingsSection {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
+                margin-top: 10px !important;
+            }
+            #cascadeFindingsSection input,
+            #cascadeFindingsSection button {
+                display: none !important;
+            }
+            #cascadeFindingsSection div[style*="max-height:360px"],
+            #cascadeFindingsSection div[style*="max-height: 360px"],
+            #cascadeFindingsSection .overflow-x-auto {
+                max-height: none !important;
+                height: auto !important;
+                overflow: visible !important;
+                border: 1px solid #cbd5e1 !important;
+            }
+            #tableCascadeFindings {
+                width: 100% !important;
+                page-break-inside: auto !important;
+            }
+            #tableCascadeFindings thead tr {
+                position: static !important;
+            }
+            #tableCascadeFindings tr {
+                page-break-inside: avoid !important;
+            }
         }
     </style>
 
     <script src="<?= base_url('assets/js/vendor/chart.min.js') ?>"></script>
     <script>
-    Chart.defaults.font.family = "'system-ui','Segoe UI',sans-serif";
-    Chart.defaults.color       = '#94a3b8';
-    var activeUnit             = '<?= $unitText ?>';
-    var activeSampleBasis      = '<?= $selectedSampleBasis ?>';
-    var isPassedMode           = <?= $isPassedMode ? 'true' : 'false' ?>;
-
-    var currentDashboardVersion = <?= json_encode($initialDashboardVersion) ?>;
-    var filterParams = {
-        customer: <?= json_encode($selectedCustomer) ?>,
-        unit: <?= json_encode($selectedUnit) ?>,
-        sample_basis: <?= json_encode($selectedSampleBasis) ?>,
-        result: <?= json_encode($selectedResult) ?>,
-        filter_type: <?= json_encode($filterType) ?>,
-        preset: <?= json_encode($presetFilter) ?>,
-        month: <?= json_encode($selectedMonth) ?>,
-        year: <?= json_encode($selectedYear) ?>,
-        start_date: <?= json_encode($startDate) ?>,
-        end_date: <?= json_encode($endDate) ?>,
-        top_rank: <?= json_encode($selectedTopRank) ?>
+    window.OQC_DASH_CONFIG = {
+        activeUnit: <?= json_encode($unitText) ?>,
+        activeSampleBasis: <?= json_encode($selectedSampleBasis) ?>,
+        isPassedMode: <?= $isPassedMode ? 'true' : 'false' ?>,
+        totalInspectedKpi: <?= (int)($kpi['total_inspected'] ?? 0) ?>,
+        totalNgKpi: <?= (int)($kpi['total_ng'] ?? 0) ?>,
+        initialTotalModelsNg: <?= (int)$totalDistinctModelsNg ?>,
+        initialTotalPartsNg: <?= (int)$totalDistinctPartsNg ?>,
+        currentDashboardVersion: <?= json_encode($initialDashboardVersion) ?>,
+        filterParams: {
+            customer: <?= json_encode($selectedCustomer) ?>,
+            unit: <?= json_encode($selectedUnit) ?>,
+            sample_basis: <?= json_encode($selectedSampleBasis) ?>,
+            result: <?= json_encode($selectedResult) ?>,
+            filter_type: <?= json_encode($filterType) ?>,
+            preset: <?= json_encode($presetFilter) ?>,
+            month: <?= json_encode($selectedMonth) ?>,
+            year: <?= json_encode($selectedYear) ?>,
+            start_date: <?= json_encode($startDate) ?>,
+            end_date: <?= json_encode($endDate) ?>,
+            top_rank: <?= json_encode($selectedTopRank) ?>,
+            defect_rank: <?= json_encode($selectedDefectRank) ?>
+        },
+        multiHorizonData: <?= $jsMultiHorizon ?>,
+        trendLabelsData: <?= $jsLabels ?>,
+        trendNGData: <?= $jsTrendNG ?>,
+        trendSampleData: <?= $jsTrendSample ?>,
+        globalTargetPpm: <?= (float)$dashboardTargetPpm ?>,
+        modelCasesData: <?= $jsModelCases ?>,
+        stackedDatasetsPcs: <?= $jsStackedDatasetsPcs ?>,
+        stackedDatasetsPpm: <?= $jsStackedDatasetsPpm ?>,
+        stackedLabels: <?= $jsStackedLabels ?>,
+        defectLabels: <?= $jsDefectLabels ?>,
+        defectCounts: <?= $jsDefectCounts ?>,
+        defectColors: <?= $jsDefectColors ?>,
+        modelLabels: <?= $jsModelLabels ?>,
+        modelCounts: <?= $jsModelCounts ?>,
+        modelColors: <?= $jsModelColors ?>,
+        pieLabels: <?= $jsPieLabels ?>,
+        pieCounts: <?= $jsPieCounts ?>,
+        partColors: <?= $jsPartColors ?>
     };
-
-    // ── LocalStorage Caching Engine (Stale-While-Revalidate) ───────────────────
-    function getDashboardCacheKey() {
-        return 'oqc_dash_cache_v2_' + [
-            filterParams.customer || 'all',
-            filterParams.unit || 'pcs',
-            filterParams.sample_basis || 'lot',
-            filterParams.result || 'rejected',
-            filterParams.preset || 'bulanan',
-            filterParams.filter_type || 'default',
-            filterParams.start_date || '',
-            filterParams.end_date || '',
-            filterParams.top_rank || 3
-        ].join('_');
-    }
-
-    function saveDashboardCache(data) {
-        if (!data || data.status !== 'success') return;
-        try {
-            var key = getDashboardCacheKey();
-            var payload = {
-                v: data.version || currentDashboardVersion,
-                time: Date.now(),
-                data: data
-            };
-            localStorage.setItem(key, JSON.stringify(payload));
-
-            // Auto-clean old dashboard cache entries (> 48 jam)
-            if (Math.random() < 0.1) {
-                var now = Date.now();
-                for (var i = 0; i < localStorage.length; i++) {
-                    var k = localStorage.key(i);
-                    if (k && k.indexOf('oqc_dash_cache_') === 0) {
-                        try {
-                            var item = JSON.parse(localStorage.getItem(k));
-                            if (item && item.time && (now - item.time > 48 * 3600 * 1000)) {
-                                localStorage.removeItem(k);
-                            }
-                        } catch (e) {}
-                    }
-                }
-            }
-        } catch (err) {
-            console.warn('[OQC Cache] LocalStorage quota exceeded or error:', err);
-        }
-    }
-
-    function clearDashboardCache() {
-        try {
-            for (var i = localStorage.length - 1; i >= 0; i--) {
-                var k = localStorage.key(i);
-                if (k && k.indexOf('oqc_dash_cache_') === 0) {
-                    localStorage.removeItem(k);
-                }
-            }
-        } catch (e) {}
-    }
-
-    function loadDashboardCache() {
-        try {
-            var key = getDashboardCacheKey();
-            var raw = localStorage.getItem(key);
-            if (!raw) return null;
-            var parsed = JSON.parse(raw);
-            if (parsed && parsed.data && parsed.data.status === 'success') {
-                return parsed;
-            }
-        } catch (e) {}
-        return null;
-    }
-
-    var trendChartInstance          = null;
-    var defectStackedChartInstance  = null;
-    var defectDoughnutChartInstance = null;
-    var modelPieChartInstance       = null;
-    var partPieChartInstance        = null;
-
-    var trendLabelsData        = <?= $jsLabels ?>;
-    var trendNGData            = <?= $jsTrendNG ?>;
-    var trendSampleData        = <?= $jsTrendSample ?>;
-    var globalTargetPpm        = <?= (float)$dashboardTargetPpm ?>;
-    var currentChartType       = localStorage.getItem('oqc_trend_chart_type') || 'line';
-    var currentMetricScale     = localStorage.getItem('oqc_trend_metric_scale') || 'ppm';
-    if (currentMetricScale === 'ppb') currentMetricScale = 'pct';
-
-    function calculateTrendMetricData(scale) {
-        var isPct = (scale === 'pct' || scale === 'percent' || scale === '%');
-        var multiplier = isPct ? 100 : 1000000;
-        return trendLabelsData.map(function(_, idx) {
-            var sample = Number(trendSampleData[idx] || 0);
-            var ng = Number(trendNGData[idx] || 0);
-            if (sample <= 0) return 0;
-            var count = isPassedMode ? Math.max(0, sample - ng) : ng;
-            var val = (count / sample) * multiplier;
-            return isPct ? Math.round(val * 100) / 100 : Math.round(val * 10) / 10;
-        });
-    }
-
-    function initTrendChart(type, scale) {
-        var ctx = document.getElementById('chartTrendNG');
-        if (!ctx) return;
-        
-        type  = type || currentChartType;
-        scale = scale || currentMetricScale;
-
-        if (trendChartInstance) {
-            trendChartInstance.destroy();
-        }
-
-        var isBar       = (type === 'bar');
-        var isPct       = (scale === 'pct' || scale === 'percent' || scale === '%');
-        var scaleUnit   = isPct ? '%' : 'PPM';
-        var metricData  = calculateTrendMetricData(scale);
-
-        var datasetConfig = {
-            label: isPassedMode ? ('Yield Rate (' + scaleUnit + ')') : ('Defect Rate (' + scaleUnit + ')'),
-            data: metricData,
-            borderColor: '<?= $lineColor ?>',
-            backgroundColor: isBar ? '<?= $lineColor ?>' : '<?= $lineBgColor ?>',
-            borderWidth: isBar ? 0 : 2.5,
-            borderRadius: isBar ? 5 : 0,
-            barPercentage: 0.55,
-            categoryPercentage: 0.8,
-            pointBackgroundColor: '<?= $lineColor ?>',
-            pointBorderColor: '#fff',
-            pointBorderWidth: 2,
-            pointRadius: isBar ? 0 : 3.5,
-            pointHoverRadius: 6,
-            fill: !isBar,
-            tension: 0.35,
-            order: 2
-        };
-
-        var allDatasets = [datasetConfig];
-
-        // Garis Merah Target PPM (Hanya tampil saat mode Defect Rate & Skala PPM, atau jika target diset > 0)
-        if (!isPassedMode && !isPct && globalTargetPpm > 0 && trendLabelsData.length > 0) {
-            allDatasets.push({
-                label: 'Batas Target (Maks ' + Number(globalTargetPpm).toLocaleString() + ' PPM)',
-                type: 'line',
-                data: trendLabelsData.map(function() { return globalTargetPpm; }),
-                borderColor: '#ef4444',
-                borderWidth: 2,
-                borderDash: [6, 4],
-                pointRadius: 0,
-                pointHoverRadius: 0,
-                fill: false,
-                tension: 0,
-                order: 1
-            });
-        }
-
-        trendChartInstance = new Chart(ctx, {
-            type: type,
-            data: {
-                labels: trendLabelsData,
-                datasets: allDatasets
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
-                        callbacks: {
-                            label: function(context) {
-                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
-                                    return ' 🎯 Batas Target: ' + Number(context.raw || 0).toLocaleString() + ' PPM';
-                                }
-                                var val = Number(context.raw || 0).toLocaleString(undefined, {minimumFractionDigits: isPct ? 1 : 0, maximumFractionDigits: isPct ? 2 : 1});
-                                return (isPassedMode ? ' Yield Rate: ' : ' Defect Rate: ') + val + (isPct ? '%' : ' PPM');
-                            },
-                            afterLabel: function(context) {
-                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
-                                    return '';
-                                }
-                                var idx = context.dataIndex;
-                                var ng = Number(trendNGData[idx] || 0).toLocaleString();
-                                var sp = Number(trendSampleData[idx] || 0).toLocaleString();
-                                if (activeUnit.toLowerCase() === 'lot') {
-                                    return ' (' + ng + (isPassedMode ? ' lot pass / ' : ' lot reject / ') + sp + ' lot dicek)';
-                                } else {
-                                    var basisText = (activeSampleBasis === 'session') ? ' sample sesi' : ' sample lot';
-                                    return ' (' + ng + (isPassedMode ? ' pass / ' : ' defect / ') + sp + basisText + ' dicek)';
-                                }
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: {
-                        grid: { display: false },
-                        ticks: { font: { size: 10, weight: '600' }, color: '#64748b' }
-                    },
-                    y: {
-                        beginAtZero: true,
-                        grid: { color: '#f1f5f9' },
-                        ticks: {
-                            font: { size: 10 },
-                            color: '#64748b',
-                            callback: function(value) {
-                                return Number(value).toLocaleString() + (isPct ? '%' : '');
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        updateChartSwitcherUI(type);
-        updateMetricSwitcherUI(scale);
-    }
-
-    function toggleTargetPpmModal(e) {
-        if (e && e.stopPropagation) e.stopPropagation();
-        var pop = document.getElementById('popoverTargetPpm');
-        if (!pop) return;
-        var isVisible = (pop.style.display === 'block');
-        pop.style.display = isVisible ? 'none' : 'block';
-        if (!isVisible) {
-            var inp = document.getElementById('inputTargetPpm');
-            if (inp) {
-                setTimeout(function() { inp.focus(); inp.select(); }, 50);
-            }
-        }
-    }
-
-    function closeTargetPpmModal(e) {
-        if (e && e.stopPropagation) e.stopPropagation();
-        var pop = document.getElementById('popoverTargetPpm');
-        if (pop) pop.style.display = 'none';
-    }
-
-    document.addEventListener('click', function(e) {
-        var pop = document.getElementById('popoverTargetPpm');
-        var btn = document.getElementById('btnSetPpmTarget');
-        if (pop && pop.style.display === 'block') {
-            if (!pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
-                pop.style.display = 'none';
-            }
-        }
-    });
-
-    function saveTargetPpm(e, forcedVal) {
-        if (e && e.stopPropagation) e.stopPropagation();
-        if (e && e.preventDefault) e.preventDefault();
-
-        var inp = document.getElementById('inputTargetPpm');
-        var val = (forcedVal !== undefined) ? forcedVal : (inp ? inp.value.trim() : '');
-        var numVal = (val === '' || isNaN(val)) ? 0 : Math.max(0, parseFloat(val));
-        var btn = document.getElementById('btnSaveTargetPpm');
-        var originalBtnText = btn ? btn.textContent : 'Simpan';
-        
-        if (btn) {
-            btn.textContent = '...';
-        }
-
-        var formData = new FormData();
-        formData.append('target_key', 'dashboard_target_ppm');
-        formData.append('target_val', numVal);
-
-        fetch('ajax_save_target.php', {
-            method: 'POST',
-            body: formData
-        })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            if (btn) {
-                btn.textContent = originalBtnText;
-            }
-            if (data && data.success) {
-                globalTargetPpm = Number(data.target_val || 0);
-                if (inp) inp.value = (globalTargetPpm > 0) ? globalTargetPpm : '';
-                var lbl = document.getElementById('lblDisplayTargetPpm');
-                if (lbl) {
-                    lbl.textContent = (globalTargetPpm > 0) ? Number(globalTargetPpm).toLocaleString() : 'Belum Diatur';
-                }
-                closeTargetPpmModal();
-                clearDashboardCache();
-                initTrendChart(currentChartType, currentMetricScale);
-                if (typeof checkLiveHeartbeat === 'function') {
-                    checkLiveHeartbeat();
-                }
-            } else {
-                alert((data && data.message) ? data.message : 'Gagal menyimpan target');
-            }
-        })
-        .catch(function(err) {
-            if (btn) {
-                btn.textContent = originalBtnText;
-            }
-            console.error('Error saving target ppm:', err);
-            alert('Terjadi kesalahan jaringan saat menyimpan target');
-        });
-    }
-
-    function switchTrendChartType(type) {
-        currentChartType = type;
-        localStorage.setItem('oqc_trend_chart_type', type);
-        initTrendChart(type, currentMetricScale);
-    }
-
-    function updateKpiMetricCard(scale) {
-        var totalInspected = <?= (int)$kpi['total_inspected'] ?>;
-        var totalNG = <?= (int)$kpi['total_ng'] ?>;
-        var isPct = (scale === 'pct' || scale === 'percent' || scale === '%');
-        var mult = isPct ? 100 : 1000000;
-        var rate = totalInspected > 0 ? (totalNG / totalInspected) * mult : 0;
-        
-        var valEl = document.getElementById('kpiMetricRateVal');
-        if (valEl) valEl.textContent = rate.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: isPct ? 2 : 1});
-
-        var scaleUnitEl = document.getElementById('kpiMetricScaleLabel');
-        if (scaleUnitEl) scaleUnitEl.textContent = (isPct ? '%' : 'PPM');
-    }
-
-    function switchTrendMetricScale(scale) {
-        currentMetricScale = scale;
-        localStorage.setItem('oqc_trend_metric_scale', scale);
-        
-        var isPct = (scale === 'pct' || scale === 'percent' || scale === '%');
-        var titleUnit = document.getElementById('trendChartUnitText');
-        if (titleUnit) titleUnit.textContent = (isPct ? '%' : 'PPM');
-
-        var badgeText = document.getElementById('trendChartBadgeText');
-        if (badgeText) badgeText.textContent = (isPct ? 'Persentase (%)' : 'Parts Per Million');
-
-        updateKpiMetricCard(scale);
-        initTrendChart(currentChartType, scale);
-    }
-
-    function updateChartSwitcherUI(type) {
-        var btnLine = document.getElementById('btnChartTypeLine');
-        var btnBar  = document.getElementById('btnChartTypeBar');
-        if (!btnLine || !btnBar) return;
-
-        if (type === 'line') {
-            btnLine.style.background = '#ffffff';
-            btnLine.style.color = '#2563eb';
-            btnLine.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
-            btnBar.style.background = 'transparent';
-            btnBar.style.color = '#64748b';
-            btnBar.style.boxShadow = 'none';
-        } else {
-            btnBar.style.background = '#ffffff';
-            btnBar.style.color = '#2563eb';
-            btnBar.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
-            btnLine.style.background = 'transparent';
-            btnLine.style.color = '#64748b';
-            btnLine.style.boxShadow = 'none';
-        }
-    }
-
-    function updateMetricSwitcherUI(scale) {
-        var btnPPM = document.getElementById('btnMetricPPM');
-        var btnPCT = document.getElementById('btnMetricPCT') || document.getElementById('btnMetricPPB');
-        if (!btnPPM || !btnPCT) return;
-
-        var isPct = (scale === 'pct' || scale === 'percent' || scale === '%');
-        if (isPct) {
-            btnPCT.style.background = '#ffffff';
-            btnPCT.style.color = '#2563eb';
-            btnPCT.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
-            btnPPM.style.background = 'transparent';
-            btnPPM.style.color = '#64748b';
-            btnPPM.style.boxShadow = 'none';
-        } else {
-            btnPPM.style.background = '#ffffff';
-            btnPPM.style.color = '#2563eb';
-            btnPPM.style.boxShadow = '0 1px 2px rgba(0,0,0,0.08)';
-            btnPCT.style.background = 'transparent';
-            btnPCT.style.color = '#64748b';
-            btnPCT.style.boxShadow = 'none';
-        }
-    }
-
-    // Initialize KPI Card and Chart with current metric scale
-    updateKpiMetricCard(currentMetricScale);
-
-    <?php if (!empty($trendLabels)): ?>
-    var initBadge = document.getElementById('trendChartBadgeText');
-    var isPctInit = (currentMetricScale === 'pct' || currentMetricScale === 'percent' || currentMetricScale === '%');
-    if (initBadge && isPctInit) {
-        initBadge.textContent = 'Persentase (%)';
-    }
-    var initUnit = document.getElementById('trendChartUnitText');
-    if (initUnit && isPctInit) {
-        initUnit.textContent = '%';
-    }
-    initTrendChart(currentChartType, currentMetricScale);
-    <?php endif; ?>
-
-    // ── Defect Timeline Stacked Chart & View/Metric Switcher ─────────────────
-    var defectStackedChartInstance = null;
-    var currentDefectViewMode      = localStorage.getItem('oqc_defect_view_mode') || 'chart';
-    var currentDefectMetricUnit    = localStorage.getItem('oqc_defect_metric_unit') || 'pcs';
-
-    function initDefectStackedChart() {
-        var ctx = document.getElementById('chartDefectStacked');
-        if (!ctx) return;
-
-        if (defectStackedChartInstance) {
-            defectStackedChartInstance.destroy();
-        }
-
-        var stackedDatasets = (currentDefectMetricUnit === 'ppm') ? <?= $jsStackedDatasetsPpm ?> : <?= $jsStackedDatasetsPcs ?>;
-        var stackedLabels   = <?= $jsStackedLabels ?>;
-
-        defectStackedChartInstance = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: stackedLabels,
-                datasets: stackedDatasets
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                maxBarThickness: 45,
-                categoryPercentage: 0.7,
-                barPercentage: 0.6,
-                interaction: {
-                    mode: 'nearest',
-                    axis: 'xy',
-                    intersect: true
-                },
-                plugins: {
-                    legend: {
-                        display: false
-                    },
-                    tooltip: {
-                        mode: 'nearest',
-                        intersect: true,
-                        backgroundColor: '#0f172a',
-                        titleColor: '#f8fafc',
-                        bodyColor: '#e2e8f0',
-                        padding: 10,
-                        cornerRadius: 8,
-                        filter: function(tooltipItem) {
-                            return Number(tooltipItem.raw || 0) > 0;
-                        },
-                        callbacks: {
-                            title: function(tooltipItems) {
-                                if (!tooltipItems || !tooltipItems.length) return '';
-                                var item = tooltipItems[0];
-                                var val = Number(item.raw || 0).toLocaleString();
-                                var unitStr = (currentDefectMetricUnit === 'ppm') ? 'PPM' : activeUnit.toLowerCase();
-                                var dateLabel = item.label || '';
-                                return dateLabel + ' • ' + item.dataset.label + ' (' + val + ' ' + unitStr + ')';
-                            },
-                            label: function(context) {
-                                var ds = context.dataset;
-                                var lines = [];
-                                var partMeta = (ds.part_meta && ds.part_meta[context.dataIndex]) ? ds.part_meta[context.dataIndex] : null;
-                                if (partMeta && Array.isArray(partMeta) && partMeta.length > 0) {
-                                    partMeta.forEach(function(pm) {
-                                        var pCode = pm.code || '-';
-                                        var pName = pm.name || '-';
-                                        var pQty  = Number(pm.qty || 0).toLocaleString();
-                                        lines.push('  └ Part: ' + pCode + ' (' + pName + ') • NG: ' + pQty + ' ' + activeUnit.toLowerCase());
-                                    });
-                                } else {
-                                    lines.push('  (Tidak ada rincian spesifik part)');
-                                }
-                                return lines;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: {
-                        stacked: true,
-                        grid: { display: false },
-                        ticks: {
-                            font: { size: 9, weight: '600' },
-                            color: '#64748b',
-                            maxRotation: 45,
-                            autoSkip: false
-                        }
-                    },
-                    y: {
-                        stacked: true,
-                        beginAtZero: true,
-                        grid: { color: '#f1f5f9' },
-                        ticks: {
-                            font: { size: 9 },
-                            color: '#64748b',
-                            precision: 0,
-                            callback: function(val) {
-                                return Number(val).toLocaleString() + (currentDefectMetricUnit === 'ppm' ? ' PPM' : '');
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    function switchDefectMetricUnit(unit) {
-        currentDefectMetricUnit = unit;
-        localStorage.setItem('oqc_defect_metric_unit', unit);
-
-        var btnPcs = document.getElementById('btnDefectUnitPcs');
-        var btnPpm = document.getElementById('btnDefectUnitPpm');
-        var badge  = document.getElementById('defectMetricScaleBadge');
-
-        if (badge) badge.textContent = (unit === 'ppm' ? 'PPM' : 'PCS');
-
-        if (btnPcs && btnPpm) {
-            if (unit === 'ppm') {
-                btnPpm.style.background = '#ffffff';
-                btnPpm.style.color = '#2563eb';
-                btnPpm.style.fontWeight = '800';
-                btnPpm.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)';
-
-                btnPcs.style.background = 'transparent';
-                btnPcs.style.color = '#64748b';
-                btnPcs.style.fontWeight = '700';
-                btnPcs.style.boxShadow = 'none';
-            } else {
-                btnPcs.style.background = '#ffffff';
-                btnPcs.style.color = '#2563eb';
-                btnPcs.style.fontWeight = '800';
-                btnPcs.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)';
-
-                btnPpm.style.background = 'transparent';
-                btnPpm.style.color = '#64748b';
-                btnPpm.style.fontWeight = '700';
-                btnPpm.style.boxShadow = 'none';
-            }
-        }
-
-        // Update Chart
-        if (defectStackedChartInstance) {
-            var newDatasets = (unit === 'ppm') ? <?= $jsStackedDatasetsPpm ?> : <?= $jsStackedDatasetsPcs ?>;
-            defectStackedChartInstance.data.datasets = newDatasets;
-            defectStackedChartInstance.update();
-        }
-
-        // Update Table Cells
-        var cells = document.querySelectorAll('.defect-metric-val');
-        cells.forEach(function(cell) {
-            var pcsVal = Number(cell.getAttribute('data-pcs') || 0);
-            var ppmVal = Number(cell.getAttribute('data-ppm') || 0);
-            if (unit === 'ppm') {
-                cell.textContent = ppmVal > 0 ? (ppmVal.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1})) : '-';
-            } else {
-                cell.textContent = pcsVal > 0 ? pcsVal.toLocaleString() : '-';
-            }
-        });
-
-        var totCells = document.querySelectorAll('.defect-metric-total-val');
-        totCells.forEach(function(cell) {
-            var pcsVal = Number(cell.getAttribute('data-pcs') || 0);
-            var ppmVal = Number(cell.getAttribute('data-ppm') || 0);
-            if (unit === 'ppm') {
-                cell.textContent = ppmVal.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1});
-            } else {
-                cell.textContent = pcsVal.toLocaleString();
-            }
-        });
-    }
-
-    function switchDefectTimelineView(mode) {
-        currentDefectViewMode = mode;
-        localStorage.setItem('oqc_defect_view_mode', mode);
-
-        var chartEl  = document.getElementById('defectTimelineChartView');
-        var tableEl  = document.getElementById('defectTimelineTableView');
-        var btnChart = document.getElementById('btnDefectViewChart');
-        var btnTable = document.getElementById('btnDefectViewTable');
-
-        if (!chartEl || !tableEl || !btnChart || !btnTable) return;
-
-        if (mode === 'table') {
-            chartEl.style.display = 'none';
-            tableEl.style.display = 'block';
-
-            btnTable.style.background = '#ffffff';
-            btnTable.style.color = '#2563eb';
-            btnTable.style.fontWeight = '800';
-            btnTable.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)';
-
-            btnChart.style.background = 'transparent';
-            btnChart.style.color = '#64748b';
-            btnChart.style.fontWeight = '700';
-            btnChart.style.boxShadow = 'none';
-        } else {
-            tableEl.style.display = 'none';
-            chartEl.style.display = 'flex';
-
-            btnChart.style.background = '#ffffff';
-            btnChart.style.color = '#2563eb';
-            btnChart.style.fontWeight = '800';
-            btnChart.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)';
-
-            btnTable.style.background = 'transparent';
-            btnTable.style.color = '#64748b';
-            btnTable.style.fontWeight = '700';
-            btnTable.style.boxShadow = 'none';
-
-            if (defectStackedChartInstance) {
-                defectStackedChartInstance.resize();
-            }
-        }
-    }
-
-    <?php if (!empty($stackedChartLabels)): ?>
-    initDefectStackedChart();
-    switchDefectMetricUnit(currentDefectMetricUnit);
-    switchDefectTimelineView(currentDefectViewMode);
-    <?php endif; ?>
-
-    // ── Universal Doughnut Floating Tooltip ───────────────────────────────────
-    var windowMouseX = 0;
-    var windowMouseY = 0;
-    window.addEventListener('mousemove', function(e) {
-        windowMouseX = e.clientX;
-        windowMouseY = e.clientY;
-    }, { passive: true });
-
-    function hideDashDonutTooltip() {
-        var tooltipEl = document.getElementById('chartjs-dash-donut-tooltip');
-        if (tooltipEl) {
-            tooltipEl.style.opacity = '0';
-            tooltipEl.style.display = 'none';
-        }
-    }
-
-    function dashDonutTooltipHandler(context) {
-        var tooltipEl = document.getElementById('chartjs-dash-donut-tooltip');
-
-        if (!tooltipEl) {
-            tooltipEl = document.createElement('div');
-            tooltipEl.id = 'chartjs-dash-donut-tooltip';
-            tooltipEl.style.position = 'fixed';
-            tooltipEl.style.zIndex = '99999';
-            tooltipEl.style.pointerEvents = 'none';
-            tooltipEl.style.background = 'rgba(15, 23, 42, 0.94)';
-            tooltipEl.style.backdropFilter = 'blur(6px)';
-            tooltipEl.style.color = '#ffffff';
-            tooltipEl.style.borderRadius = '8px';
-            tooltipEl.style.padding = '7px 12px';
-            tooltipEl.style.fontSize = '11px';
-            tooltipEl.style.boxShadow = '0 10px 25px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2)';
-            tooltipEl.style.border = '1px solid rgba(255, 255, 255, 0.16)';
-            tooltipEl.style.transition = 'opacity 0.08s ease-out';
-            tooltipEl.style.whiteSpace = 'nowrap';
-            document.body.appendChild(tooltipEl);
-        }
-
-        var tooltipModel = context.tooltip;
-        if (!tooltipModel || tooltipModel.opacity === 0) {
-            tooltipEl.style.opacity = '0';
-            tooltipEl.style.display = 'none';
-            return;
-        }
-
-        if (tooltipModel.body) {
-            var bodyLines = tooltipModel.body.map(function(b) { return b.lines; });
-            var colors = (tooltipModel.labelColors && tooltipModel.labelColors[0]) ? tooltipModel.labelColors[0] : null;
-            var bgColor = colors ? (colors.backgroundColor || '#2563eb') : '#2563eb';
-
-            var html = '';
-            bodyLines.forEach(function(body) {
-                var text = Array.isArray(body) ? body.join(' ') : String(body);
-                html += '<div style="display:flex;align-items:center;gap:7px;">' +
-                        '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:' + bgColor + ';box-shadow:0 0 0 1.5px rgba(255,255,255,0.4);flex-shrink:0;"></span>' +
-                        '<span style="font-weight:800;color:#f8fafc;letter-spacing:0.2px;">' + (typeof escapeHtml === 'function' ? escapeHtml(text.trim()) : text.trim()) + '</span>' +
-                        '</div>';
-            });
-            tooltipEl.innerHTML = html;
-        }
-
-        var canvas = context.chart.canvas;
-        var rect = canvas.getBoundingClientRect();
-
-        tooltipEl.style.display = 'block';
-        tooltipEl.style.opacity = '1';
-
-        var centerX = rect.left + rect.width / 2;
-        var centerY = rect.top + rect.height / 2;
-
-        if (windowMouseX > 0 && windowMouseX >= rect.left && windowMouseX <= rect.right && windowMouseY >= rect.top && windowMouseY <= rect.bottom) {
-            var dy = windowMouseY - centerY;
-            if (dy < 0) {
-                tooltipEl.style.transform = 'translate(-50%, -115%)';
-                tooltipEl.style.top = (windowMouseY - 8) + 'px';
-            } else {
-                tooltipEl.style.transform = 'translate(-50%, 18%)';
-                tooltipEl.style.top = (windowMouseY + 8) + 'px';
-            }
-            tooltipEl.style.left = windowMouseX + 'px';
-        } else {
-            var posX = rect.left + tooltipModel.caretX;
-            var posY = rect.top + tooltipModel.caretY;
-            var dx = posX - centerX;
-            var dy = posY - centerY;
-            var dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < 70) {
-                var angle = Math.atan2(dy, dx);
-                if (dist === 0) angle = -Math.PI / 2;
-                posX = centerX + Math.cos(angle) * 75;
-                posY = centerY + Math.sin(angle) * 75;
-            }
-            if (dy < 0) {
-                tooltipEl.style.transform = 'translate(-50%, -115%)';
-            } else {
-                tooltipEl.style.transform = 'translate(-50%, 18%)';
-            }
-            tooltipEl.style.left = posX + 'px';
-            tooltipEl.style.top = posY + 'px';
-        }
-    }
-
-    <?php if (!empty($defectCounts)): ?>
-    var ctxDef = document.getElementById('chartDefect');
-    if (ctxDef) {
-        defectDoughnutChartInstance = new Chart(ctxDef, {
-            type:'doughnut',
-            data:{ 
-                labels:<?= $jsDefectLabels ?>, 
-                datasets:[{ 
-                    data:<?= $jsDefectCounts ?>, 
-                    backgroundColor:<?= $jsDefectColors ?>, 
-                    borderWidth:2.5, 
-                    borderColor:'#ffffff', 
-                    hoverOffset:5,
-                    borderRadius:4
-                }] 
-            },
-            options:{ 
-                responsive:true, 
-                maintainAspectRatio:false, 
-                cutout:'66%', 
-                plugins:{ 
-                    legend:{display:false}, 
-                    tooltip:{ 
-                        enabled:false,
-                        external:dashDonutTooltipHandler,
-                        callbacks:{ 
-                            label:function(c){ 
-                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                                return c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
-                            } 
-                        } 
-                    } 
-                } 
-            }
-        });
-        ctxDef.onmouseleave = hideDashDonutTooltip;
-    }
-    <?php endif; ?>
-
-    <?php if (!empty($modelCounts)): ?>
-    var ctxMod = document.getElementById('chartModelPie');
-    if (ctxMod) {
-        modelPieChartInstance = new Chart(ctxMod, {
-            type:'doughnut',
-            data:{ 
-                labels:<?= $jsModelLabels ?>, 
-                datasets:[{ 
-                    data:<?= $jsModelCounts ?>, 
-                    backgroundColor:<?= $jsModelColors ?>, 
-                    borderWidth:2.5, 
-                    borderColor:'#ffffff', 
-                    hoverOffset:5,
-                    borderRadius:3
-                }] 
-            },
-            options:{ 
-                responsive:true, 
-                maintainAspectRatio:false, 
-                cutout:'52%', 
-                plugins:{ 
-                    legend:{display:false}, 
-                    tooltip:{ 
-                        enabled:false,
-                        external:dashDonutTooltipHandler,
-                        callbacks:{ 
-                            label:function(c){ 
-                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                                return 'Model '+c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
-                            } 
-                        } 
-                    } 
-                } 
-            }
-        });
-        ctxMod.onmouseleave = hideDashDonutTooltip;
-    }
-    <?php endif; ?>
-
-    <?php if (!empty($pieCounts)): ?>
-    var ctxPart = document.getElementById('chartPartPie');
-    if (ctxPart) {
-        partPieChartInstance = new Chart(ctxPart, {
-            type:'doughnut',
-            data:{ 
-                labels:<?= $jsPieLabels ?>, 
-                datasets:[{ 
-                    data:<?= $jsPieCounts ?>, 
-                    backgroundColor:<?= $jsPartColors ?>, 
-                    borderWidth:2, 
-                    borderColor:'#ffffff', 
-                    hoverOffset:5,
-                    borderRadius:4
-                }] 
-            },
-            options:{ 
-                responsive:true, 
-                maintainAspectRatio:false, 
-                cutout:'74%', 
-                plugins:{ 
-                    legend:{display:false}, 
-                    tooltip:{ 
-                        enabled:false,
-                        external:dashDonutTooltipHandler,
-                        callbacks:{ 
-                            label:function(c){ 
-                                var t=c.dataset.data.reduce(function(a,b){return a+b;},0); 
-                                return 'Part '+c.label+': '+Number(c.raw).toLocaleString()+' '+activeUnit.toLowerCase()+' ('+Math.round(c.raw/t*100)+'%)'; 
-                            } 
-                        } 
-                    } 
-                } 
-            }
-        });
-        ctxPart.onmouseleave = hideDashDonutTooltip;
-    }
-    <?php endif; ?>
-
-    function switchDateFilterMode(mode) {
-        var cMY = document.getElementById('containerMonthYear');
-        var cCD = document.getElementById('containerCustomDate');
-
-        if (cMY) cMY.style.display = (mode === 'month_year') ? 'inline-flex' : 'none';
-        if (cCD) cCD.style.display = (mode === 'custom') ? 'inline-flex' : 'none';
-
-        var custParam = <?= !empty($selectedCustomer) ? json_encode('&customer=' . urlencode($selectedCustomer)) : "''" ?>;
-        var unitParam = '&unit=' + encodeURIComponent('<?= $selectedUnit ?>');
-        var resParam  = '&result=' + encodeURIComponent('<?= $selectedResult ?>');
-
-        if (mode === 'all_years') {
-            window.location.href = '?filter_type=all_years' + unitParam + resParam + custParam;
-        } else if (mode === 'preset') {
-            window.location.href = '?preset=bulanan' + unitParam + resParam + custParam;
-        }
-    }
-
-    function printDashboardReport() {
-        // Refresh & sesuaikan ukuran canvas Chart.js sebelum dialog cetak aktif
-        if (trendChartInstance) {
-            trendChartInstance.resize();
-        }
-        if (defectStackedChartInstance) {
-            defectStackedChartInstance.resize();
-        }
-        setTimeout(function() {
-            window.print();
-        }, 150);
-    }
-
-    function exportDashboardExcel(btn) {
-        var origText = btn ? btn.innerHTML : '';
-        if (btn) {
-            btn.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" style="display:inline-block;vertical-align:-2px;margin-right:6px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>Menyiapkan Excel...';
-            btn.disabled = true;
-        }
-
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = 'export_excel.php';
-        form.style.display = 'none';
-
-        var params = {
-            preset: '<?= htmlspecialchars($presetFilter) ?>',
-            filter_type: '<?= htmlspecialchars($filterType) ?>',
-            month: '<?= htmlspecialchars($selectedMonth) ?>',
-            year: '<?= htmlspecialchars($selectedYear) ?>',
-            customer: '<?= htmlspecialchars($selectedCustomer) ?>',
-            unit: '<?= htmlspecialchars($selectedUnit) ?>',
-            result: '<?= htmlspecialchars($selectedResult) ?>',
-            top_rank: '<?= htmlspecialchars($selectedTopRank) ?>',
-            metric_scale: currentMetricScale,
-            defect_unit: currentDefectMetricUnit,
-            start_date: '<?= htmlspecialchars($startDate) ?>',
-            end_date: '<?= htmlspecialchars($endDate) ?>'
-        };
-
-        for (var k in params) {
-            if (params.hasOwnProperty(k)) {
-                var input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = k;
-                input.value = params[k];
-                form.appendChild(input);
-            }
-        }
-
-        document.body.appendChild(form);
-        form.submit();
-        setTimeout(function() {
-            document.body.removeChild(form);
-            if (btn) {
-                btn.innerHTML = origText;
-                btn.disabled = false;
-            }
-        }, 1500);
-    }
-
-    // ── Universal KPI Drilldown Modal System ──────────────────────────────────
-    var kpiDrilldownCache      = null;
-    var activeKpiTab           = null;
-    var currentKpiGroupingMode = 'part'; // Default: Per Part
-
-    function switchKpiGroupingMode(mode) {
-        currentKpiGroupingMode = mode;
-        updateKpiGroupSwitcherUI();
-        if (kpiDrilldownCache) {
-            renderKpiDrilldownContent(kpiDrilldownCache);
-            var sInput = document.getElementById('kpiModalSearchInput');
-            if (sInput && sInput.value) {
-                filterKpiModalTable(sInput.value);
-            }
-        }
-    }
-
-    function updateKpiGroupSwitcherUI() {
-        var btnPart = document.getElementById('btnKpiGroupPart');
-        var btnCust = document.getElementById('btnKpiGroupCust');
-        if (!btnPart || !btnCust) return;
-
-        if (currentKpiGroupingMode === 'part') {
-            btnPart.style.background = '#ffffff';
-            btnPart.style.color = '#2563eb';
-            btnPart.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
-            btnCust.style.background = 'transparent';
-            btnCust.style.color = '#64748b';
-            btnCust.style.boxShadow = 'none';
-        } else {
-            btnCust.style.background = '#ffffff';
-            btnCust.style.color = '#2563eb';
-            btnCust.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
-            btnPart.style.background = 'transparent';
-            btnPart.style.color = '#64748b';
-            btnPart.style.boxShadow = 'none';
-        }
-    }
-
-    function groupRowsByPart(rawRows, kpiType) {
-        if (!rawRows || !rawRows.length || currentKpiGroupingMode !== 'part') {
-            return rawRows || [];
-        }
-
-        var map = {};
-        var order = [];
-        var grandTotalSample = 0;
-        var grandTotalNg = 0;
-
-        rawRows.forEach(function(r) {
-            var pCode = (r.part_code || '').trim();
-            var key = pCode || ('unassigned_' + Math.random());
-            var sChecked = Number(r.total_sample_checked || 0);
-            var ngPcs = Number(r.total_ng_pcs || 0);
-
-            grandTotalSample += sChecked;
-            grandTotalNg += ngPcs;
-
-            if (!map[key]) {
-                map[key] = {
-                    part_code: r.part_code,
-                    part_name: r.part_name,
-                    model: r.model,
-                    customer_list: [],
-                    total_sessions: 0,
-                    total_lots: 0,
-                    total_sample_checked: 0,
-                    total_ng_pcs: 0,
-                    passed_lots: 0,
-                    rejected_lots: 0
-                };
-                order.push(key);
-            }
-
-            var entry = map[key];
-            if (r.customer && r.customer !== '-' && entry.customer_list.indexOf(r.customer) === -1) {
-                entry.customer_list.push(r.customer);
-            }
-            entry.total_sessions += Number(r.total_sessions || 0);
-            entry.total_lots += Number(r.total_lots || 0);
-            entry.total_sample_checked += sChecked;
-            entry.total_ng_pcs += ngPcs;
-            entry.passed_lots += Number(r.passed_lots || 0);
-            entry.rejected_lots += Number(r.rejected_lots || 0);
-        });
-
-        var grouped = order.map(function(key) {
-            var g = map[key];
-            g.customer = g.customer_list.length ? g.customer_list.join(', ') : '-';
-            g.customer_count = g.customer_list.length;
-
-            if (kpiType === 'sample_inspected') {
-                g.percent_share = grandTotalSample > 0 ? ((g.total_sample_checked / grandTotalSample) * 100).toFixed(1) : '0.0';
-            } else if (kpiType === 'total_ng') {
-                g.ppm = g.total_sample_checked > 0 ? Math.round((g.total_ng_pcs / g.total_sample_checked) * 1000000) : 0;
-                g.percent_share = grandTotalNg > 0 ? ((g.total_ng_pcs / grandTotalNg) * 100).toFixed(1) : '0.0';
-            } else if (kpiType === 'defect_rate') {
-                g.ppm = g.total_sample_checked > 0 ? Math.round((g.total_ng_pcs / g.total_sample_checked) * 1000000) : 0;
-                g.pct = g.total_sample_checked > 0 ? Number(((g.total_ng_pcs / g.total_sample_checked) * 100).toFixed(2)) : 0;
-                if (g.ppm > 10000) {
-                    g.status_badge = 'kritis';
-                } else if (g.ppm > 0) {
-                    g.status_badge = 'waspada';
-                } else {
-                    g.status_badge = 'aman';
-                }
-            } else if (kpiType === 'total_lot') {
-                g.pass_rate = g.total_lots > 0 ? Math.round((g.passed_lots / g.total_lots) * 1000) / 10 : 0;
-            }
-
-            return g;
-        });
-
-        if (kpiType === 'sample_inspected') {
-            grouped.sort(function(a, b) { return b.total_sample_checked - a.total_sample_checked; });
-        } else if (kpiType === 'total_ng') {
-            grouped.sort(function(a, b) { return b.total_ng_pcs - a.total_ng_pcs; });
-        } else if (kpiType === 'defect_rate') {
-            grouped.sort(function(a, b) { return b.ppm - a.ppm; });
-        } else if (kpiType === 'total_lot') {
-            grouped.sort(function(a, b) { return b.total_lots - a.total_lots; });
-        }
-
-        return grouped;
-    }
-
-    function formatCustomerDisplay(r) {
-        if (r.customer_list && r.customer_list.length > 1) {
-            var html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
-            r.customer_list.forEach(function(c) {
-                html += '<span style="display:inline-block;padding:1px 6px;font-size:9.5px;font-weight:700;background:#eff6ff;color:#1e40af;border-radius:4px;border:1px solid #dbeafe;">' + escapeHtml(c) + '</span>';
-            });
-            html += '</div>';
-            return html;
-        }
-        return escapeHtml(r.customer || '-');
-    }
-
-    function openKpiDrilldownModal(kpiType) {
-        var modal = document.getElementById('modalKpiDrilldown');
-        if (!modal) return;
-
-        // Default to Per Part view on open
-        currentKpiGroupingMode = 'part';
-        updateKpiGroupSwitcherUI();
-        activeKpiTab = 'by_part';
-
-        // Reset search input and container
-        var searchInput = document.getElementById('kpiModalSearchInput');
-        if (searchInput) searchInput.value = '';
-
-        var statsContainer = document.getElementById('kpiModalStatsContainer');
-        if (statsContainer) statsContainer.innerHTML = '';
-
-        var tabsContainer = document.getElementById('kpiModalTabsContainer');
-        if (tabsContainer) {
-            tabsContainer.innerHTML = '';
-            tabsContainer.style.display = 'none';
-        }
-
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (bodyEl) {
-            bodyEl.innerHTML = '<div style="padding:48px 16px;text-align:center;color:#64748b;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">' +
-                               '<svg class="w-7 h-7 animate-spin" style="color:#2563eb;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>' +
-                               '<span style="font-size:12.5px;font-weight:700;color:#334155;">Memuat rincian data analitik...</span>' +
-                               '</div>';
-        }
-
-        modal.style.display = 'flex';
-        document.body.style.overflow = 'hidden';
-
-        // Set initial headers based on type
-        var accentBar = document.getElementById('kpiModalAccentBar');
-        var colorMap = {
-            'sample_inspected': '#2563eb',
-            'total_ng':         '#dc2626',
-            'defect_rate':      '#d97706',
-            'total_lot':        '#0284c7',
-            'ng_lot':           '#e11d48',
-            'passed_lot':       '#059669'
-        };
-        if (accentBar) accentBar.style.background = colorMap[kpiType] || '#2563eb';
-
-        // Build query string matching current active filters
-        var qs = new URLSearchParams(window.location.search);
-        qs.set('kpi_type', kpiType);
-        qs.set('metric_scale', currentMetricScale);
-
-        fetch('ajax_kpi_drilldown.php?' + qs.toString(), {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' }
-        })
-        .then(function(res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.json();
-        })
-        .then(function(json) {
-            if (!json.success) {
-                if (bodyEl) bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-size:12px;font-weight:700;">' + (json.message || 'Gagal memuat data.') + '</div>';
-                return;
-            }
-            kpiDrilldownCache = json;
-            renderKpiDrilldownContent(json);
-        })
-        .catch(function(err) {
-            if (bodyEl) {
-                bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-size:12px;font-weight:700;">Terjadi kesalahan saat memuat data: ' + err.message + '</div>';
-            }
-        });
-    }
-
-    function closeKpiDrilldownModal() {
-        var modal = document.getElementById('modalKpiDrilldown');
-        if (modal) modal.style.display = 'none';
-        document.body.style.overflow = '';
-        kpiDrilldownCache = null;
-    }
-
-    // Close on ESC key or backdrop click
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeKpiDrilldownModal();
-    });
-    var modalBackdropEl = document.getElementById('modalKpiDrilldown');
-    if (modalBackdropEl) {
-        modalBackdropEl.addEventListener('click', function(e) {
-            if (e.target === this) closeKpiDrilldownModal();
-        });
-    }
-
-    function renderKpiDrilldownContent(json) {
-        var titleEl    = document.getElementById('kpiModalTitle');
-        var subEl      = document.getElementById('kpiModalSubtitle');
-        var badgePer   = document.getElementById('kpiModalBadgePeriod');
-        var statsEl    = document.getElementById('kpiModalStatsContainer');
-        var tabsEl     = document.getElementById('kpiModalTabsContainer');
-        var bodyEl     = document.getElementById('kpiModalBody');
-
-        if (titleEl)  titleEl.textContent  = json.title || 'Rincian KPI';
-        if (subEl)    subEl.textContent    = json.subtitle || '';
-        if (badgePer) badgePer.textContent = (json.period_label || '') + (json.customer_label && json.customer_label !== 'Semua Customer' ? ' &middot; ' + json.customer_label : '');
-
-        // Render Stats Pills
-        if (statsEl && json.stats && json.stats.length) {
-            var statsHtml = '';
-            json.stats.forEach(function(st) {
-                statsHtml += '<div style="background:#f8fafc;border:1px solid #e2e8f0;padding:6px 12px;border-radius:8px;display:flex;align-items:center;gap:8px;font-size:11px;">' +
-                             '<span style="color:#64748b;font-weight:600;">' + st.label + ':</span>' +
-                             '<span style="font-weight:800;color:' + (st.color || '#0f172a') + ';">' + st.value + '</span>' +
-                             '</div>';
-            });
-            statsEl.innerHTML = statsHtml;
-        }
-
-        // Handle Tabs for total_ng
-        if (json.kpi_type === 'total_ng') {
-            if (tabsEl) {
-                tabsEl.style.display = 'inline-flex';
-                activeKpiTab = activeKpiTab || 'by_part';
-                var tabs = [
-                    { key: 'by_part',   label: 'Rincian per Part' },
-                    { key: 'by_defect', label: 'Rincian per Defect' },
-                    { key: 'by_log',    label: 'Log Temuan Lapangan' }
-                ];
-                var tabsHtml = '';
-                tabs.forEach(function(tb) {
-                    var isAct = (tb.key === activeKpiTab);
-                    tabsHtml += '<button type="button" onclick="switchKpiModalTab(\'' + tb.key + '\')" ' +
-                                'style="padding:3px 10px;font-size:10.5px;font-weight:800;border-radius:6px;border:none;cursor:pointer;transition:all 0.15s;' +
-                                (isAct ? 'background:#ffffff;color:#dc2626;box-shadow:0 1px 2px rgba(0,0,0,0.06);' : 'background:transparent;color:#64748b;') + '">' +
-                                tb.label + '</button>';
-                });
-                tabsEl.innerHTML = tabsHtml;
-            }
-
-            var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
-            if (groupSwitcher) {
-                groupSwitcher.style.display = (activeKpiTab === 'by_part') ? 'inline-flex' : 'none';
-                updateKpiGroupSwitcherUI();
-            }
-
-            renderTotalNgTable(activeKpiTab, json.data);
-            return;
-        }
-
-        // Other KPI Cards: group switcher visibility
-        var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
-        var canGroup = (json.kpi_type === 'sample_inspected' || json.kpi_type === 'defect_rate' || json.kpi_type === 'total_lot');
-        if (groupSwitcher) {
-            groupSwitcher.style.display = canGroup ? 'inline-flex' : 'none';
-            updateKpiGroupSwitcherUI();
-        }
-
-        // Render direct table
-        switch (json.kpi_type) {
-            case 'sample_inspected':
-                renderSampleInspectedTable(json.data);
-                break;
-            case 'defect_rate':
-                renderDefectRateTable(json.data, json.metric_scale);
-                break;
-            case 'total_lot':
-                renderTotalLotTable(json.data);
-                break;
-            case 'ng_lot':
-            case 'passed_lot':
-                renderDetailLotTable(json.data, json.kpi_type === 'passed_lot');
-                break;
-            default:
-                if (bodyEl) bodyEl.innerHTML = '<div style="padding:20px;text-align:center;color:#64748b;">Format data belum didukung.</div>';
-        }
-    }
-
-    function switchKpiModalTab(tabKey) {
-        activeKpiTab = tabKey;
-        if (!kpiDrilldownCache) return;
-
-        // Update visual tab button secara instan
-        var tabsContainer = document.getElementById('kpiModalTabsContainer');
-        if (tabsContainer) {
-            var tabBtns = tabsContainer.querySelectorAll('button');
-            tabBtns.forEach(function(btn) {
-                if (btn.getAttribute('onclick') && btn.getAttribute('onclick').indexOf(tabKey) !== -1) {
-                    btn.style.background = '#ffffff';
-                    btn.style.color = '#dc2626';
-                    btn.style.boxShadow = '0 1px 2px rgba(0,0,0,0.06)';
-                } else {
-                    btn.style.background = 'transparent';
-                    btn.style.color = '#64748b';
-                    btn.style.boxShadow = 'none';
-                }
-            });
-        }
-
-        var groupSwitcher = document.getElementById('kpiModalGroupSwitcher');
-        if (groupSwitcher) {
-            groupSwitcher.style.display = (tabKey === 'by_part') ? 'inline-flex' : 'none';
-        }
-
-        // Lazy load tab Log Temuan jika belum pernah diambil dari backend
-        if (tabKey === 'by_log' && (!kpiDrilldownCache.data || kpiDrilldownCache.data.by_log === null)) {
-            var bodyEl = document.getElementById('kpiModalBody');
-            if (bodyEl) {
-                bodyEl.innerHTML = '<div style="padding:48px 16px;text-align:center;color:#64748b;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">' +
-                                   '<svg class="w-7 h-7 animate-spin" style="color:#dc2626;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>' +
-                                   '<span style="font-size:12.5px;font-weight:700;color:#334155;">Memuat rincian log temuan cacat lapangan...</span>' +
-                                   '</div>';
-            }
-
-            var qs = new URLSearchParams(window.location.search);
-            qs.set('kpi_type', 'total_ng');
-            qs.set('tab', 'by_log');
-            qs.set('metric_scale', currentMetricScale);
-
-            fetch('ajax_kpi_drilldown.php?' + qs.toString(), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            })
-            .then(function(res) { return res.json(); })
-            .then(function(res) {
-                if (res.success && res.data) {
-                    kpiDrilldownCache.data.by_log = res.data;
-                } else {
-                    kpiDrilldownCache.data.by_log = [];
-                }
-                renderKpiDrilldownContent(kpiDrilldownCache);
-                var sInput = document.getElementById('kpiModalSearchInput');
-                if (sInput && sInput.value) {
-                    filterKpiModalTable(sInput.value);
-                }
-            })
-            .catch(function(err) {
-                if (bodyEl) {
-                    bodyEl.innerHTML = '<div style="padding:40px;text-align:center;color:#dc2626;font-size:12px;font-weight:700;">Gagal memuat log temuan: ' + err.message + '</div>';
-                }
-            });
-            return;
-        }
-
-        renderKpiDrilldownContent(kpiDrilldownCache);
-        var sInput = document.getElementById('kpiModalSearchInput');
-        if (sInput && sInput.value) {
-            filterKpiModalTable(sInput.value);
-        }
-    }
-
-    // ── Table Renderers ───────────────────────────────────────────────────────
-    function renderSampleInspectedTable(rows) {
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (!bodyEl) return;
-        rows = groupRowsByPart(rows, 'sample_inspected');
-        if (!rows || !rows.length) {
-            bodyEl.innerHTML = renderEmptyState('Tidak ada data sampel diperiksa pada periode ini.');
-            updateFooterCount(0, 0);
-            return;
-        }
-        var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                   '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                   '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                   '<th style="padding:8px 10px;">KODE PART</th>' +
-                   '<th style="padding:8px 10px;">NAMA PART</th>' +
-                   '<th style="padding:8px 10px;">MODEL</th>' +
-                   '<th style="padding:8px 10px;">CUSTOMER</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">TOTAL SESI</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">TOTAL LOT</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">SAMPEL DICEK (PCS)</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">KONTRIBUSI</th>' +
-                   '</tr></thead><tbody>';
-
-        rows.forEach(function(r, idx) {
-            html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                    '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
-                    '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#334155;">' + Number(r.total_sessions || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#334155;">' + Number(r.total_lots || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:#2563eb;background:#eff6ff;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-weight:700;color:#64748b;">' + (r.percent_share || 0) + '%</td>' +
-                    '</tr>';
-        });
-
-        html += '</tbody></table>';
-        bodyEl.innerHTML = html;
-        updateFooterCount(rows.length, rows.length);
-    }
-
-    function renderTotalNgTable(tabKey, dataObj) {
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (!bodyEl) return;
-        dataObj = dataObj || {};
-
-        if (tabKey === 'by_part') {
-            var rows = groupRowsByPart(dataObj.by_part || [], 'total_ng');
-            if (!rows.length) {
-                bodyEl.innerHTML = renderEmptyState('Tidak ada temuan part reject pada periode ini.');
-                updateFooterCount(0, 0);
-                return;
-            }
-            var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                       '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                       '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                       '<th style="padding:8px 10px;">KODE PART</th>' +
-                       '<th style="padding:8px 10px;">NAMA PART</th>' +
-                       '<th style="padding:8px 10px;">MODEL</th>' +
-                       '<th style="padding:8px 10px;">CUSTOMER</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">SAMPEL DICEK</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">TOTAL NG (PCS)</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">DEFECT RATE</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">KONTRIBUSI</th>' +
-                       '</tr></thead><tbody>';
-
-            rows.forEach(function(r, idx) {
-                html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                        '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                        '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
-                        '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
-                        '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                        '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-family:monospace;color:#64748b;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(r.total_ng_pcs || 0).toLocaleString() + '</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:800;color:#b91c1c;">' + Number(r.ppm || 0).toLocaleString() + ' PPM</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-weight:700;color:#64748b;">' + (r.percent_share || 0) + '%</td>' +
-                        '</tr>';
-            });
-            html += '</tbody></table>';
-            bodyEl.innerHTML = html;
-            updateFooterCount(rows.length, rows.length);
-
-        } else if (tabKey === 'by_defect') {
-            var rows = dataObj.by_defect || [];
-            if (!rows.length) {
-                bodyEl.innerHTML = renderEmptyState('Tidak ada data jenis cacat pada periode ini.');
-                updateFooterCount(0, 0);
-                return;
-            }
-            var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                       '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                       '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                       '<th style="padding:8px 10px;">KODE DEFECT</th>' +
-                       '<th style="padding:8px 10px;">JENIS CACAT / DEFECT</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">TOTAL NG (PCS)</th>' +
-                       '<th style="padding:8px 10px;text-align:center;">LOT TERDAMPAK</th>' +
-                       '<th style="padding:8px 10px;text-align:right;">KONTRIBUSI</th>' +
-                       '</tr></thead><tbody>';
-
-            rows.forEach(function(r, idx) {
-                html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                        '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                        '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#475569;">' + escapeHtml(r.defect_code) + '</td>' +
-                        '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.defect_name) + '</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(r.total_qty_ng || 0).toLocaleString() + '</td>' +
-                        '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#334155;">' + Number(r.total_lots_affected || 0).toLocaleString() + ' lot</td>' +
-                        '<td style="padding:7px 10px;text-align:right;font-weight:700;color:#64748b;">' + (r.percent_share || 0) + '%</td>' +
-                        '</tr>';
-            });
-            html += '</tbody></table>';
-            bodyEl.innerHTML = html;
-            updateFooterCount(rows.length, rows.length);
-
-        } else if (tabKey === 'by_log') {
-            var rows = dataObj.by_log || [];
-            if (!rows.length) {
-                bodyEl.innerHTML = renderEmptyState('Tidak ada catatan temuan inspeksi.');
-                updateFooterCount(0, 0);
-                return;
-            }
-            var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                       '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                       '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                       '<th style="padding:8px 10px;">TANGGAL / WAKTU</th>' +
-                       '<th style="padding:8px 10px;">NO LOT / KANBAN</th>' +
-                       '<th style="padding:8px 10px;">PART</th>' +
-                       '<th style="padding:8px 10px;">JENIS CACAT</th>' +
-                       '<th style="padding:8px 10px;text-align:center;">QTY NG</th>' +
-                       '<th style="padding:8px 10px;">CATATAN / STATUS SORTIR</th>' +
-                       '</tr></thead><tbody>';
-
-            rows.forEach(function(r, idx) {
-                var sortStatus = (r.is_sorted == 1) 
-                    ? '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;">Telah Disortir</span>'
-                    : '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fee2e2;color:#b91c1c;border:1px solid #fecdd3;">Perlu Sortir</span>';
-
-                html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                        '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                        '<td style="padding:7px 10px;white-space:nowrap;color:#475569;font-weight:600;">' + escapeHtml(r.created_at || r.started_at) + '</td>' +
-                        '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.lot_number) + (r.ref_number && r.ref_number !== '-' ? ' <span style="font-size:9.5px;color:#64748b;">(' + escapeHtml(r.ref_number) + ')</span>' : '') + '</td>' +
-                        '<td style="padding:7px 10px;">' +
-                            '<div style="font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</div>' +
-                            '<div style="font-size:9.5px;color:#64748b;font-family:monospace;">' + escapeHtml(r.part_code) + ' &middot; ' + escapeHtml(r.model) + '</div>' +
-                        '</td>' +
-                        '<td style="padding:7px 10px;font-weight:800;color:#b91c1c;">' + escapeHtml(r.defect_name) + '</td>' +
-                        '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(r.qty_ng || 1) + '</td>' +
-                        '<td style="padding:7px 10px;">' +
-                            '<div style="display:flex;align-items:center;gap:6px;">' + sortStatus + ' <span style="color:#64748b;">' + escapeHtml(r.remark || r.sort_notes || '-') + '</span></div>' +
-                        '</td>' +
-                        '</tr>';
-            });
-            html += '</tbody></table>';
-            bodyEl.innerHTML = html;
-            updateFooterCount(rows.length, rows.length);
-        }
-    }
-
-    function renderDefectRateTable(rows, scale) {
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (!bodyEl) return;
-        rows = groupRowsByPart(rows, 'defect_rate');
-        if (!rows || !rows.length) {
-            bodyEl.innerHTML = renderEmptyState('Tidak ada data kualitas per part.');
-            updateFooterCount(0, 0);
-            return;
-        }
-
-        var isPct = (scale === 'pct' || scale === 'percent' || scale === '%');
-        var rateLabel = isPct ? 'DEFECT RATE (%)' : 'DEFECT RATE (PPM)';
-
-        var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                   '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                   '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                   '<th style="padding:8px 10px;">KODE PART</th>' +
-                   '<th style="padding:8px 10px;">NAMA PART</th>' +
-                   '<th style="padding:8px 10px;">MODEL</th>' +
-                   '<th style="padding:8px 10px;">CUSTOMER</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">SAMPEL DICEK</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">TOTAL NG (PCS)</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">' + rateLabel + '</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">STATUS MUTU</th>' +
-                   '</tr></thead><tbody>';
-
-        rows.forEach(function(r, idx) {
-            var badgeHtml = '';
-            if (r.status_badge === 'kritis') {
-                badgeHtml = '<span style="display:inline-block;padding:2px 8px;font-size:10px;font-weight:800;border-radius:5px;background:#fee2e2;color:#b91c1c;border:1px solid #fecdd3;">Kritis</span>';
-            } else if (r.status_badge === 'waspada') {
-                badgeHtml = '<span style="display:inline-block;padding:2px 8px;font-size:10px;font-weight:800;border-radius:5px;background:#fef3c7;color:#b45309;border:1px solid #fde68a;">Waspada</span>';
-            } else {
-                badgeHtml = '<span style="display:inline-block;padding:2px 8px;font-size:10px;font-weight:800;border-radius:5px;background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;">Aman</span>';
-            }
-
-            var rateValStr = isPct 
-                ? (Number(r.pct || 0).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2}) + ' %')
-                : (Number(r.ppm || 0).toLocaleString() + ' PPM');
-
-            html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                    '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
-                    '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-family:monospace;color:#64748b;">' + Number(r.total_sample_checked || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:' + (r.total_ng_pcs > 0 ? '#dc2626' : '#64748b') + ';">' + Number(r.total_ng_pcs || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:' + (r.ppm > 10000 ? '#b91c1c' : (r.ppm > 0 ? '#b45309' : '#059669')) + ';">' + rateValStr + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;">' + badgeHtml + '</td>' +
-                    '</tr>';
-        });
-
-        html += '</tbody></table>';
-        bodyEl.innerHTML = html;
-        updateFooterCount(rows.length, rows.length);
-    }
-
-    function renderTotalLotTable(rows) {
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (!bodyEl) return;
-        rows = groupRowsByPart(rows, 'total_lot');
-        if (!rows || !rows.length) {
-            bodyEl.innerHTML = renderEmptyState('Tidak ada data volume lot.');
-            updateFooterCount(0, 0);
-            return;
-        }
-
-        var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                   '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                   '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                   '<th style="padding:8px 10px;">KODE PART</th>' +
-                   '<th style="padding:8px 10px;">NAMA PART</th>' +
-                   '<th style="padding:8px 10px;">MODEL</th>' +
-                   '<th style="padding:8px 10px;">CUSTOMER</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">TOTAL LOT</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">LOT LOLOS</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">LOT REJECT</th>' +
-                   '<th style="padding:8px 10px;text-align:right;">% KELULUSAN</th>' +
-                   '</tr></thead><tbody>';
-
-        rows.forEach(function(r, idx) {
-            var passRate = Number(r.pass_rate || 0);
-            var passColor = passRate >= 95 ? '#059669' : (passRate >= 80 ? '#d97706' : '#dc2626');
-
-            html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                    '<td style="padding:7px 10px;font-family:monospace;font-weight:700;color:#1e293b;">' + escapeHtml(r.part_code) + '</td>' +
-                    '<td style="padding:7px 10px;font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + escapeHtml(r.model) + '</td>' +
-                    '<td style="padding:7px 10px;color:#475569;">' + formatCustomerDisplay(r) + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:900;color:#0284c7;background:#f0f9ff;">' + Number(r.total_lots || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:700;color:#059669;">' + Number(r.passed_lots || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:700;color:' + (r.rejected_lots > 0 ? '#dc2626' : '#94a3b8') + ';">' + Number(r.rejected_lots || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:right;font-family:monospace;font-weight:900;color:' + passColor + ';">' + passRate + '%</td>' +
-                    '</tr>';
-        });
-
-        html += '</tbody></table>';
-        bodyEl.innerHTML = html;
-        updateFooterCount(rows.length, rows.length);
-    }
-
-    function renderDetailLotTable(rows, isPassed) {
-        var bodyEl = document.getElementById('kpiModalBody');
-        if (!bodyEl) return;
-        if (!rows || !rows.length) {
-            bodyEl.innerHTML = renderEmptyState(isPassed ? 'Tidak ada box/lot lolos.' : 'Tidak ada box/lot berstatus reject.');
-            updateFooterCount(0, 0);
-            return;
-        }
-
-        var html = '<table id="kpiDrilldownDataTable" style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                   '<thead><tr style="background:#1e293b;color:#ffffff;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;">' +
-                   '<th style="padding:8px 10px;text-align:center;width:40px;">NO</th>' +
-                   '<th style="padding:8px 10px;">WAKTU SESI</th>' +
-                   '<th style="padding:8px 10px;">NO LOT</th>' +
-                   '<th style="padding:8px 10px;">NO KANBAN</th>' +
-                   '<th style="padding:8px 10px;">PART</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">QTY BOX</th>' +
-                   '<th style="padding:8px 10px;text-align:center;">SAMPEL</th>' +
-                   (isPassed ? '<th style="padding:8px 10px;text-align:center;">STATUS HASIL</th>' : '<th style="padding:8px 10px;">TEMUAN DEFECT</th><th style="padding:8px 10px;text-align:center;">STATUS LOT</th>') +
-                   '</tr></thead><tbody>';
-
-        rows.forEach(function(r, idx) {
-            var lotStatusBadge = '';
-            if (isPassed) {
-                lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#dcfce7;color:#15803d;border:1px solid #bbf7d0;">Passed OK</span>';
-            } else {
-                if (r.lot_status === 'replaced') {
-                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fef3c7;color:#b45309;border:1px solid #fde68a;">Replaced (Diganti)</span>';
-                } else if (r.lot_status === 'ng_quarantine') {
-                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fee2e2;color:#b91c1c;border:1px solid #fecdd3;">Karantina NG</span>';
-                } else {
-                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#ffe4e6;color:#e11d48;border:1px solid #fecdd3;">Reject</span>';
-                }
-            }
-
-            html += '<tr class="kpi-row-hover" style="border-bottom:1px solid #f1f5f9;">' +
-                    '<td style="padding:7px 10px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                    '<td style="padding:7px 10px;white-space:nowrap;color:#475569;font-weight:600;">' + escapeHtml(r.started_at) + '</td>' +
-                    '<td style="padding:7px 10px;font-family:monospace;font-weight:800;color:#1e293b;">' + escapeHtml(r.lot_number) + '</td>' +
-                    '<td style="padding:7px 10px;font-family:monospace;color:#64748b;">' + escapeHtml(r.ref_number || '-') + '</td>' +
-                    '<td style="padding:7px 10px;">' +
-                        '<div style="font-weight:800;color:#0f172a;">' + escapeHtml(r.part_name) + '</div>' +
-                        '<div style="font-size:9.5px;color:#64748b;font-family:monospace;">' + escapeHtml(r.part_code) + ' &middot; ' + escapeHtml(r.model) + '</div>' +
-                    '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-family:monospace;font-weight:700;color:#334155;">' + Number(r.qty || 0).toLocaleString() + '</td>' +
-                    '<td style="padding:7px 10px;text-align:center;font-family:monospace;color:#64748b;">' + Number(r.sample_size || 0).toLocaleString() + '</td>' +
-                    (isPassed 
-                        ? '<td style="padding:7px 10px;text-align:center;">' + lotStatusBadge + '</td>'
-                        : '<td style="padding:7px 10px;font-weight:800;color:#dc2626;">' + escapeHtml(r.defect_breakdown || r.remarks || 'Temuan Cacat') + '</td><td style="padding:7px 10px;text-align:center;">' + lotStatusBadge + '</td>') +
-                    '</tr>';
-        });
-
-        html += '</tbody></table>';
-        bodyEl.innerHTML = html;
-        updateFooterCount(rows.length, rows.length);
-    }
-
-    // ── Helper Utilities ──────────────────────────────────────────────────────
-    function renderEmptyState(msg) {
-        return '<div style="padding:48px 16px;text-align:center;color:#94a3b8;font-size:12px;background:#f8fafc;border-radius:10px;border:1px dashed #e2e8f0;">' +
-               '<div style="font-weight:700;color:#64748b;">' + escapeHtml(msg) + '</div>' +
-               '</div>';
-    }
-
-    function escapeHtml(str) {
-        if (!str) return '-';
-        return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }
-
-    function updateFooterCount(visibleCount, totalCount) {
-        var fc = document.getElementById('kpiModalFooterCount');
-        if (fc) {
-            if (visibleCount === totalCount) {
-                fc.textContent = 'Menampilkan total ' + totalCount + ' baris data';
-            } else {
-                fc.textContent = 'Menampilkan ' + visibleCount + ' dari total ' + totalCount + ' baris data';
-            }
-        }
-    }
-
-    function filterKpiModalTable(query) {
-        var table = document.getElementById('kpiDrilldownDataTable');
-        if (!table) return;
-        query = (query || '').toLowerCase().trim();
-        var rows = table.querySelectorAll('tbody tr');
-        var visible = 0;
-
-        rows.forEach(function(r) {
-            var text = r.textContent.toLowerCase();
-            if (!query || text.indexOf(query) !== -1) {
-                r.style.display = '';
-                visible++;
-            } else {
-                r.style.display = 'none';
-            }
-        });
-
-        updateFooterCount(visible, rows.length);
-    }
-
-    function exportKpiModalToExcel() {
-        var table = document.getElementById('kpiDrilldownDataTable');
-        if (!table) {
-            alert('Tidak ada data tabel yang dapat diunduh.');
-            return;
-        }
-
-        var btn = document.getElementById('btnExportKpiExcel');
-        var origHtml = btn ? btn.innerHTML : '';
-        if (btn) {
-            btn.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" style="display:inline-block;vertical-align:-2px;margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/></svg>Menyiapkan...';
-            btn.disabled = true;
-        }
-
-        // Ambil Header Tabel
-        var headers = [];
-        var thCols = table.querySelectorAll('thead th');
-        thCols.forEach(function(th) {
-            headers.push((th.innerText || th.textContent || '').trim());
-        });
-
-        // Ambil Baris Tabel (hanya baris yang tidak disembunyikan oleh filter pencarian)
-        var rows = [];
-        var trRows = table.querySelectorAll('tbody tr');
-        trRows.forEach(function(tr) {
-            if (tr.style.display === 'none') return;
-            var tds = tr.querySelectorAll('td');
-            if (!tds || !tds.length) return;
-            var rowVals = [];
-            tds.forEach(function(td) {
-                rowVals.push((td.innerText || td.textContent || '').trim());
-            });
-            rows.push(rowVals);
-        });
-
-        if (!rows.length) {
-            alert('Tidak ada baris data yang terlihat untuk diunduh.');
-            if (btn) {
-                btn.innerHTML = origHtml;
-                btn.disabled = false;
-            }
-            return;
-        }
-
-        var titleEl = document.getElementById('kpiModalTitle');
-        var subEl   = document.getElementById('kpiModalSubtitle');
-        var perEl   = document.getElementById('kpiModalBadgePeriod');
-
-        var form = document.createElement('form');
-        form.method = 'POST';
-        form.action = 'export_kpi_excel.php';
-        form.style.display = 'none';
-
-        var postData = {
-            title: titleEl ? titleEl.textContent : 'Rincian KPI',
-            subtitle: subEl ? subEl.textContent : '',
-            period: perEl ? perEl.textContent : '',
-            active_tab: activeKpiTab || '',
-            stats: JSON.stringify((kpiDrilldownCache && kpiDrilldownCache.stats) ? kpiDrilldownCache.stats : []),
-            headers: JSON.stringify(headers),
-            rows: JSON.stringify(rows)
-        };
-
-        for (var k in postData) {
-            if (postData.hasOwnProperty(k)) {
-                var input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = k;
-                input.value = postData[k];
-                form.appendChild(input);
-            }
-        }
-
-        document.body.appendChild(form);
-        form.submit();
-
-        setTimeout(function() {
-            document.body.removeChild(form);
-            if (btn) {
-                btn.innerHTML = origHtml;
-                btn.disabled = false;
-            }
-        }, 1500);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // ── OQC DASHBOARD REALTIME LIVE ENGINE (SMART HEARTBEAT) ──────────────────
-    // ══════════════════════════════════════════════════════════════════════════
-    var isLiveSyncActive   = true;
-    var liveSyncIntervalMs = 10000; // 10 detik: sangat hemat resource & jaringan
-    var liveSyncTimer      = null;
-    var isFetchingLiveSync = false;
-    var isCheckingHeartbeat = false;
-
-    function animateValue(elemId, endVal) {
-        var el = document.getElementById(elemId);
-        if (!el) return;
-        var startVal = parseInt(el.textContent.replace(/[^0-9]/g, '')) || 0;
-        endVal = parseInt(endVal) || 0;
-        if (startVal === endVal) return;
-
-        var duration = 400;
-        var startTime = performance.now();
-        function step(currentTime) {
-            var progress = Math.min((currentTime - startTime) / duration, 1);
-            var current = Math.floor(progress * (endVal - startVal) + startVal);
-            el.textContent = current.toLocaleString();
-            if (progress < 1) {
-                requestAnimationFrame(step);
-            } else {
-                el.textContent = endVal.toLocaleString();
-            }
-        }
-        requestAnimationFrame(step);
-    }
-
-    function checkLiveHeartbeat() {
-        if (!isLiveSyncActive || isFetchingLiveSync || isCheckingHeartbeat) return;
-        if (document.hidden) return; // Tab sedang di background, hemat resource
-
-        isCheckingHeartbeat = true;
-        var q = new URLSearchParams(filterParams);
-        q.set('v', currentDashboardVersion);
-
-        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-        var fetchTimeout = null;
-        if (controller) {
-            fetchTimeout = setTimeout(function() {
-                controller.abort();
-            }, 5000); // 5s timeout
-        }
-
-        fetch('ajax_heartbeat.php?' + q.toString(), {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            signal: controller ? controller.signal : undefined
-        })
-        .then(function(res) { return res.json(); })
-        .then(function(res) {
-            if (res.status === 'success') {
-                if (res.has_update) {
-                    fetchLatestDashboardData();
-                } else {
-                    var timeEl = document.getElementById('liveSyncLastTime');
-                    if (timeEl && res.server_time) {
-                        timeEl.textContent = res.server_time;
-                    }
-                }
-            }
-        })
-        .catch(function(err) {
-            // Error atau abort tertangani di finally
-        })
-        .finally(function() {
-            if (fetchTimeout) clearTimeout(fetchTimeout);
-            isCheckingHeartbeat = false;
-        });
-    }
-
-    function fetchLatestDashboardData(isForce) {
-        if (isFetchingLiveSync) return;
-        isFetchingLiveSync = true;
-
-        var spinIcon = document.getElementById('iconLiveSyncSpin');
-        if (spinIcon) spinIcon.classList.add('animate-spin');
-
-        var q = new URLSearchParams(filterParams);
-        if (isForce) {
-            q.set('force', '1');
-            q.set('_t', Date.now());
-        }
-
-        var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-        var fetchTimeout = null;
-        if (controller) {
-            fetchTimeout = setTimeout(function() {
-                controller.abort();
-            }, 8000); // 8s timeout
-        }
-
-        fetch('ajax_get_data.php?' + q.toString(), {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            signal: controller ? controller.signal : undefined
-        })
-        .then(function(res) { return res.json(); })
-        .then(function(data) {
-            if (data && data.status === 'success') {
-                saveDashboardCache(data);
-                applyLiveDashboardData(data, false);
-            }
-        })
-        .catch(function(err) {
-            console.error('[OQC Live Sync] Data refresh failed:', err);
-        })
-        .finally(function() {
-            if (fetchTimeout) clearTimeout(fetchTimeout);
-            isFetchingLiveSync = false;
-            if (spinIcon) spinIcon.classList.remove('animate-spin');
-        });
-    }
-
-    function applyLiveDashboardData(d, skipAnim) {
-        if (!d || d.status !== 'success') return;
-
-        // 1. Update version token & clock
-        if (d.version) {
-            currentDashboardVersion = d.version;
-        }
-        var timeEl = document.getElementById('liveSyncLastTime');
-        if (timeEl && d.server_time) {
-            timeEl.textContent = d.server_time;
-        }
-
-        // 2. Animate KPI numbers
-        if (d.kpi) {
-            animateValue('kpi-val-sample_inspected', d.kpi.total_inspected);
-            animateValue('kpi-val-total_ng', d.kpi.total_ng);
-            animateValue('kpi-val-total_lot', d.kpi.total_lot);
-            animateValue('kpi-val-pass_reject_lot', isPassedMode ? d.kpi.pass_count : d.kpi.rejected_count);
-
-            var isPct = (currentMetricScale === 'pct' || currentMetricScale === 'percent' || currentMetricScale === '%');
-            var rateVal = isPct ? (d.kpi.pct_rate || 0) : (d.kpi.ppm_rate || 0);
-            var elRate = document.getElementById('kpiMetricRateVal');
-            if (elRate) {
-                elRate.textContent = Number(rateVal).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: isPct ? 2 : 1});
-            }
-        }
-
-        // Update target PPM if provided
-        if (d.target_ppm !== undefined) {
-            globalTargetPpm = Number(d.target_ppm || 0);
-            var lblTgt = document.getElementById('lblDisplayTargetPpm');
-            if (lblTgt) {
-                lblTgt.textContent = (globalTargetPpm > 0) ? Number(globalTargetPpm).toLocaleString() : 'Belum Diatur';
-            }
-        }
-
-        // 3. Update Trend Chart
-        if (d.trend && trendChartInstance) {
-            trendLabelsData = d.trend.labels || [];
-            trendNGData     = d.trend.ng || [];
-            trendSampleData = d.trend.sample || [];
-            initTrendChart(currentChartType, currentMetricScale);
-        }
-
-        // 4. Update Stacked Defect Timeline Chart
-        if (d.stacked && defectStackedChartInstance) {
-            defectStackedChartInstance.data.labels = d.stacked.labels;
-            defectStackedChartInstance.data.datasets = (currentDefectMetricUnit === 'ppm') ? d.stacked.datasets_ppm : d.stacked.datasets_pcs;
-            defectStackedChartInstance.update();
-        }
-
-        // 5. Update Donut Charts & Legends
-        if (d.defect_types && defectDoughnutChartInstance) {
-            defectDoughnutChartInstance.data.labels = d.defect_types.labels;
-            if (defectDoughnutChartInstance.data.datasets[0]) {
-                defectDoughnutChartInstance.data.datasets[0].data = d.defect_types.counts;
-            }
-            defectDoughnutChartInstance.update();
-            updateDefectLegend(d.defect_types);
-        }
-
-        if (d.pie_model && modelPieChartInstance) {
-            modelPieChartInstance.data.labels = d.pie_model.labels;
-            if (modelPieChartInstance.data.datasets[0]) {
-                modelPieChartInstance.data.datasets[0].data = d.pie_model.counts;
-            }
-            modelPieChartInstance.update();
-            updateModelLegend(d.pie_model);
-        }
-
-        if (d.pie_part && partPieChartInstance) {
-            partPieChartInstance.data.labels = d.pie_part.labels;
-            if (partPieChartInstance.data.datasets[0]) {
-                partPieChartInstance.data.datasets[0].data = d.pie_part.counts;
-            }
-            partPieChartInstance.update();
-            updatePartLegend(d.pie_part);
-        }
-
-        // 6. Update Worst / Best Parts Section
-        if (d.worst_parts) {
-            updateWorstBestPartsSection(d.worst_parts);
-        }
-    }
-
-    function updateDefectLegend(dt) {
-        var elTotal = document.getElementById('donutDefectTotalVal');
-        var elList  = document.getElementById('defectTypeLegendContainer');
-        var counts  = dt.counts || [];
-        var labels  = dt.labels || [];
-        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
-        if (elTotal) elTotal.textContent = sum.toLocaleString();
-        if (!elList) return;
-
-        var html = '';
-        var pal = isPassedMode ? ['#059669', '#dc2626', '#3b82f6', '#f59e0b', '#8b5cf6', '#06b6d4', '#10b981', '#6366f1'] : ['#ef4444', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899', '#3b82f6', '#10b981', '#f97316', '#64748b', '#14b8a6'];
-        labels.forEach(function(l, i) {
-            var c = counts[i] || 0;
-            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
-            var col = pal[i % pal.length];
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
-                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
-                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
-                    '</span>' +
-                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
-                    '</div>';
-        });
-        elList.innerHTML = html;
-    }
-
-    function updateModelLegend(mp) {
-        var elTotal = document.getElementById('donutModelTotalVal');
-        var elList  = document.getElementById('modelLegendContainer');
-        var counts  = mp.counts || [];
-        var labels  = mp.labels || [];
-        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
-        if (elTotal) elTotal.textContent = counts.length;
-        if (!elList) return;
-
-        var html = '';
-        var pal = ['#6366f1', '#0ea5e9', '#3b82f6', '#8b5cf6', '#475569', '#06b6d4', '#2563eb', '#1e293b', '#64748b', '#0284c7'];
-        labels.forEach(function(l, i) {
-            var c = counts[i] || 0;
-            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
-            var col = pal[i % pal.length];
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
-                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
-                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
-                    '</span>' +
-                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
-                    '</div>';
-        });
-        elList.innerHTML = html;
-    }
-
-    function updatePartLegend(pp) {
-        var elTotal = document.getElementById('donutPartTotalVal');
-        var elList  = document.getElementById('partLegendContainer');
-        var counts  = pp.counts || [];
-        var labels  = pp.labels || [];
-        var sum     = counts.reduce(function(a, b) { return a + b; }, 0);
-        if (elTotal) elTotal.textContent = counts.length;
-        if (!elList) return;
-
-        var html = '';
-        var pal = ['#0d9488', '#10b981', '#f59e0b', '#f43f5e', '#7c3aed', '#0284c7', '#d97706', '#64748b', '#ec4899', '#3b82f6'];
-        labels.forEach(function(l, i) {
-            var c = counts[i] || 0;
-            var pct = sum > 0 ? (c / sum * 100).toFixed(1) : 0;
-            var col = pal[i % pal.length];
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;font-size:10.5px;gap:6px;padding:3px 6px;border-radius:6px;background:#f8fafc;border-left:2.5px solid ' + col + ';">' +
-                    '<span style="display:flex;align-items:center;gap:5px;color:#334155;flex:1;min-width:0;">' +
-                    '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:700;">' + escapeHtml(l) + '</span>' +
-                    '</span>' +
-                    '<span style="font-weight:800;color:#0f172a;flex-shrink:0;">' + c.toLocaleString() + ' <span style="font-weight:500;color:#64748b;">' + activeUnit.toLowerCase() + ' (' + pct + '%)</span></span>' +
-                    '</div>';
-        });
-        elList.innerHTML = html;
-    }
-
-    function updateWorstBestPartsSection(wb) {
-        var wrapper = document.getElementById('sectionWorstBestPartsContainer');
-        if (!wrapper) return;
-
-        var html = '';
-        if (wb.is_passed) {
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">' +
-                    '<div><h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;"><span style="color:#059669;">II.</span> BEST PERFORMANCE PART OQC</h2></div>' +
-                    '<span style="font-size:11px;font-weight:600;color:#059669;">Top Part &amp; Model Performa Lulus Terbaik</span>' +
-                    '</div>';
-
-            var best = wb.best || [];
-            if (best.length === 0) {
-                html += '<div style="padding:30px 0;text-align:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data part lulus pada periode ini.</div>';
-            } else {
-                html += '<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;">' +
-                        '<table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                        '<thead><tr style="background:#065f46;color:#ffffff;font-weight:800;font-size:10px;text-transform:uppercase;letter-spacing:.05em;">' +
-                        '<th style="padding:8px 12px;text-align:center;width:45px;">NO</th><th style="padding:8px 12px;">PART NAME</th><th style="padding:8px 12px;">PART CODE</th><th style="padding:8px 12px;">MODEL</th><th style="padding:8px 12px;text-align:center;">LOT CASE</th><th style="padding:8px 12px;text-align:center;">PASSED CASE</th>' +
-                        '</tr></thead><tbody>' +
-                        '<tr style="background:#ecfdf5;border-top:1px solid #a7f3d0;border-bottom:1px solid #a7f3d0;"><td colspan="6" style="padding:6px 12px;font-weight:900;color:#047857;font-size:11px;text-transform:uppercase;letter-spacing:.04em;">TOP PASSED PART &amp; MODEL PERFORMANCE</td></tr>';
-
-                best.forEach(function(b, idx) {
-                    html += '<tr style="border-bottom:1px solid #f1f5f9;" class="hover:bg-slate-50">' +
-                            '<td style="padding:8px 12px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                            '<td style="padding:8px 12px;font-weight:800;color:#0f172a;">' + escapeHtml(b.part_name) + '</td>' +
-                            '<td style="padding:8px 12px;font-family:monospace;color:#475569;">' + escapeHtml(b.part_code) + '</td>' +
-                            '<td style="padding:8px 12px;color:#475569;">' + escapeHtml(b.model) + '</td>' +
-                            '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:700;color:#334155;">' + Number(b.lot_case || 0).toLocaleString() + '</td>' +
-                            '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:900;color:#059669;background:#ecfdf5;">' + Number(b.passed_lot_case || 0).toLocaleString() + '</td>' +
-                            '</tr>';
-                });
-                html += '</tbody></table></div>';
-                html += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:10px 14px;"><span style="font-size:12px;font-weight:900;color:#166534;">Conclusion : </span><span style="font-size:12px;font-weight:700;color:#15803d;">3 best performing parts are <span style="font-weight:900;color:#0f172a;">' + escapeHtml(wb.summary_str) + '</span></span></div>';
-            }
-        } else {
-            html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">' +
-                    '<div><h2 style="font-size:14px;font-weight:900;color:#1e293b;letter-spacing:.02em;text-transform:uppercase;margin:0;display:flex;align-items:center;gap:6px;"><span style="color:#2563eb;">II.</span> WORST PART OQC</h2></div>' +
-                    '<span style="font-size:11px;font-weight:600;color:#94a3b8;">Breakdown per Defect Area</span>' +
-                    '</div>';
-
-            var grouped = wb.grouped || {};
-            var keys = Object.keys(grouped);
-            if (keys.length === 0) {
-                html += '<div style="padding:30px 0;text-align:center;color:#cbd5e1;font-size:11px;background:#f8fafc;border-radius:8px;border:1px dashed #e2e8f0;">Belum ada data part terburuk pada periode ini.</div>';
-            } else {
-                html += '<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:12px;">' +
-                        '<table style="width:100%;border-collapse:collapse;font-size:11px;text-align:left;">' +
-                        '<thead><tr style="background:#1e293b;color:#ffffff;font-weight:800;font-size:10px;text-transform:uppercase;letter-spacing:.05em;">' +
-                        '<th style="padding:8px 12px;text-align:center;width:45px;">NO</th><th style="padding:8px 12px;">PART NAME</th><th style="padding:8px 12px;">PART CODE</th><th style="padding:8px 12px;">MODEL</th><th style="padding:8px 12px;text-align:center;">LOT CASE</th><th style="padding:8px 12px;text-align:center;">NG CASE</th>' +
-                        '</tr></thead><tbody>';
-
-                keys.forEach(function(dCat) {
-                    html += '<tr style="background:#fff1f2;border-top:1px solid #fecdd3;border-bottom:1px solid #fecdd3;"><td colspan="6" style="padding:6px 12px;font-weight:900;color:#be123c;font-size:11px;text-transform:uppercase;letter-spacing:.04em;">' + escapeHtml(dCat) + '</td></tr>';
-                    var pList = grouped[dCat] || [];
-                    pList.forEach(function(p, idx) {
-                        html += '<tr style="border-bottom:1px solid #f1f5f9;" class="hover:bg-slate-50">' +
-                                '<td style="padding:8px 12px;text-align:center;font-weight:700;color:#94a3b8;">' + (idx + 1) + '</td>' +
-                                '<td style="padding:8px 12px;font-weight:800;color:#0f172a;">' + escapeHtml(p.part_name) + '</td>' +
-                                '<td style="padding:8px 12px;font-family:monospace;color:#475569;">' + escapeHtml(p.part_code) + '</td>' +
-                                '<td style="padding:8px 12px;color:#475569;">' + escapeHtml(p.model) + '</td>' +
-                                '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:700;color:#334155;">' + Number(p.lot_case || 0).toLocaleString() + '</td>' +
-                                '<td style="padding:8px 12px;text-align:center;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">' + Number(p.ng_case || 0).toLocaleString() + '</td>' +
-                                '</tr>';
-                    });
-                });
-                html += '</tbody></table></div>';
-                html += '<div style="background:#eff6ff;border:1px solid #dbeafe;border-radius:10px;padding:10px 14px;"><span style="font-size:12px;font-weight:900;color:#1e40af;">Conclusion : </span><span style="font-size:12px;font-weight:700;color:#1d4ed8;">3 worst parts are <span style="font-weight:900;color:#0f172a;">' + escapeHtml(wb.summary_str) + '</span></span></div>';
-            }
-        }
-        wrapper.innerHTML = html;
-    }
-
-    function resetLiveSyncTimer() {
-        if (liveSyncTimer) clearInterval(liveSyncTimer);
-        liveSyncTimer = setInterval(checkLiveHeartbeat, liveSyncIntervalMs);
-    }
-
-    function manualSyncNow() {
-        var btn = document.getElementById('btnLiveSyncManual');
-        if (btn) {
-            btn.style.opacity = '0.6';
-            btn.style.pointerEvents = 'none';
-        }
-        // Force refresh langsung ke server (bypass server query cache & client cache)
-        fetchLatestDashboardData(true);
-        setTimeout(function() {
-            if (btn) {
-                btn.style.opacity = '1';
-                btn.style.pointerEvents = 'auto';
-            }
-        }, 1200);
-    }
-
-    document.addEventListener('visibilitychange', function() {
-        if (!document.hidden && isLiveSyncActive) {
-            checkLiveHeartbeat();
-        }
-    });
-
-    // ── Instant Cache Hydration & Start Realtime Live Sync ────────────────────
-    (function initDashboardCacheAndRealtime() {
-        var cached = loadDashboardCache();
-        if (cached && cached.data) {
-            // Jika ada cache lokal, terapkan seketika dalam 0 ms
-            applyLiveDashboardData(cached.data, true);
-        }
-        resetLiveSyncTimer();
-    })();
     </script>
+    <script src="<?= base_url('assets/js/modules/dashboard.js?v=' . filemtime(__DIR__ . '/../../assets/js/modules/dashboard.js')) ?>" defer></script>
 
     <!-- ── Universal KPI Drilldown Modal Container ──────────────────────────── -->
     <div id="modalKpiDrilldown" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:16px;">

@@ -104,12 +104,13 @@ if (isset($_FILES['file_3d']) && $_FILES['file_3d']['error'] === UPLOAD_ERR_OK) 
     }
 }
 
-// Handle 4 QC Documents (PI, Q-Point, PAC, Standar Packing) -> Multi-Versi Cerdas & Tidak Menimpa Versi Lama
+// Handle 5 QC Documents (PI, Q-Point, PAC, Standar Packing, Monitoring Model) -> Multi-Versi Cerdas & Tidak Menimpa Versi Lama
 $qcDocConfigs = [
     'file_pi'              => ['type' => 'pi',              'label' => 'Process Inspection (PI)'],
     'file_qpoint'          => ['type' => 'qpoint',          'label' => 'Quality Point (Q-Point)'],
     'file_pac'             => ['type' => 'pac',             'label' => 'Part Approval Certificate (PAC)'],
-    'file_standar_packing' => ['type' => 'standar_packing', 'label' => 'Standar Packing']
+    'file_standar_packing' => ['type' => 'standar_packing', 'label' => 'Standar Packing'],
+    'file_mi'              => ['type' => 'mi',              'label' => 'Monitoring Model (MI)']
 ];
 
 foreach ($qcDocConfigs as $inputKey => $cfg) {

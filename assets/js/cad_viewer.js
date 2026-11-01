@@ -411,13 +411,20 @@
 
         function showError(msg) {
             if (loadingOverlay) {
+                var is404 = msg && (msg.indexOf('404') !== -1 || msg.indexOf('tidak ditemukan') !== -1);
+                var friendlyTitle = is404 ? 'File 3D (.STP) Tidak Ditemukan' : 'Gagal Memuat Model 3D CAD';
+                var friendlyDesc = is404 
+                    ? 'File model 3D belum tersedia di folder server.'
+                    : (msg || 'Terjadi kesalahan saat memproses file 3D.');
+
                 loadingOverlay.innerHTML = [
-                    '<div style="display:flex; flex-direction:column; align-items:center; gap:8px; padding:20px; text-align:center;">',
-                    '  <svg style="width:36px; height:36px; color:#f87171;" fill="none" stroke="currentColor" viewBox="0 0 24 24">',
-                    '    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>',
-                    '  </svg>',
-                    '  <div style="font-size:12px; font-weight:bold; color:#f87171; font-family:sans-serif;">' + msg + '</div>',
-                    '  <button id="cad-retry-btn" class="btn-secondary py-1 px-3 text-xs mt-2" style="background:#334155; color:#fff; border:none; cursor:pointer; border-radius:6px;">Ulangi</button>',
+                    '<div style="display:flex; flex-direction:column; align-items:center; gap:8px; padding:24px; text-align:center; max-width:380px;">',
+                    '  <div style="width:48px; height:48px; border-radius:12px; background:rgba(6, 182, 212, 0.1); border:1px solid rgba(6, 182, 212, 0.2); display:flex; align-items:center; justify-content:center; margin-bottom:4px;">',
+                    '    <svg style="width:26px; height:26px; color:#38bdf8;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>',
+                    '  </div>',
+                    '  <div style="font-size:13px; font-weight:700; color:#f1f5f9; font-family:sans-serif;">' + friendlyTitle + '</div>',
+                    '  <div style="font-size:11px; color:#94a3b8; font-family:sans-serif; line-height:1.5;">' + friendlyDesc + '</div>',
+                    '  <button id="cad-retry-btn" class="btn-secondary py-1 px-3.5 text-xs font-bold mt-2" style="background:#1e293b; color:#38bdf8; border:1px solid #334155; cursor:pointer; border-radius:8px;">Coba Muat Ulang</button>',
                     '</div>'
                 ].join('');
 

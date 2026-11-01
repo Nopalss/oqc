@@ -5,14 +5,18 @@ require_once __DIR__ . '/../../config/helper.php';
 
 require_menu_access('did');
 
+// Generate CSRF token while session is active, then release session lock immediately
+$csrfToken = generate_csrf_token();
+session_write_close();
+
 // Use $_GET directly — PDO prepared statements prevent SQL injection, sanitize only for display
 $batch_id = isset($_GET['batch_id']) ? (int)$_GET['batch_id'] : 0;
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $statusFilter = isset($_GET['status']) ? trim($_GET['status']) : '';
 
-// Dynamic Limit for Server-Side Pagination
+// Dynamic Limit for Server-Side Pagination (Max 100 to prevent DOM/Memory bloat on 4GB client PCs)
 $limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 25;
-if (!in_array($limit, [10, 25, 50, 100, 250])) {
+if (!in_array($limit, [10, 25, 50, 100])) {
     $limit = 25;
 }
 
@@ -56,10 +60,14 @@ if ($batch_id > 0 && $pdo) {
 
             $whereSql = implode(' AND ', $whereClauses);
 
-            // Count total items matching filter
-            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM daily_inspection_data WHERE {$whereSql}");
-            $countStmt->execute($params);
-            $totalItems = (int)$countStmt->fetchColumn();
+            // Count total items matching filter (Optimized: bypass COUNT(*) when unfiltered)
+            if ($search === '' && $statusFilter === '' && isset($batch['total_items']) && (int)$batch['total_items'] >= 0) {
+                $totalItems = (int)$batch['total_items'];
+            } else {
+                $countStmt = $pdo->prepare("SELECT COUNT(*) FROM daily_inspection_data WHERE {$whereSql}");
+                $countStmt->execute($params);
+                $totalItems = (int)$countStmt->fetchColumn();
+            }
 
             $totalPages = max(1, ceil($totalItems / $limit));
             if ($page > $totalPages) $page = $totalPages;
@@ -125,7 +133,10 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <?php endif; ?>
                         </div>
                         <p class="text-xs text-slate-500 mt-0.5">
-                            Waktu Input: <b><?= date('d M Y, H:i', strtotime($batch['created_at'])) ?> WIB</b> • Total: <b><?= number_format($totalItems) ?> Lot Item</b>
+                            Waktu Input: <b><?= date('d M Y, H:i', strtotime($batch['created_at'])) ?> WIB</b> • Total Batch: <b><?= number_format((int)($batch['total_items'] ?? $totalItems)) ?> Lot Item</b>
+                            <?php if ($search !== '' || $statusFilter !== ''): ?>
+                                • <span class="text-blue-600 font-semibold">(Filter: <?= number_format($totalItems) ?> item ditemukan)</span>
+                            <?php endif; ?>
                         </p>
                     </div>
                 </div>
@@ -163,13 +174,12 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <option value="NG" <?= ($statusFilter === 'NG') ? 'selected' : '' ?>>Status NG</option>
                 </select>
 
-                <!-- Limit Selector -->
+                <!-- Limit Selector (Max 100 per page for optimal memory on 4GB client PCs) -->
                 <select id="limit-filter" class="form-input py-1 text-xs font-semibold text-slate-700" style="width: 100px;">
                     <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10 / hal</option>
                     <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25 / hal</option>
                     <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50 / hal</option>
                     <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100 / hal</option>
-                    <option value="250" <?= ($limit == 250) ? 'selected' : '' ?>>250 / hal</option>
                 </select>
 
                 <button type="button" onclick="doFilter()" class="btn-secondary py-1 px-3 text-xs font-bold cursor-pointer">Cari</button>
@@ -206,7 +216,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <div class="space-y-1">
                                             <p class="font-semibold text-slate-600">Tidak ada item lot yang cocok dengan pencarian "<b><?= htmlspecialchars($search) ?></b>" pada batch ini.</p>
                                             <div class="pt-2">
-                                                <a href="detail_batch.php?batch_id=<?= (int)$batch['id'] ?>" class="btn-secondary py-1 px-3 text-xs inline-block">
+                                                <a href="<?= base_url('modules/did/detail_batch.php?batch_id=' . (int)$batch['id']) ?>" class="btn-secondary py-1 px-3 text-xs inline-block">
                                                     Reset Pencarian
                                                 </a>
                                             </div>
@@ -251,7 +261,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                     <td class="px-4 py-3 text-right">
                                         <!-- Delete Item (POST + CSRF Protected) -->
                                         <button type="button" 
-                                                onclick="confirmPostDelete('<?= base_url('modules/did/delete.php') ?>', <?= (int)$row['id'] ?>, 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?> (Part: <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>)', '<?= generate_csrf_token() ?>')"
+                                                onclick="confirmPostDelete('<?= base_url('modules/did/delete.php') ?>', <?= (int)$row['id'] ?>, 'Item Lot <?= htmlspecialchars($row['lot_number'], ENT_QUOTES) ?> (Part: <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>)', '<?= $csrfToken ?>')"
                                                 class="btn-icon text-rose-600 hover:bg-rose-50" title="Hapus Item Ini">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>

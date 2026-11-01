@@ -115,8 +115,8 @@ if (!$part) {
             </div>
         </div>
 
-        <!-- QC Documents Overview Cards (PI, Q-Point, PAC, Standar Packing) -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <!-- QC Documents Overview Cards (PI, Q-Point, PAC, Standar Packing, Monitoring Model) -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             
             <!-- PI Card -->
             <?php $dPi = $qcDocs['pi'] ?? null; ?>
@@ -230,6 +230,34 @@ if (!$part) {
                 </div>
             </div>
 
+            <!-- Monitoring Model (MI) Card -->
+            <?php $dMi = $qcDocs['mi'] ?? null; ?>
+            <div class="card p-3 bg-white border border-slate-200/80 rounded-xl shadow-xs flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between mb-1">
+                        <span class="text-[11px] font-extrabold text-cyan-700 flex items-center gap-1">
+                            <span class="w-2 h-2 rounded-full bg-cyan-600"></span>
+                            <span>Monitoring</span>
+                        </span>
+                        <?php if (!empty($dMi['has_document'])): ?>
+                            <span class="badge badge-success text-[10px]"><?= htmlspecialchars($dMi['latest']['version_label_full'] ?? 'Ada') ?></span>
+                        <?php else: ?>
+                            <span class="badge badge-secondary text-[10px]">Belum Ada</span>
+                        <?php endif; ?>
+                    </div>
+                    <p class="text-[10px] text-slate-500 font-medium">Monitoring Model (MI)</p>
+                </div>
+                <div class="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+                    <?php if (!empty($dMi['has_document']) && !empty($dMi['latest']['relative_url'])): ?>
+                        <span class="text-[10px] font-mono text-slate-400 truncate max-w-[100px]"><?= htmlspecialchars($dMi['latest']['filename']) ?></span>
+                        <a href="<?= base_url($dMi['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-cyan-700 hover:underline">Lihat PDF &nearr;</a>
+                    <?php else: ?>
+                        <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
+                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                    <?php endif; ?>
+                </div>
+            </div>
+
         </div>
 
         <!-- Tabel Riwayat Berkas & Manajemen Versi (Multi-Version History Card) -->
@@ -238,11 +266,12 @@ if (!$part) {
         $allVersionRows = [];
         $categoryLabels = [
             '2d'              => ['label' => 'Gambar 2D', 'badge' => 'bg-blue-100 text-blue-800 border-blue-200'],
-            '3d'              => ['label' => 'Model 3D', 'badge' => 'bg-cyan-100 text-cyan-800 border-cyan-200'],
+            '3d'              => ['label' => 'Model 3D', 'badge' => 'bg-slate-100 text-slate-800 border-slate-200'],
             'pi'              => ['label' => 'PI', 'badge' => 'bg-indigo-100 text-indigo-800 border-indigo-200'],
             'qpoint'          => ['label' => 'Q-Point', 'badge' => 'bg-amber-100 text-amber-800 border-amber-200'],
             'pac'             => ['label' => 'PAC', 'badge' => 'bg-emerald-100 text-emerald-800 border-emerald-200'],
-            'standar_packing' => ['label' => 'Packing', 'badge' => 'bg-orange-100 text-orange-800 border-orange-200']
+            'standar_packing' => ['label' => 'Packing', 'badge' => 'bg-orange-100 text-orange-800 border-orange-200'],
+            'mi'              => ['label' => 'Monitoring Model', 'badge' => 'bg-cyan-100 text-cyan-800 border-cyan-200']
         ];
 
         foreach ($categoryLabels as $catKey => $catMeta) {
@@ -388,6 +417,10 @@ if (!$part) {
                         <span class="w-2 h-2 rounded-full bg-orange-600"></span>
                         <span>Standar Packing</span>
                     </button>
+                    <button type="button" data-tab="mi" class="tab-btn px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-all flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-cyan-600"></span>
+                        <span>Monitoring Model</span>
+                    </button>
                 </div>
 
                 <!-- Right Action Bar & Version Selector -->
@@ -472,6 +505,12 @@ if (!$part) {
             is_3d: false,
             url: <?= json_encode(!empty($qcDocs['standar_packing']['latest']['relative_url']) ? base_url($qcDocs['standar_packing']['latest']['relative_url']) : null) ?>,
             versions: <?= json_encode($qcDocs['standar_packing']['versions'] ?? []) ?>
+        },
+        'mi': {
+            label: 'Monitoring Model (MI)',
+            is_3d: false,
+            url: <?= json_encode(!empty($qcDocs['mi']['latest']['relative_url']) ? base_url($qcDocs['mi']['latest']['relative_url']) : null) ?>,
+            versions: <?= json_encode($qcDocs['mi']['versions'] ?? []) ?>
         }
     };
 

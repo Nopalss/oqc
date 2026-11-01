@@ -148,12 +148,13 @@ try {
         exit;
     }
 
-    // 4. Validasi Duplikat Ref Number pada Lot Aktif dalam Sesi
+    // 4. Validasi Duplikat Ref Number pada Lot Aktif dalam Sesi (3-way match: Part + Lot + Ref)
     if (!empty($newZ5)) {
         $stmtChkRef = $pdo->prepare("
             SELECT id FROM inspection_session_lots 
             WHERE inspection_session_id = :sid 
               AND UPPER(ref_number) = UPPER(:ref) 
+              AND UPPER(lot_number) = UPPER(:lot)
               AND id != :curr_id 
               AND lot_status != 'replaced' 
             LIMIT 1
@@ -161,13 +162,14 @@ try {
         $stmtChkRef->execute([
             ':sid'     => $sessionId,
             ':ref'     => $newZ5,
+            ':lot'     => $newZ2,
             ':curr_id' => $sessionLotId
         ]);
         if ($stmtChkRef->fetchColumn()) {
             $pdo->rollBack();
             echo json_encode([
                 'success' => false, 
-                'message' => "Ref Number ({$newZ5}) sudah terdaftar pada box aktif lain dalam sesi ini"
+                'message' => "Kombinasi Lot (#{$newZ2}) & Ref Number ({$newZ5}) sudah terdaftar pada box aktif lain dalam sesi ini"
             ]);
             exit;
         }

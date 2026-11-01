@@ -160,16 +160,41 @@ $paletteParts = [
 function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
     $grandPcs  = 0;
     $grandLots = 0;
+    $grandFreq = 0;
     foreach ($rawItems as $r) {
-        $grandPcs  += (int)$r['total_pcs'];
-        $grandLots += (int)$r['total_lots'];
+        $grandPcs  += (int)($r['total_pcs'] ?? 0);
+        $grandLots += (int)($r['total_lots'] ?? 0);
+        $grandFreq += (int)($r['total_freq'] ?? $r['total_lots'] ?? 0);
     }
-    $grandMetric = ($unit === 'lot') ? $grandLots : $grandPcs;
+    
+    if ($unit === 'lot') {
+        $grandMetric = $grandLots;
+    } elseif ($unit === 'freq') {
+        $grandMetric = $grandFreq;
+    } elseif ($unit === 'ppm') {
+        $grandMetric = $grandPcs; // base sum
+    } else {
+        $grandMetric = $grandPcs;
+    }
 
     // Sort by metric
     usort($rawItems, function($a, $b) use ($unit) {
-        $valA = ($unit === 'lot') ? (int)$a['total_lots'] : (int)$a['total_pcs'];
-        $valB = ($unit === 'lot') ? (int)$b['total_lots'] : (int)$b['total_pcs'];
+        if ($unit === 'lot') {
+            $valA = (int)($a['total_lots'] ?? 0);
+            $valB = (int)($b['total_lots'] ?? 0);
+        } elseif ($unit === 'freq') {
+            $valA = (int)($a['total_freq'] ?? $a['total_lots'] ?? 0);
+            $valB = (int)($b['total_freq'] ?? $b['total_lots'] ?? 0);
+        } elseif ($unit === 'ppm') {
+            $valA = (float)($a['ppm'] ?? 0);
+            $valB = (float)($b['ppm'] ?? 0);
+        } else {
+            $valA = (int)($a['total_pcs'] ?? 0);
+            $valB = (int)($b['total_pcs'] ?? 0);
+        }
+        if ($valA === $valB) {
+            return ($b['total_pcs'] ?? 0) <=> ($a['total_pcs'] ?? 0);
+        }
         return $valB <=> $valA;
     });
 
@@ -182,10 +207,15 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
         
         $otherPcs  = 0;
         $otherLots = 0;
+        $otherFreq = 0;
+        $otherSamplePop = 0;
         foreach ($otherSlices as $oth) {
-            $otherPcs  += (int)$oth['total_pcs'];
-            $otherLots += (int)$oth['total_lots'];
+            $otherPcs       += (int)($oth['total_pcs'] ?? 0);
+            $otherLots      += (int)($oth['total_lots'] ?? 0);
+            $otherFreq      += (int)($oth['total_freq'] ?? $oth['total_lots'] ?? 0);
+            $otherSamplePop += (int)($oth['sample_pop'] ?? 0);
         }
+        $otherPpm = ($otherSamplePop > 0) ? round(($otherPcs / $otherSamplePop) * 1000000, 1) : 0;
 
         $displayItems = $primarySlices;
         $displayItems[] = [
@@ -193,6 +223,9 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
             'item_name'  => 'Lainnya (' . count($otherSlices) . ' lainnya)',
             'total_pcs'  => $otherPcs,
             'total_lots' => $otherLots,
+            'total_freq' => $otherFreq,
+            'sample_pop' => $otherSamplePop,
+            'ppm'        => $otherPpm,
             'is_other'   => true
         ];
     } else {
@@ -205,7 +238,16 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
     $items  = [];
 
     foreach ($displayItems as $idx => $it) {
-        $val = ($unit === 'lot') ? (int)$it['total_lots'] : (int)$it['total_pcs'];
+        if ($unit === 'lot') {
+            $val = (int)($it['total_lots'] ?? 0);
+        } elseif ($unit === 'freq') {
+            $val = (int)($it['total_freq'] ?? $it['total_lots'] ?? 0);
+        } elseif ($unit === 'ppm') {
+            $val = (float)($it['ppm'] ?? 0);
+        } else {
+            $val = (int)($it['total_pcs'] ?? 0);
+        }
+
         $share = ($grandMetric > 0 && $val > 0) ? round(($val / $grandMetric) * 100, 1) : 0;
         $color = isset($it['is_other']) ? '#94a3b8' : ($palette[$idx % count($palette)]);
 
@@ -218,13 +260,29 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
             'item_name'  => $it['item_name'],
             'part_code'  => $it['part_code'] ?? null,
             'part_name'  => $it['part_name'] ?? null,
-            'total_pcs'  => (int)$it['total_pcs'],
-            'total_lots' => (int)$it['total_lots'],
+            'total_pcs'  => (int)($it['total_pcs'] ?? 0),
+            'total_lots' => (int)($it['total_lots'] ?? 0),
+            'total_freq' => (int)($it['total_freq'] ?? $it['total_lots'] ?? 0),
+            'sample_pop' => (int)($it['sample_pop'] ?? 0),
+            'ppm'        => (float)($it['ppm'] ?? 0),
             'val'        => $val,
             'percentage' => $share,
             'color'      => $color,
             'is_other'   => isset($it['is_other'])
         ];
+    }
+
+    $topVal = 0;
+    if (!empty($rawItems)) {
+        if ($unit === 'lot') {
+            $topVal = (int)($rawItems[0]['total_lots'] ?? 0);
+        } elseif ($unit === 'freq') {
+            $topVal = (int)($rawItems[0]['total_freq'] ?? $rawItems[0]['total_lots'] ?? 0);
+        } elseif ($unit === 'ppm') {
+            $topVal = (float)($rawItems[0]['ppm'] ?? 0);
+        } else {
+            $topVal = (int)($rawItems[0]['total_pcs'] ?? 0);
+        }
     }
 
     return [
@@ -235,9 +293,10 @@ function formatItemsWithTopLimit($rawItems, $topRank, $unit, $palette) {
         'grandMetric'  => $grandMetric,
         'grandPcs'     => $grandPcs,
         'grandLots'    => $grandLots,
+        'grandFreq'    => $grandFreq,
         'unit'         => strtoupper($unit),
         'topItemName'  => !empty($rawItems) ? $rawItems[0]['item_name'] : '-',
-        'topItemVal'   => !empty($rawItems) ? (($unit === 'lot') ? (int)$rawItems[0]['total_lots'] : (int)$rawItems[0]['total_pcs']) : 0,
+        'topItemVal'   => $topVal,
     ];
 }
 
@@ -347,7 +406,7 @@ function getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution
     ];
 }
 
-function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $topItems, $levelType, $defectId = 0, $modelId = null, $unit = 'pcs', $palette = [], $subResolution = 'weekly', $refYear = null, $refMonth = null) {
+function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $topItems, $levelType, $defectId = 0, $modelId = null, $unit = 'pcs', $palette = [], $subResolution = 'weekly', $refYear = null, $refMonth = null, $topRank = 'all') {
     if (empty($topItems)) {
         return ['labels' => [], 'datasets' => [], 'rawMatrix' => []];
     }
@@ -363,16 +422,6 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
         'part'   => 'dds.part_id'
     ];
     $targetCol = $colMap[$levelType] ?? 'dds.defect_type_id';
-
-    $itemSeries = [];
-    foreach ($topItems as $idx => $ti) {
-        if (isset($ti['is_other']) && $ti['is_other']) continue;
-        $k = ($ti['item_id'] !== null) ? (string)$ti['item_id'] : 'null';
-        $itemSeries[$k] = [];
-        foreach ($trendMap as $tk => $tMeta) {
-            $itemSeries[$k][$tk] = 0;
-        }
-    }
 
     $wSum = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
     $pSum = [':sd' => $startDate, ':ed' => $endDate];
@@ -402,6 +451,23 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
 
     $wSumSql = implode(' AND ', $wSum);
 
+    // Metadata dictionary of all known items for this level
+    $itemMetaMap = [];
+    foreach ($topItems as $ti) {
+        if (isset($ti['is_other']) && $ti['is_other']) continue;
+        $k = ($ti['item_id'] !== null) ? (string)$ti['item_id'] : 'null';
+        $itemMetaMap[$k] = $ti;
+    }
+
+    // bucketValues[time_key][item_key] = value
+    // bucketSamples[time_key][item_key] = sample count (used for PPM)
+    $bucketValues = [];
+    $bucketSamples = [];
+    foreach ($trendMap as $tk => $tMeta) {
+        $bucketValues[$tk] = [];
+        $bucketSamples[$tk] = [];
+    }
+
     if ($isWeeklyCustom) {
         $sqlSum = "SELECT 
                     dds.summary_date,
@@ -416,14 +482,39 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
         foreach ($stSum->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $sDate = $r['summary_date'];
             $ik = (string)$r['item_key'];
-            // Cari bucket W1..W4 mana yang memuat sDate
+            $val = ($unit === 'lot' || $unit === 'freq') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
             foreach ($trendMap as $wKey => $wMeta) {
                 if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
-                    if (isset($itemSeries[$ik][$wKey])) {
-                        $val = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
-                        $itemSeries[$ik][$wKey] += $val;
-                    }
+                    $bucketValues[$wKey][$ik] = ($bucketValues[$wKey][$ik] ?? 0) + $val;
                     break;
+                }
+            }
+        }
+
+        // Jika levelType adalah part dan unit ppm, kumpulkan total sampling part per minggu
+        if ($levelType === 'part' && $unit === 'ppm') {
+            $wSamp = ["ods.summary_date >= :sd AND ods.summary_date <= :ed"];
+            $pSamp = [':sd' => $startDate, ':ed' => $endDate];
+            if ($customer !== '') {
+                $wSamp[] = "ods.customer = :cust";
+                $pSamp[':cust'] = $customer;
+            }
+            $sqlSamp = "SELECT ods.summary_date, ods.part_id AS item_key,
+                               COALESCE(NULLIF(SUM(ods.total_sample_size_lot), 0), SUM(ods.total_sample_size), 0) AS total_sample
+                        FROM oqc_daily_summary ods
+                        WHERE " . implode(' AND ', $wSamp) . "
+                        GROUP BY ods.summary_date, ods.part_id";
+            $stSamp = $pdo->prepare($sqlSamp);
+            $stSamp->execute($pSamp);
+            foreach ($stSamp->fetchAll(PDO::FETCH_ASSOC) as $rSamp) {
+                $sDate = $rSamp['summary_date'];
+                $ik = (string)$rSamp['item_key'];
+                $sCount = (int)$rSamp['total_sample'];
+                foreach ($trendMap as $wKey => $wMeta) {
+                    if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                        $bucketSamples[$wKey][$ik] = ($bucketSamples[$wKey][$ik] ?? 0) + $sCount;
+                        break;
+                    }
                 }
             }
         }
@@ -442,9 +533,110 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
         foreach ($stSum->fetchAll(PDO::FETCH_ASSOC) as $r) {
             $tk = $r['time_key'];
             $ik = (string)$r['item_key'];
-            if (isset($itemSeries[$ik][$tk])) {
-                $val = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
-                $itemSeries[$ik][$tk] += $val;
+            $val = ($unit === 'lot' || $unit === 'freq') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+            if (isset($bucketValues[$tk])) {
+                $bucketValues[$tk][$ik] = ($bucketValues[$tk][$ik] ?? 0) + $val;
+            }
+        }
+
+        // Jika levelType adalah part dan unit ppm, kumpulkan total sampling part per time_key
+        if ($levelType === 'part' && $unit === 'ppm') {
+            $wSamp = ["ods.summary_date >= :sd AND ods.summary_date <= :ed"];
+            $pSamp = [':sd' => $startDate, ':ed' => $endDate];
+            if ($customer !== '') {
+                $wSamp[] = "ods.customer = :cust";
+                $pSamp[':cust'] = $customer;
+            }
+            $sqlSamp = "SELECT DATE_FORMAT(ods.summary_date, '{$dateFormat}') AS time_key,
+                               ods.part_id AS item_key,
+                               COALESCE(NULLIF(SUM(ods.total_sample_size_lot), 0), SUM(ods.total_sample_size), 0) AS total_sample
+                        FROM oqc_daily_summary ods
+                        WHERE " . implode(' AND ', $wSamp) . "
+                        GROUP BY time_key, ods.part_id";
+            $stSamp = $pdo->prepare($sqlSamp);
+            $stSamp->execute($pSamp);
+            foreach ($stSamp->fetchAll(PDO::FETCH_ASSOC) as $rSamp) {
+                $tk = $rSamp['time_key'];
+                $ik = (string)$rSamp['item_key'];
+                $sCount = (int)$rSamp['total_sample'];
+                if (isset($bucketSamples[$tk])) {
+                    $bucketSamples[$tk][$ik] = ($bucketSamples[$tk][$ik] ?? 0) + $sCount;
+                }
+            }
+        }
+    }
+
+    // Jika mode unit ppm pada level part, konversi defect PCS menjadi PPM spesifik per interval
+    if ($levelType === 'part' && $unit === 'ppm') {
+        foreach ($bucketValues as $tk => $itemsArr) {
+            foreach ($itemsArr as $ik => $defPcs) {
+                $samp = $bucketSamples[$tk][$ik] ?? 0;
+                $bucketValues[$tk][$ik] = ($samp > 0) ? round(($defPcs / $samp) * 1000000, 1) : 0;
+            }
+        }
+    }
+
+    // Determine candidate item keys
+    $rankLimit = (is_numeric($topRank) && (int)$topRank > 0) ? (int)$topRank : 0;
+    $selectedItemKeys = [];
+
+    if ($rankLimit > 0) {
+        // PER-INTERVAL / PER-WEEK RANKING:
+        // Ambil Top-N item untuk masing-masing interval (W1, W2, ...) lalu gabungkan (union)
+        foreach ($trendMap as $tk => $tMeta) {
+            $itemsInBucket = $bucketValues[$tk] ?? [];
+            if (!empty($itemsInBucket)) {
+                // Filter hanya yang memiliki temuan > 0
+                $positiveItems = array_filter($itemsInBucket, function($v) { return $v > 0; });
+                arsort($positiveItems);
+                $topSlice = array_slice(array_keys($positiveItems), 0, $rankLimit);
+                foreach ($topSlice as $k) {
+                    $selectedItemKeys[$k] = true;
+                }
+            }
+        }
+    } else {
+        // Tampilkan semua item yang ada temuan atau ada di topItems
+        foreach ($topItems as $ti) {
+            if (isset($ti['is_other']) && $ti['is_other']) continue;
+            $k = ($ti['item_id'] !== null) ? (string)$ti['item_id'] : 'null';
+            $selectedItemKeys[$k] = true;
+        }
+    }
+
+    // Pastikan metadata terisi jika ada item yang muncul di interval mingguan
+    $missingKeys = [];
+    foreach (array_keys($selectedItemKeys) as $k) {
+        if (!isset($itemMetaMap[$k]) && $k !== 'null' && (int)$k > 0) {
+            $missingKeys[] = (int)$k;
+        }
+    }
+    if (!empty($missingKeys)) {
+        if ($levelType === 'model') {
+            $inClause = implode(',', array_fill(0, count($missingKeys), '?'));
+            $stM = $pdo->prepare("SELECT id, name FROM master_models WHERE id IN ({$inClause})");
+            $stM->execute($missingKeys);
+            foreach ($stM->fetchAll(PDO::FETCH_ASSOC) as $rowM) {
+                $mk = (string)$rowM['id'];
+                $itemMetaMap[$mk] = [
+                    'item_id'   => (int)$rowM['id'],
+                    'item_name' => $rowM['name'] ?: 'Model #' . $rowM['id'],
+                    'val'       => 0
+                ];
+            }
+        } elseif ($levelType === 'part') {
+            $inClause = implode(',', array_fill(0, count($missingKeys), '?'));
+            $stP = $pdo->prepare("SELECT id, part_code, part_name, CONCAT(part_code, ' - ', part_name) AS full_name FROM master_parts WHERE id IN ({$inClause})");
+            $stP->execute($missingKeys);
+            foreach ($stP->fetchAll(PDO::FETCH_ASSOC) as $rowP) {
+                $pk = (string)$rowP['id'];
+                $itemMetaMap[$pk] = [
+                    'item_id'   => (int)$rowP['id'],
+                    'item_name' => $rowP['full_name'],
+                    'part_code' => $rowP['part_code'],
+                    'part_name' => $rowP['part_name'],
+                    'val'       => 0
+                ];
             }
         }
     }
@@ -458,21 +650,28 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
 
     $datasets  = [];
     $rawMatrix = [];
+    $itemIndex = 0;
 
-    foreach ($topItems as $idx => $ti) {
-        if (isset($ti['is_other']) && $ti['is_other']) continue;
-        $ik    = ($ti['item_id'] !== null) ? (string)$ti['item_id'] : 'null';
-        $color = $ti['color'] ?? ($palette[$idx % count($palette)] ?? '#2563eb');
-        $name  = $ti['item_name'];
+    foreach (array_keys($selectedItemKeys) as $ik) {
+        $meta  = $itemMetaMap[$ik] ?? [
+            'item_id'   => is_numeric($ik) ? (int)$ik : null,
+            'item_name' => ($ik === '0' || $ik === 'null') ? 'General / Unspecified' : "Item #{$ik}",
+            'part_code' => '',
+            'part_name' => ''
+        ];
+        $color = $meta['color'] ?? ($palette[$itemIndex % count($palette)] ?? '#2563eb');
+        $name  = $meta['item_name'];
 
         $dataArr = [];
         foreach ($timeKeys as $tk) {
-            $dataArr[] = $itemSeries[$ik][$tk] ?? 0;
+            $dataArr[] = $bucketValues[$tk][$ik] ?? 0;
         }
 
         $datasets[] = [
             'label'           => $name,
-            'item_id'         => $ti['item_id'],
+            'item_id'         => $meta['item_id'] ?? (is_numeric($ik) ? (int)$ik : null),
+            'part_code'       => $meta['part_code'] ?? '',
+            'part_name'       => $meta['part_name'] ?? '',
             'data'            => $dataArr,
             'backgroundColor' => $color,
             'borderColor'     => $color,
@@ -480,7 +679,16 @@ function getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer
             'borderRadius'    => 4,
             'stack'           => 'stack1'
         ];
+        $itemIndex++;
     }
+
+    // Urutkan datasets: Terbanyak di indeks awal agar menjadi tumpukan paling bawah di bar chart
+    usort($datasets, function($a, $b) {
+        $sumA = array_sum($a['data'] ?? []);
+        $sumB = array_sum($b['data'] ?? []);
+        if ($sumA === $sumB) return 0;
+        return ($sumB <=> $sumA);
+    });
 
     foreach ($timeKeys as $i => $tk) {
         $rowTotal = 0;
@@ -558,6 +766,11 @@ try {
             exit;
         }
 
+        $modelMetric = sanitize($_GET['model_metric'] ?? 'pcs');
+        if (!in_array($modelMetric, ['pcs', 'freq'])) {
+            $modelMetric = 'pcs';
+        }
+
         // 1. Query pre-aggregated daily summaries (uses idx_dds_perf)
         $wSum = [
             "dds.summary_date >= :sd AND dds.summary_date <= :ed",
@@ -589,26 +802,23 @@ try {
                 'item_id'    => (int)$r['item_id'],
                 'item_name'  => $r['item_name'],
                 'total_pcs'  => (int)$r['total_pcs'],
-                'total_lots' => (int)$r['total_lots']
+                'total_lots' => (int)$r['total_lots'],
+                'total_freq' => (int)$r['total_lots']
             ];
         }
-
-        usort($raw, function($a, $b) use ($unit) {
-            $vA = ($unit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
-            $vB = ($unit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
-            if ($vA === $vB) return $b['total_pcs'] <=> $a['total_pcs'];
-            return $vB <=> $vA;
-        });
 
         // Fetch active defect name
         $stmtD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
         $stmtD->execute([':id' => $defectId]);
         $defectName = $stmtD->fetchColumn() ?: 'Defect #' . $defectId;
 
-        $res = formatItemsWithTopLimit($raw, $topRank, $unit, $paletteModels);
-        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'model', $defectId, null, $unit, $paletteModels, $subResolution, $selectedYear, $selectedMonth);
+        $targetUnit = ($modelMetric === 'freq') ? 'freq' : 'pcs';
+        $res = formatItemsWithTopLimit($raw, $topRank, $targetUnit, $paletteModels);
+        $res['unit'] = ($modelMetric === 'freq') ? 'kali' : 'PCS';
+        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'model', $defectId, null, $targetUnit, $paletteModels, $subResolution, $selectedYear, $selectedMonth, $topRank);
         $res['success'] = true;
         $res['defectName'] = $defectName;
+        $res['modelMetric'] = $modelMetric;
         echo json_encode($res);
         exit;
 
@@ -616,6 +826,11 @@ try {
         if ($defectId <= 0) {
             echo json_encode(['success' => false, 'message' => 'defect_id required']);
             exit;
+        }
+
+        $partMetric = sanitize($_GET['part_metric'] ?? ($unit === 'ppm' ? 'ppm' : 'pcs'));
+        if (!in_array($partMetric, ['pcs', 'ppm', 'lot'])) {
+            $partMetric = 'pcs';
         }
 
         // 1. Query pre-aggregated daily summaries
@@ -653,24 +868,43 @@ try {
         $stSum->execute($pSum);
         $rowsSum = $stSum->fetchAll(PDO::FETCH_ASSOC);
 
+        // 2. Query total sampling populasi spesifik per part dari oqc_daily_summary
+        $wSamp = ["ods.summary_date >= :sd AND ods.summary_date <= :ed"];
+        $pSamp = [':sd' => $startDate, ':ed' => $endDate];
+        if ($customer !== '') {
+            $wSamp[] = "ods.customer = :cust";
+            $pSamp[':cust'] = $customer;
+        }
+        $sampleColExp = ($sampleBasis === 'session')
+            ? "COALESCE(NULLIF(SUM(ods.total_sample_size_session), 0), SUM(ods.total_sample_size), 0)"
+            : "COALESCE(NULLIF(SUM(ods.total_sample_size_lot), 0), SUM(ods.total_sample_size), 0)";
+
+        $sqlSamp = "SELECT ods.part_id, {$sampleColExp} AS sample_pop
+                    FROM oqc_daily_summary ods
+                    WHERE " . implode(' AND ', $wSamp) . "
+                    GROUP BY ods.part_id";
+        $stSamp = $pdo->prepare($sqlSamp);
+        $stSamp->execute($pSamp);
+        $partSampleMap = $stSamp->fetchAll(PDO::FETCH_KEY_PAIR);
+
         $raw = [];
         foreach ($rowsSum as $r) {
+            $pId = (int)$r['item_id'];
+            $defPcs = (int)$r['total_pcs'];
+            $sampPop = (int)($partSampleMap[$pId] ?? 0);
+            $ppmVal = ($sampPop > 0) ? round(($defPcs / $sampPop) * 1000000, 1) : 0;
+
             $raw[] = [
-                'item_id'    => (int)$r['item_id'],
+                'item_id'    => $pId,
                 'item_name'  => $r['item_name'],
                 'part_code'  => $r['part_code'],
                 'part_name'  => $r['part_name'],
-                'total_pcs'  => (int)$r['total_pcs'],
-                'total_lots' => (int)$r['total_lots']
+                'total_pcs'  => $defPcs,
+                'total_lots' => (int)$r['total_lots'],
+                'sample_pop' => $sampPop,
+                'ppm'        => $ppmVal
             ];
         }
-
-        usort($raw, function($a, $b) use ($unit) {
-            $vA = ($unit === 'lot') ? $a['total_lots'] : $a['total_pcs'];
-            $vB = ($unit === 'lot') ? $b['total_lots'] : $b['total_pcs'];
-            if ($vA === $vB) return $b['total_pcs'] <=> $a['total_pcs'];
-            return $vB <=> $vA;
-        });
 
         // Model name
         $modelName = 'Semua Model';
@@ -684,8 +918,11 @@ try {
             }
         }
 
-        $res = formatItemsWithTopLimit($raw, $topRank, $unit, $paletteParts);
-        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'part', $defectId, $modelId, $unit, $paletteParts, $subResolution, $selectedYear, $selectedMonth);
+        $targetUnit = $partMetric;
+        $res = formatItemsWithTopLimit($raw, $topRank, $targetUnit, $paletteParts);
+        $res['unit'] = ($partMetric === 'ppm') ? 'PPM' : (($partMetric === 'lot') ? 'LOT' : 'PCS');
+        $res['partMetric'] = $partMetric;
+        $res['trend']   = getLevelStackedTrend($pdo, $startDate, $endDate, $filterType, $customer, $res['items'], 'part', $defectId, $modelId, $targetUnit, $paletteParts, $subResolution, $selectedYear, $selectedMonth, $topRank);
         $res['success'] = true;
         $res['modelName'] = $modelName;
 
@@ -785,104 +1022,46 @@ try {
         $stmtH->execute($paramsH);
         $rows = $stmtH->fetchAll(PDO::FETCH_ASSOC);
 
-        // Generate HTML rows for instant injection
-        ob_start();
-        if (empty($rows)): ?>
-            <tr>
-                <td colspan="10" style="padding:32px;text-align:center;color:#94a3b8;font-weight:600;">
-                    Tidak ada catatan riwayat temuan cacat pada filter yang dipilih.
-                </td>
-            </tr>
-        <?php else: ?>
-            <?php foreach ($rows as $idx => $row): 
-                $isKanban = ($row['inspection_type'] === 'kanban');
-                $filterDate = date('d M Y', strtotime($row['started_at']));
-                $filterPart = trim($row['part_code'] . ' - ' . $row['part_name']);
-                $filterModel = trim($row['model_name']);
-                $filterDefect = trim($row['defect_name']);
-                $filterType = $isKanban ? 'Kanban' : 'Safety Stock';
-                $filterCustomer = trim($row['customer_name']);
-                $filterInspector = trim($row['inspector_name'] ?? 'System');
-            ?>
-                <tr class="overview-history-row" 
-                    data-filter-date="<?= htmlspecialchars($filterDate) ?>"
-                    data-filter-part="<?= htmlspecialchars($filterPart) ?>"
-                    data-filter-model="<?= htmlspecialchars($filterModel) ?>"
-                    data-filter-defect="<?= htmlspecialchars($filterDefect) ?>"
-                    data-filter-type="<?= htmlspecialchars($filterType) ?>"
-                    data-filter-customer="<?= htmlspecialchars($filterCustomer) ?>"
-                    data-filter-inspector="<?= htmlspecialchars($filterInspector) ?>"
-                    style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
-                    <td class="row-index" style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
-                        <?= $idx + 1 ?>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:11px;">
-                            <?= date('d M Y', strtotime($row['started_at'])) ?>
-                        </div>
-                        <span style="font-size:10px;color:#64748b;font-weight:600;">
-                            <?= date('H:i', strtotime($row['started_at'])) ?> WIB
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:12px;">
-                            <?= htmlspecialchars($row['part_code']) ?>
-                        </div>
-                        <span style="font-size:11px;color:#64748b;">
-                            <?= htmlspecialchars($row['part_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="display:inline-block;padding:2px 7px;border-radius:5px;background:#f1f5f9;color:#334155;border:1px solid #e2e8f0;font-size:11px;font-weight:700;">
-                            <?= htmlspecialchars($row['model_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;text-align:center;">
-                        <?php if ($isKanban): ?>
-                            <span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:800;background:#eff6ff;color:#1d4ed8;border:1px solid #dbeafe;text-transform:uppercase;">
-                                Kanban
-                            </span>
-                        <?php else: ?>
-                            <span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:800;background:#f5f3ff;color:#6d28d9;border:1px solid #ede9fe;text-transform:uppercase;">
-                                Safety Stock
-                            </span>
-                        <?php endif; ?>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="font-weight:800;color:#0f172a;font-family:monospace;background:#f1f5f9;padding:2px 7px;border-radius:4px;border:1px solid #e2e8f0;font-size:11px;display:inline-block;">
-                            <?= htmlspecialchars($row['kanban_no']) ?>
-                        </span>
-                        <div style="font-weight:700;color:#334155;font-size:11px;margin-top:3px;">
-                            <?= htmlspecialchars($row['customer_name']) ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:12px;font-family:monospace;">
-                            <?= htmlspecialchars($row['lot_number'] ?: '-') ?>
-                        </div>
-                        <div style="font-size:10px;color:#64748b;font-weight:600;margin-top:2px;font-family:monospace;">
-                            <?= htmlspecialchars($row['ref_number'] ?: '-') ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:700;color:#0f172a;font-size:11px;">
-                            <?= htmlspecialchars($row['inspector_name'] ?? 'System') ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;text-align:right;">
-                        <div style="font-weight:900;color:#b91c1c;font-size:13px;">
-                            <?= number_format($row['qty_ng']) ?> Pcs
-                        </div>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-        <?php endif;
-        $html = ob_get_clean();
+        // Quick count of total records without LIMIT 300 to inform UI if capped
+        $sqlCount = "SELECT COUNT(*) FROM inspection_ng_records ngr
+                     INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                     LEFT JOIN master_parts mp ON ngr.part_id = mp.id
+                     LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                     WHERE {$wSqlH}";
+        $stmtCount = $pdo->prepare($sqlCount);
+        $stmtCount->execute($paramsH);
+        $totalRecords = (int)$stmtCount->fetchColumn();
+
+        // Format items array for clean client-side rendering
+        $formattedItems = [];
+        foreach ($rows as $row) {
+            $isKanban = ($row['inspection_type'] === 'kanban');
+            $dt = strtotime($row['started_at']);
+            $formattedItems[] = [
+                'ng_id'          => (int)$row['ng_id'],
+                'date_formatted' => date('d M Y', $dt),
+                'time_formatted' => date('H:i', $dt) . ' WIB',
+                'part_code'      => $row['part_code'],
+                'part_name'      => $row['part_name'],
+                'model_name'     => $row['model_name'],
+                'inspection_type'=> $row['inspection_type'],
+                'type_label'     => $isKanban ? 'Kanban' : 'Safety Stock',
+                'is_kanban'      => $isKanban,
+                'kanban_no'      => $row['kanban_no'],
+                'customer_name'  => $row['customer_name'],
+                'lot_number'     => $row['lot_number'] ?: '-',
+                'ref_number'     => $row['ref_number'] ?: '-',
+                'inspector_name' => $row['inspector_name'] ?: 'System',
+                'qty_ng'         => (int)$row['qty_ng']
+            ];
+        }
 
         echo json_encode([
-            'success'   => true,
-            'count'     => count($rows),
-            'html'      => $html
+            'success'       => true,
+            'count'         => count($formattedItems),
+            'total_count'   => $totalRecords,
+            'is_capped'     => ($totalRecords > count($formattedItems)),
+            'items'         => $formattedItems
         ]);
         exit;
 
@@ -1362,21 +1541,25 @@ try {
         exit;
 
     } elseif ($action === 'get_multi_horizon_trend') {
-        if ($defectId <= 0) {
-            echo json_encode(['success' => false, 'message' => 'defect_id required']);
+        if ($defectId <= 0 && $partId <= 0) {
+            echo json_encode(['success' => false, 'message' => 'defect_id or part_id required']);
             exit;
         }
+
+        $isPartMode = ($partId > 0 && $defectId <= 0);
+        $itemCol    = $isPartMode ? "dds.part_id" : "dds.defect_type_id";
+        $itemId     = $isPartMode ? $partId : $defectId;
 
         $refYear  = $selectedYear ?: (int)date('Y');
         $refMonth = $selectedMonth ?: (int)date('n');
 
         // ── 1. HORIZON TAHUNAN (Dinamis: Hanya tahun yang ada rekam data defect, maks 4 tahun terakhir s/d refYear) ──
         $wYDetect = [
-            "dds.defect_type_id = :defId",
+            "{$itemCol} = :itemId",
             "YEAR(dds.summary_date) <= :refYear"
         ];
         $pYDetect = [
-            ':defId'   => $defectId,
+            ':itemId'  => $itemId,
             ':refYear' => $refYear
         ];
         if ($customer !== '') {
@@ -1416,11 +1599,11 @@ try {
         $minYear = min($years);
         $maxYear = max($years);
         $wY = [
-            "dds.defect_type_id = :defId",
+            "{$itemCol} = :itemId",
             "dds.summary_date >= :minY_d AND dds.summary_date <= :maxY_d"
         ];
         $pY = [
-            ':defId'  => $defectId,
+            ':itemId' => $itemId,
             ':minY_d' => sprintf('%04d-01-01', $minYear),
             ':maxY_d' => sprintf('%04d-12-31', $maxYear)
         ];
@@ -1444,6 +1627,7 @@ try {
             }
         }
 
+        $yearlyBreakdown = [];
         // Jika PPM: Ambil total sample populasi tahunan dari oqc_daily_summary
         if ($unit === 'ppm') {
             $wYSample = [
@@ -1472,62 +1656,115 @@ try {
             $sampleYMap = $stYSample->fetchAll(PDO::FETCH_KEY_PAIR);
             foreach ($yearlyCounts as $yrStr => &$yVal) {
                 $pop = (int)($sampleYMap[$yrStr] ?? 0);
-                $yVal = ($pop > 0) ? round(($yVal / $pop) * 1000000, 1) : 0;
+                $defQty = $yVal;
+                $calcPpm = ($pop > 0) ? round(($defQty / $pop) * 1000000, 1) : 0;
+                $yearlyBreakdown[$yrStr] = [
+                    'defect_count' => $defQty,
+                    'sample_pop'   => $pop,
+                    'ppm'          => $calcPpm
+                ];
+                $yVal = $calcPpm;
             }
             unset($yVal);
         }
 
-        // ── 2. HORIZON BULANAN (Jan s/d Bulan Berjalan di Tahun Terpilih) ──
-        $maxMonth = ($refYear === (int)date('Y')) ? (int)date('n') : 12;
+        // ── 2. HORIZON BULANAN (Rolling s/d 12 Bulan Terakhir dari Bulan Terpilih, Mulai dari Data Pertama) ──
         $mNames = [
             1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
             7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
         ];
-        $monthlyCounts = [];
-        for ($m = 1; $m <= $maxMonth; $m++) {
-            $monthlyCounts[$m] = 0;
+
+        // Cari tanggal data terawal di sistem untuk menentukan batas awal bulan yang ada datanya
+        $firstDataDate = '2026-10-01'; // Default batas operasional sistem OQC
+        try {
+            $stmtFirst = $pdo->query("SELECT MIN(summary_date) FROM oqc_daily_summary");
+            $dbMinDate = $stmtFirst->fetchColumn();
+            if ($dbMinDate) {
+                $firstDataDate = $dbMinDate;
+            } else {
+                $stmtFirstSess = $pdo->query("SELECT MIN(DATE(started_at)) FROM inspection_sessions WHERE started_at IS NOT NULL");
+                $dbMinSess = $stmtFirstSess->fetchColumn();
+                if ($dbMinSess) $firstDataDate = $dbMinSess;
+            }
+        } catch (Exception $e) {}
+
+        $earliestMonthKey = date('Y-m', strtotime($firstDataDate));
+
+        // Bangun jendela maksimal 12 bulan terakhir yang berakhir di ($refYear, $refMonth)
+        $endPeriodDt = new DateTime(sprintf('%04d-%02d-01', $refYear, $refMonth));
+        $targetRollingMonths = [];
+
+        // Hitung mundur 12 bulan
+        for ($i = 11; $i >= 0; $i--) {
+            $dtCursor = clone $endPeriodDt;
+            if ($i > 0) {
+                $dtCursor->modify("-{$i} months");
+            }
+            $mKey = $dtCursor->format('Y-m');
+            // Jangan sertakan bulan sebelum sistem mulai ada data
+            if ($mKey >= $earliestMonthKey) {
+                $targetRollingMonths[$mKey] = [
+                    'year'      => (int)$dtCursor->format('Y'),
+                    'month'     => (int)$dtCursor->format('n'),
+                    'monthName' => $mNames[(int)$dtCursor->format('n')],
+                    'count'     => 0
+                ];
+            }
         }
 
-        // Koreksi batas akhir bulan dengan date('Y-m-t') agar bukan string literal "...-t"
-        $maxMonthLastDay = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $refYear, $maxMonth)));
+        // Jika karena suatu hal kosong, minimal masukkan bulan terpilih
+        if (empty($targetRollingMonths)) {
+            $mKeySel = $endPeriodDt->format('Y-m');
+            $targetRollingMonths[$mKeySel] = [
+                'year'      => $refYear,
+                'month'     => $refMonth,
+                'monthName' => $mNames[$refMonth],
+                'count'     => 0
+            ];
+        }
+
+        $minRollDate = array_key_first($targetRollingMonths) . '-01';
+        $maxRollDate = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $refYear, $refMonth)));
 
         $wM = [
-            "dds.defect_type_id = :defId",
+            "{$itemCol} = :itemId",
             "dds.summary_date >= :minM_d AND dds.summary_date <= :maxM_d"
         ];
         $pM = [
-            ':defId'  => $defectId,
-            ':minM_d' => sprintf('%04d-01-01', $refYear),
-            ':maxM_d' => $maxMonthLastDay
+            ':itemId' => $itemId,
+            ':minM_d' => $minRollDate,
+            ':maxM_d' => $maxRollDate
         ];
         if ($customer !== '') {
             $wM[] = "dds.customer = :cust";
             $pM[':cust'] = $customer;
         }
+
         $sqlM = "SELECT 
-                    MONTH(dds.summary_date) AS m_num,
+                    DATE_FORMAT(dds.summary_date, '%Y-%m') AS ym_key,
                     COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
                     COALESCE(SUM(dds.lot_count), 0) AS total_lots
                  FROM oqc_daily_defect_summary dds
                  WHERE " . implode(' AND ', $wM) . "
-                 GROUP BY m_num";
+                 GROUP BY ym_key";
         $stM = $pdo->prepare($sqlM);
         $stM->execute($pM);
         foreach ($stM->fetchAll(PDO::FETCH_ASSOC) as $r) {
-            $mn = (int)$r['m_num'];
-            if (isset($monthlyCounts[$mn])) {
-                $monthlyCounts[$mn] = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
+            $ym = $r['ym_key'];
+            if (isset($targetRollingMonths[$ym])) {
+                $targetRollingMonths[$ym]['count'] = ($unit === 'lot') ? (int)$r['total_lots'] : (int)$r['total_pcs'];
             }
         }
 
+        $monthlyBreakdown = [];
         // Jika PPM: Ambil total sample populasi bulanan dari oqc_daily_summary
         if ($unit === 'ppm') {
             $wMSample = [
                 "summary_date >= :minM_d AND summary_date <= :maxM_d"
             ];
             $pMSample = [
-                ':minM_d' => sprintf('%04d-01-01', $refYear),
-                ':maxM_d' => $maxMonthLastDay
+                ':minM_d' => $minRollDate,
+                ':maxM_d' => $maxRollDate
             ];
             if ($customer !== '') {
                 $wMSample[] = "customer = :cust";
@@ -1538,19 +1775,26 @@ try {
                 : "COALESCE(NULLIF(SUM(total_sample_size_lot), 0), SUM(total_sample_size), 0)";
 
             $sqlMSample = "SELECT 
-                            MONTH(summary_date) AS m_num,
+                            DATE_FORMAT(summary_date, '%Y-%m') AS ym_key,
                             {$sampleColExp} AS sample_pop
                            FROM oqc_daily_summary
                            WHERE " . implode(' AND ', $wMSample) . "
-                           GROUP BY m_num";
+                           GROUP BY ym_key";
             $stMSample = $pdo->prepare($sqlMSample);
             $stMSample->execute($pMSample);
             $sampleMMap = $stMSample->fetchAll(PDO::FETCH_KEY_PAIR);
-            foreach ($monthlyCounts as $mNum => &$mVal) {
-                $pop = (int)($sampleMMap[$mNum] ?? 0);
-                $mVal = ($pop > 0) ? round(($mVal / $pop) * 1000000, 1) : 0;
+            foreach ($targetRollingMonths as $ymKey => &$mInfo) {
+                $pop = (int)($sampleMMap[$ymKey] ?? 0);
+                $defQty = $mInfo['count'];
+                $calcPpm = ($pop > 0) ? round(($defQty / $pop) * 1000000, 1) : 0;
+                $monthlyBreakdown[$ymKey] = [
+                    'defect_count' => $defQty,
+                    'sample_pop'   => $pop,
+                    'ppm'          => $calcPpm
+                ];
+                $mInfo['count'] = $calcPpm;
             }
-            unset($mVal);
+            unset($mInfo);
         }
 
         $subResolution = isset($_GET['sub_resolution']) ? trim($_GET['sub_resolution']) : 'weekly';
@@ -1574,11 +1818,12 @@ try {
         $w1SunDayStr = $w1Sun->format('d');
         $mLastDayStr = date('d', strtotime($monthEndStr));
 
-        $microLabels  = [];
-        $microCounts  = [];
-        $microTooltips= [];
-        $sectionTitle = '';
-        $sectionSub   = '';
+        $microLabels    = [];
+        $microCounts    = [];
+        $microTooltips  = [];
+        $microBreakdown = [];
+        $sectionTitle   = '';
+        $sectionSub     = '';
 
         if ($subResolution === 'daily') {
             // MODE HARIAN (per tanggal tgl 04 s/d akhir bulan)
@@ -1603,11 +1848,11 @@ try {
 
             if (!empty($dailyBuckets)) {
                 $wD = [
-                    "dds.defect_type_id = :defId",
+                    "{$itemCol} = :itemId",
                     "dds.summary_date >= :dStart AND dds.summary_date <= :dEnd"
                 ];
                 $pD = [
-                    ':defId'  => $defectId,
+                    ':itemId' => $itemId,
                     ':dStart' => $w1Sun->format('Y-m-d'),
                     ':dEnd'   => $monthEndStr
                 ];
@@ -1652,13 +1897,20 @@ try {
                     $sampleDMap = $stDSample->fetchAll(PDO::FETCH_KEY_PAIR);
                     foreach ($dailyBuckets as $dStr => &$db) {
                         $pop = (int)($sampleDMap[$dStr] ?? 0);
-                        $db['count'] = ($pop > 0) ? round(($db['count'] / $pop) * 1000000, 1) : 0;
+                        $defQty = $db['count'];
+                        $calcPpm = ($pop > 0) ? round(($defQty / $pop) * 1000000, 1) : 0;
+                        $microBreakdown[$dStr] = [
+                            'defect_count' => $defQty,
+                            'sample_pop'   => $pop,
+                            'ppm'          => $calcPpm
+                        ];
+                        $db['count'] = $calcPpm;
                     }
                     unset($db);
                 }
             }
 
-            foreach ($dailyBuckets as $db) {
+            foreach ($dailyBuckets as $dKey => $db) {
                 $microLabels[]   = $db['dayNum'];
                 $microCounts[]   = $db['count'];
                 $microTooltips[] = $db['tooltip'];
@@ -1705,13 +1957,13 @@ try {
                 $wEffEnd   = $weeklyBuckets[$lastBucketKey]['end_date'];
 
                 $wW = [
-                    "dds.defect_type_id = :defId",
+                    "{$itemCol} = :itemId",
                     "dds.summary_date >= :ws AND dds.summary_date <= :we"
                 ];
                 $pW = [
-                    ':defId' => $defectId,
-                    ':ws'    => $wEffStart,
-                    ':we'    => $wEffEnd
+                    ':itemId' => $itemId,
+                    ':ws'     => $wEffStart,
+                    ':we'     => $wEffEnd
                 ];
                 if ($customer !== '') {
                     $wW[] = "dds.customer = :cust";
@@ -1774,13 +2026,20 @@ try {
                     }
                     foreach ($weeklyBuckets as $wbKey => &$wb) {
                         $pop = $sampleWBuckets[$wbKey] ?? 0;
-                        $wb['count'] = ($pop > 0) ? round(($wb['count'] / $pop) * 1000000, 1) : 0;
+                        $defQty = $wb['count'];
+                        $calcPpm = ($pop > 0) ? round(($defQty / $pop) * 1000000, 1) : 0;
+                        $microBreakdown[$wbKey] = [
+                            'defect_count' => $defQty,
+                            'sample_pop'   => $pop,
+                            'ppm'          => $calcPpm
+                        ];
+                        $wb['count'] = $calcPpm;
                     }
                     unset($wb);
                 }
             }
 
-            foreach ($weeklyBuckets as $wb) {
+            foreach ($weeklyBuckets as $wbKey => $wb) {
                 $microLabels[]   = $wb['shortLabel'];
                 $microCounts[]   = $wb['count'];
                 $microTooltips[] = $wb['label'];
@@ -1788,50 +2047,75 @@ try {
         }
 
         // ── 4. RAKIT COMPOSITE LABELS & DATASETS DENGAN COLOR PALETTE ZONA ──
-        $allLabels  = [];
-        $allCounts  = [];
-        $barColors  = [];
-        $borderCols = [];
-        $tooltips   = [];
+        $allLabels    = [];
+        $allCounts    = [];
+        $barColors    = [];
+        $borderCols   = [];
+        $tooltips     = [];
+        $allBreakdown = [];
 
         // Zona 1: Tahunan (Dark Navy / Slate)
         $idxStartYear = count($allLabels);
         foreach ($yearlyCounts as $yrStr => $cnt) {
-            $allLabels[]  = $yrStr;
-            $allCounts[]  = $cnt;
-            $barColors[]  = '#1e293b'; // Slate 800
-            $borderCols[] = '#0f172a';
-            $tooltips[]   = "Tahun {$yrStr}";
+            $allLabels[]    = $yrStr;
+            $allCounts[]    = $cnt;
+            $barColors[]    = '#1e293b'; // Slate 800
+            $borderCols[]   = '#0f172a';
+            $tooltips[]     = "Tahun {$yrStr}";
+            $allBreakdown[] = $yearlyBreakdown[$yrStr] ?? null;
         }
         $idxEndYear = count($allLabels) - 1;
 
         // Zona 2: Bulanan (Royal Blue)
         $idxStartMonth = count($allLabels);
-        foreach ($monthlyCounts as $mNum => $cnt) {
-            $mLabel = $mNames[$mNum];
-            $allLabels[]  = $mLabel;
-            $allCounts[]  = $cnt;
-            $barColors[]  = '#2563eb'; // Blue 600
-            $borderCols[] = '#1d4ed8';
-            $tooltips[]   = "Bulan {$mNames[$mNum]} {$refYear}";
+        $firstRollMonthLabel = '';
+        $lastRollMonthLabel  = '';
+        foreach ($targetRollingMonths as $ymKey => $mInfo) {
+            $mLabel = $mInfo['monthName'];
+            if (count($targetRollingMonths) > 1 && $mInfo['year'] !== $refYear) {
+                $mLabel .= ' \'' . substr((string)$mInfo['year'], 2);
+            }
+            if ($firstRollMonthLabel === '') $firstRollMonthLabel = $mLabel;
+            $lastRollMonthLabel = $mLabel;
+
+            $allLabels[]    = $mLabel;
+            $allCounts[]    = $mInfo['count'];
+            $barColors[]    = '#2563eb'; // Blue 600
+            $borderCols[]   = '#1d4ed8';
+            $tooltips[]     = "Bulan {$mInfo['monthName']} {$mInfo['year']}";
+            $allBreakdown[] = $monthlyBreakdown[$ymKey] ?? null;
         }
         $idxEndMonth = count($allLabels) - 1;
 
         // Zona 3: Mingguan atau Harian (Emerald / Teal)
         $idxStartMicro = count($allLabels);
+        $microKeys = array_keys(($subResolution === 'daily') ? $dailyBuckets : $weeklyBuckets);
         foreach ($microLabels as $mIdx => $mLbl) {
-            $allLabels[]  = $mLbl;
-            $allCounts[]  = $microCounts[$mIdx];
-            $barColors[]  = '#059669'; // Emerald 600
-            $borderCols[] = '#047857';
-            $tooltips[]   = $microTooltips[$mIdx];
+            $allLabels[]    = $mLbl;
+            $allCounts[]    = $microCounts[$mIdx];
+            $barColors[]    = '#059669'; // Emerald 600
+            $borderCols[]   = '#047857';
+            $tooltips[]     = $microTooltips[$mIdx];
+            $mKey = $microKeys[$mIdx] ?? null;
+            $allBreakdown[] = ($mKey && isset($microBreakdown[$mKey])) ? $microBreakdown[$mKey] : null;
         }
         $idxEndMicro = count($allLabels) - 1;
 
-        // Fetch Meta Defect Name
-        $stD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
-        $stD->execute([':id' => $defectId]);
-        $defectName = $stD->fetchColumn() ?: '';
+        // Fetch Meta Item Name (Defect Name atau Part Info)
+        if ($isPartMode) {
+            $stP = $pdo->prepare("SELECT part_code, part_name FROM master_parts WHERE id = :id");
+            $stP->execute([':id' => $partId]);
+            $pRow = $stP->fetch(PDO::FETCH_ASSOC);
+            $itemName = $pRow ? ($pRow['part_code'] . ' - ' . $pRow['part_name']) : '';
+        } else {
+            $stD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
+            $stD->execute([':id' => $defectId]);
+            $itemName = $stD->fetchColumn() ?: '';
+        }
+
+        $monthSectionSub = ($firstRollMonthLabel === $lastRollMonthLabel)
+            ? "{$firstRollMonthLabel} {$refYear}"
+            : "{$firstRollMonthLabel} - {$lastRollMonthLabel}";
 
         echo json_encode([
             'success'     => true,
@@ -1840,6 +2124,7 @@ try {
             'barColors'   => $barColors,
             'borderColors'=> $borderCols,
             'tooltips'    => $tooltips,
+            'breakdown'   => $allBreakdown,
             'sections'    => [
                 [
                     'name'       => 'TAHUNAN',
@@ -1849,8 +2134,8 @@ try {
                     'color'      => '#1e293b'
                 ],
                 [
-                    'name'       => "BULANAN ({$refYear})",
-                    'sub'        => "Jan - {$mNames[$maxMonth]} {$refYear}",
+                    'name'       => "BULANAN",
+                    'sub'        => $monthSectionSub,
                     'startIndex' => $idxStartMonth,
                     'endIndex'   => $idxEndMonth,
                     'color'      => '#2563eb'
@@ -1864,7 +2149,9 @@ try {
                 ]
             ],
             'meta'        => [
-                'defectName'    => $defectName,
+                'isPartMode'    => $isPartMode,
+                'defectName'    => $itemName,
+                'partName'      => $itemName,
                 'year'          => $refYear,
                 'month'         => $refMonth,
                 'monthName'     => $mNames[$refMonth],
@@ -2364,28 +2651,10 @@ try {
         $res['part_name'] = $partMeta['part_name'];
         $res['model_name'] = $partMeta['model_name'] ?: 'General Model';
 
-        // Attach threshold targets for defects in table
-        $stmtGlobDef = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'global_defect' AND reference_id IS NULL LIMIT 1");
-        $stmtGlobDef->execute();
-        $globDefVal = $stmtGlobDef->fetchColumn();
-        $globDefVal = ($globDefVal !== false) ? (float)$globDefVal : null;
-
-        $stmtSpecDef = $pdo->prepare("SELECT reference_id, threshold_val FROM defect_threshold_targets WHERE target_type = 'specific_defect'");
-        $stmtSpecDef->execute();
-        $specDefMap = $stmtSpecDef->fetchAll(PDO::FETCH_KEY_PAIR);
-
+        // Tab Analisis Part tidak menggunakan target jenis defect
         foreach ($res['items'] as &$it) {
-            $itemId = $it['item_id'] ?? null;
-            if ($itemId && isset($specDefMap[$itemId])) {
-                $it['threshold_val'] = (float)$specDefMap[$itemId];
-                $it['is_specific_threshold'] = true;
-            } elseif ($globDefVal !== null) {
-                $it['threshold_val'] = $globDefVal;
-                $it['is_specific_threshold'] = false;
-            } else {
-                $it['threshold_val'] = null;
-                $it['is_specific_threshold'] = false;
-            }
+            $it['threshold_val'] = null;
+            $it['is_specific_threshold'] = false;
         }
         unset($it);
 
@@ -2406,37 +2675,39 @@ try {
         $stPart->execute([':pid' => $partId]);
         $partMeta = $stPart->fetch(PDO::FETCH_ASSOC) ?: ['part_code' => '', 'part_name' => '', 'model_name' => ''];
 
-        // 1. Get Top N defects for this part in this period
-        $wSum = [
-            "dds.summary_date >= :sd AND dds.summary_date <= :ed",
-            "dds.part_id = :pId"
-        ];
-        $pSum = [':sd' => $startDate, ':ed' => $endDate, ':pId' => $partId];
-        if ($customer !== '') {
-            $wSum[] = "dds.customer = :cust";
-            $pSum[':cust'] = $customer;
-        }
-        $wSumSql = implode(' AND ', $wSum);
+        // 1. Build timeframe intervals
+        $tf = getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution, $selectedYear, $selectedMonth);
+        $intervalType   = $tf['intervalType'];
+        $dateFormat     = $tf['dateFormat'];
+        $trendMap       = $tf['trendMap'];
+        $isWeeklyCustom = ($dateFormat === 'custom_week');
 
-        $sqlTop = "SELECT 
+        // Query all defects for this part in the date range
+        $wSumT = [
+            "dds.summary_date >= :sd AND dds.summary_date <= :ed",
+            "dds.part_id = :pid"
+        ];
+        $pSumT = [':sd' => $startDate, ':ed' => $endDate, ':pid' => $partId];
+        if ($customer !== '') {
+            $wSumT[] = "dds.customer = :cust";
+            $pSumT[':cust'] = $customer;
+        }
+        $wSumTSql = implode(' AND ', $wSumT);
+
+        $sqlAll = "SELECT 
                     dt.id,
                     dt.name AS defect_name,
                     COALESCE(SUM(dds.qty_ng), 0) AS total_ng
                    FROM oqc_daily_defect_summary dds
                    INNER JOIN defect_types dt ON dds.defect_type_id = dt.id
-                   WHERE {$wSumSql}
+                   WHERE {$wSumTSql}
                    GROUP BY dt.id, dt.name
                    ORDER BY total_ng DESC";
-        $stTop = $pdo->prepare($sqlTop);
-        $stTop->execute($pSum);
-        $allTopDefects = $stTop->fetchAll(PDO::FETCH_ASSOC);
+        $stAll = $pdo->prepare($sqlAll);
+        $stAll->execute($pSumT);
+        $allDefects = $stAll->fetchAll(PDO::FETCH_ASSOC);
 
-        $limitDefs = is_numeric($topRank) ? (int)$topRank : 3;
-        if ($limitDefs < 1 || $limitDefs > 15) $limitDefs = 3;
-        $topDefects   = array_slice($allTopDefects, 0, $limitDefs);
-        $otherDefects = array_slice($allTopDefects, $limitDefs);
-
-        if (empty($topDefects)) {
+        if (empty($allDefects)) {
             echo json_encode([
                 'success'       => true,
                 'part_code'     => $partMeta['part_code'],
@@ -2451,140 +2722,205 @@ try {
             exit;
         }
 
-        $allDefIds    = array_column($allTopDefects, 'id');
-        $topDefIds    = array_column($topDefects, 'id');
-        $topDefIdMap  = array_flip($topDefIds);
-        $placeholders = implode(',', array_fill(0, count($allDefIds), '?'));
-
-        // 2. Build timeframe intervals
-        $tf = getTimeframeIntervals($startDate, $endDate, $filterType);
-        $intervalType = $tf['intervalType'];
-        $dateFormat   = $tf['dateFormat'];
-        $trendMap     = $tf['trendMap'];
-
-        // 3. Initialize defect series: defId => [ time_key => pcs ]
-        $defectSeries = [];
-        $sampleSeries = []; // time_key => total_sample for this part
-        foreach ($topDefects as $idx => $td) {
-            $did = (int)$td['id'];
-            $defectSeries[$did] = [];
-            foreach ($trendMap as $tk => $tMeta) {
-                $defectSeries[$did][$tk] = 0;
-            }
-        }
-        if (!empty($otherDefects)) {
-            $defectSeries['others'] = [];
-            foreach ($trendMap as $tk => $tMeta) {
-                $defectSeries['others'][$tk] = 0;
-            }
+        $defectMetaMap = [];
+        foreach ($allDefects as $d) {
+            $defectMetaMap[(int)$d['id']] = $d['defect_name'];
         }
 
-        // 4. Query defect summary for this part and all defects
-        $wSumT = [
-            "dds.summary_date >= ? AND dds.summary_date <= ?",
-            "dds.part_id = ?",
-            "dds.defect_type_id IN ({$placeholders})"
-        ];
-        $pSumT = array_merge([$startDate, $endDate, $partId], $allDefIds);
-        if ($customer !== '') {
-            $wSumT[] = "dds.customer = ?";
-            $pSumT[] = $customer;
+        // bucketDefectValues[time_key][defect_id] = total_ng
+        $bucketDefectValues = [];
+        foreach ($trendMap as $tk => $tMeta) {
+            $bucketDefectValues[$tk] = [];
         }
-        $wSumTSql = implode(' AND ', $wSumT);
 
-        $sqlT = "SELECT 
-                    DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
-                    dds.defect_type_id,
-                    COALESCE(SUM(dds.qty_ng), 0) AS total_ng
-                 FROM oqc_daily_defect_summary dds
-                 WHERE {$wSumTSql}
-                 GROUP BY time_key, dds.defect_type_id";
-        $stT = $pdo->prepare($sqlT);
-        $stT->execute($pSumT);
-        foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $tk  = $row['time_key'];
-            $did = (int)$row['defect_type_id'];
-            if (isset($topDefIdMap[$did])) {
-                if (isset($defectSeries[$did][$tk])) {
-                    $defectSeries[$did][$tk] += (int)$row['total_ng'];
+        if ($isWeeklyCustom) {
+            $sqlT = "SELECT 
+                        dds.summary_date,
+                        dds.defect_type_id,
+                        COALESCE(SUM(dds.qty_ng), 0) AS total_ng
+                     FROM oqc_daily_defect_summary dds
+                     WHERE {$wSumTSql}
+                     GROUP BY dds.summary_date, dds.defect_type_id";
+            $stT = $pdo->prepare($sqlT);
+            $stT->execute($pSumT);
+            foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $sDate = $row['summary_date'];
+                $did   = (int)$row['defect_type_id'];
+                $val   = (int)$row['total_ng'];
+                foreach ($trendMap as $wKey => $wMeta) {
+                    if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                        $bucketDefectValues[$wKey][$did] = ($bucketDefectValues[$wKey][$did] ?? 0) + $val;
+                        break;
+                    }
                 }
-            } elseif (!empty($otherDefects) && isset($defectSeries['others'][$tk])) {
-                $defectSeries['others'][$tk] += (int)$row['total_ng'];
+            }
+        } else {
+            $sqlT = "SELECT 
+                        DATE_FORMAT(dds.summary_date, '{$dateFormat}') AS time_key,
+                        dds.defect_type_id,
+                        COALESCE(SUM(dds.qty_ng), 0) AS total_ng
+                     FROM oqc_daily_defect_summary dds
+                     WHERE {$wSumTSql}
+                     GROUP BY time_key, dds.defect_type_id";
+            $stT = $pdo->prepare($sqlT);
+            $stT->execute($pSumT);
+            foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $tk  = $row['time_key'];
+                $did = (int)$row['defect_type_id'];
+                $val = (int)$row['total_ng'];
+                if (isset($bucketDefectValues[$tk])) {
+                    $bucketDefectValues[$tk][$did] = ($bucketDefectValues[$tk][$did] ?? 0) + $val;
+                }
             }
         }
 
-        // If unit is PPM, query sample size for this part
-        if ($unit === 'ppm') {
-            $wSamp = [
-                "summary_date >= ? AND summary_date <= ?",
-                "part_id = ?"
-            ];
-            $pSamp = [$startDate, $endDate, $partId];
-            if ($customer !== '') {
-                $wSamp[] = "customer = ?";
-                $pSamp[] = $customer;
-            }
-            $wSampSql = implode(' AND ', $wSamp);
-
-            $sqlSamp = "SELECT 
-                            DATE_FORMAT(summary_date, '{$dateFormat}') AS time_key,
-                            {$sampleCol} AS total_sample
-                        FROM oqc_daily_summary
-                        WHERE {$wSampSql}
-                        GROUP BY time_key";
-            $stSamp = $pdo->prepare($sqlSamp);
-            $stSamp->execute($pSamp);
-            foreach ($stSamp->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                $tk = $row['time_key'];
-                $sampleSeries[$tk] = (int)$row['total_sample'];
-            }
-        }
-
-        // 5. Active sessions for today if applicable
+        // Active sessions for today if applicable
         if ($endDate >= date('Y-m-d')) {
             $wActT = [
                 "s.status = 'in_progress'",
                 "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                "s.started_at >= ? AND s.started_at < ?",
-                "ngr.part_id = ?",
-                "ngr.defect_type_id IN ({$placeholders})"
+                "s.started_at >= :sd_act AND s.started_at < :ed_act",
+                "ngr.part_id = :pid"
             ];
-            $pActT = array_merge([
-                $startDate . ' 00:00:00',
-                date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
-                $partId
-            ], $allDefIds);
+            $pActT = [
+                ':sd_act' => $startDate . ' 00:00:00',
+                ':ed_act' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00',
+                ':pid'    => $partId
+            ];
             if ($customer !== '') {
-                $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = ?";
-                $pActT[] = $customer;
+                $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
+                $pActT[':cust'] = $customer;
             }
             $wActTSql = implode(' AND ', $wActT);
 
-            $sqlActT = "SELECT 
-                            DATE_FORMAT(s.started_at, '{$dateFormat}') AS time_key,
-                            ngr.defect_type_id,
-                            COALESCE(SUM(ngr.qty_ng), 0) AS total_ng
-                        FROM inspection_ng_records ngr
-                        INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                        LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                        WHERE {$wActTSql}
-                        GROUP BY time_key, ngr.defect_type_id";
-            $stActT = $pdo->prepare($sqlActT);
-            $stActT->execute($pActT);
-            foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                $tk  = $row['time_key'];
-                $did = (int)$row['defect_type_id'];
-                if (isset($topDefIdMap[$did])) {
-                    if (isset($defectSeries[$did][$tk])) {
-                        $defectSeries[$did][$tk] += (int)$row['total_ng'];
+            if ($isWeeklyCustom) {
+                $sqlActT = "SELECT 
+                                DATE(s.started_at) AS session_date,
+                                ngr.defect_type_id,
+                                dt.name AS defect_name,
+                                COALESCE(SUM(ngr.qty_ng), 0) AS total_ng
+                            FROM inspection_ng_records ngr
+                            INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                            INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                            LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                            WHERE {$wActTSql}
+                            GROUP BY session_date, ngr.defect_type_id, dt.name";
+                $stActT = $pdo->prepare($sqlActT);
+                $stActT->execute($pActT);
+                foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $sDate = $row['session_date'];
+                    $did   = (int)$row['defect_type_id'];
+                    $val   = (int)$row['total_ng'];
+                    $defectMetaMap[$did] = $row['defect_name'];
+                    foreach ($trendMap as $wKey => $wMeta) {
+                        if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                            $bucketDefectValues[$wKey][$did] = ($bucketDefectValues[$wKey][$did] ?? 0) + $val;
+                            break;
+                        }
                     }
-                } elseif (!empty($otherDefects) && isset($defectSeries['others'][$tk])) {
-                    $defectSeries['others'][$tk] += (int)$row['total_ng'];
+                }
+            } else {
+                $sqlActT = "SELECT 
+                                DATE_FORMAT(s.started_at, '{$dateFormat}') AS time_key,
+                                ngr.defect_type_id,
+                                dt.name AS defect_name,
+                                COALESCE(SUM(ngr.qty_ng), 0) AS total_ng
+                            FROM inspection_ng_records ngr
+                            INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                            INNER JOIN defect_types dt ON ngr.defect_type_id = dt.id
+                            LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                            WHERE {$wActTSql}
+                            GROUP BY time_key, ngr.defect_type_id, dt.name";
+                $stActT = $pdo->prepare($sqlActT);
+                $stActT->execute($pActT);
+                foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $tk  = $row['time_key'];
+                    $did = (int)$row['defect_type_id'];
+                    $val = (int)$row['total_ng'];
+                    $defectMetaMap[$did] = $row['defect_name'];
+                    if (isset($bucketDefectValues[$tk])) {
+                        $bucketDefectValues[$tk][$did] = ($bucketDefectValues[$tk][$did] ?? 0) + $val;
+                    }
                 }
             }
         }
 
-        // 6. Build labels, datasets, and rawMatrix
+        // If unit is PPM, query sample size for this part
+        $sampleSeries = [];
+        if ($unit === 'ppm') {
+            $wSamp = [
+                "summary_date >= :sd AND summary_date <= :ed",
+                "part_id = :pid"
+            ];
+            $pSamp = [':sd' => $startDate, ':ed' => $endDate, ':pid' => $partId];
+            if ($customer !== '') {
+                $wSamp[] = "customer = :cust";
+                $pSamp[':cust'] = $customer;
+            }
+            $wSampSql = implode(' AND ', $wSamp);
+
+            if ($isWeeklyCustom) {
+                $sqlSamp = "SELECT summary_date, {$sampleCol} AS total_sample
+                            FROM oqc_daily_summary
+                            WHERE {$wSampSql}
+                            GROUP BY summary_date";
+                $stSamp = $pdo->prepare($sqlSamp);
+                $stSamp->execute($pSamp);
+                foreach ($stSamp->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $sDate = $row['summary_date'];
+                    foreach ($trendMap as $wKey => $wMeta) {
+                        if ($sDate >= $wMeta['start_date'] && $sDate <= $wMeta['end_date']) {
+                            $sampleSeries[$wKey] = ($sampleSeries[$wKey] ?? 0) + (int)$row['total_sample'];
+                            break;
+                        }
+                    }
+                }
+            } else {
+                $sqlSamp = "SELECT 
+                                DATE_FORMAT(summary_date, '{$dateFormat}') AS time_key,
+                                {$sampleCol} AS total_sample
+                            FROM oqc_daily_summary
+                            WHERE {$wSampSql}
+                            GROUP BY time_key";
+                $stSamp = $pdo->prepare($sqlSamp);
+                $stSamp->execute($pSamp);
+                foreach ($stSamp->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $tk = $row['time_key'];
+                    $sampleSeries[$tk] = (int)$row['total_sample'];
+                }
+            }
+        }
+
+        // Filter Top Defect IDs (Per-Interval / Per-Week ranking)
+        $rankLimit = (is_numeric($topRank) && (int)$topRank > 0) ? (int)$topRank : 0;
+        $selectedDefectIds = [];
+
+        if ($rankLimit > 0) {
+            foreach ($trendMap as $tk => $tMeta) {
+                $defsInBucket = $bucketDefectValues[$tk] ?? [];
+                if (!empty($defsInBucket)) {
+                    $positiveDefs = array_filter($defsInBucket, function($v) { return $v > 0; });
+                    arsort($positiveDefs);
+                    $topSlice = array_slice(array_keys($positiveDefs), 0, $rankLimit);
+                    foreach ($topSlice as $dId) {
+                        $selectedDefectIds[$dId] = true;
+                    }
+                }
+            }
+            // Fallback: Jika semua interval bernilai 0, ambil top keseluruhan
+            if (empty($selectedDefectIds)) {
+                $topSlice = array_slice($allDefects, 0, $rankLimit);
+                foreach ($topSlice as $td) {
+                    $selectedDefectIds[(int)$td['id']] = true;
+                }
+            }
+        } else {
+            foreach ($allDefects as $td) {
+                $selectedDefectIds[(int)$td['id']] = true;
+            }
+        }
+
+        // Build labels, datasets, and rawMatrix
         $labels   = [];
         $timeKeys = [];
         foreach ($trendMap as $tk => $tMeta) {
@@ -2594,15 +2930,16 @@ try {
 
         $datasets = [];
         $defectsHeader = [];
-        foreach ($topDefects as $idx => $td) {
-            $did   = (int)$td['id'];
-            $color = $paletteDefects[$idx % count($paletteDefects)];
-            $name  = $td['defect_name'];
+        $defIdx = 0;
+
+        foreach (array_keys($selectedDefectIds) as $did) {
+            $name  = $defectMetaMap[$did] ?? "Defect #{$did}";
+            $color = $paletteDefects[$defIdx % count($paletteDefects)];
 
             $dataArr   = [];
             $rawPcsArr = [];
             foreach ($timeKeys as $tk) {
-                $rawPcs = $defectSeries[$did][$tk] ?? 0;
+                $rawPcs = $bucketDefectValues[$tk][$did] ?? 0;
                 $rawPcsArr[] = $rawPcs;
                 if ($unit === 'ppm') {
                     $sTotal = $sampleSeries[$tk] ?? 0;
@@ -2632,46 +2969,16 @@ try {
                 'defect_name' => $name,
                 'color'       => $color
             ];
+            $defIdx++;
         }
 
-        // Tambahkan Others jika ada defect di luar Top N
-        if (!empty($otherDefects) && isset($defectSeries['others'])) {
-            $otherRawPcsArr = [];
-            $otherDataArr   = [];
-            foreach ($timeKeys as $tk) {
-                $rawPcs = $defectSeries['others'][$tk] ?? 0;
-                $otherRawPcsArr[] = $rawPcs;
-                if ($unit === 'ppm') {
-                    $sTotal = $sampleSeries[$tk] ?? 0;
-                    $val = ($sTotal > 0 && $rawPcs > 0) ? (int)round(($rawPcs / $sTotal) * 1000000) : 0;
-                } else {
-                    $val = $rawPcs;
-                }
-                $otherDataArr[] = $val;
-            }
-
-            $otherLabel = 'Others (' . count($otherDefects) . ' jenis lainnya)';
-            $datasets[] = [
-                'label'           => $otherLabel,
-                'defect_id'       => 0,
-                'is_others'       => true,
-                'data'            => $otherDataArr,
-                'raw_pcs'         => $otherRawPcsArr,
-                'part_code'       => $partMeta['part_code'],
-                'part_name'       => $partMeta['part_name'],
-                'backgroundColor' => '#94a3b8',
-                'borderColor'     => '#ffffff',
-                'borderWidth'     => 1,
-                'borderRadius'    => 4,
-                'stack'           => 'stack1'
-            ];
-
-            $defectsHeader[] = [
-                'defect_id'   => 0,
-                'defect_name' => $otherLabel,
-                'color'       => '#94a3b8'
-            ];
-        }
+        // Urutkan datasets: Terbanyak di indeks awal agar menjadi tumpukan paling bawah di bar chart
+        usort($datasets, function($a, $b) {
+            $sumA = array_sum($a['data'] ?? []);
+            $sumB = array_sum($b['data'] ?? []);
+            if ($sumA === $sumB) return 0;
+            return ($sumB <=> $sumA);
+        });
 
         // Build matrix table rows
         $rawMatrix = [];
@@ -2769,100 +3076,47 @@ try {
         $stmtH->execute($paramsH);
         $rows = $stmtH->fetchAll(PDO::FETCH_ASSOC);
 
-        ob_start();
-        if (empty($rows)): ?>
-            <tr>
-                <td colspan="10" style="padding:32px;text-align:center;color:#94a3b8;font-weight:600;">
-                    Tidak ada catatan riwayat temuan defect pada filter ini.
-                </td>
-            </tr>
-        <?php else: ?>
-            <?php foreach ($rows as $idx => $row): 
-                $isKanban = ($row['inspection_type'] === 'kanban');
-                $filterDate = date('d M Y', strtotime($row['started_at']));
-                $filterPart = trim($row['part_code'] . ' - ' . $row['part_name']);
-                $filterModel = trim($row['model_name']);
-                $filterDefect = trim($row['defect_name']);
-                $filterType = $isKanban ? 'Kanban' : 'Safety Stock';
-                $filterCustomer = trim($row['customer_name']);
-                $filterInspector = trim($row['inspector_name'] ?? 'System');
-            ?>
-                <tr class="part-overview-history-row"
-                    data-filter-date="<?= htmlspecialchars($filterDate) ?>"
-                    data-filter-part="<?= htmlspecialchars($filterPart) ?>"
-                    data-filter-model="<?= htmlspecialchars($filterModel) ?>"
-                    data-filter-defect="<?= htmlspecialchars($filterDefect) ?>"
-                    data-filter-type="<?= htmlspecialchars($filterType) ?>"
-                    data-filter-customer="<?= htmlspecialchars($filterCustomer) ?>"
-                    data-filter-inspector="<?= htmlspecialchars($filterInspector) ?>"
-                    style="border-bottom:1px solid #f1f5f9;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
-                    <td class="row-index" style="padding:10px 14px;text-align:center;color:#94a3b8;font-weight:700;">
-                        <?= $idx + 1 ?>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:11px;">
-                            <?= date('d M Y', strtotime($row['started_at'])) ?>
-                        </div>
-                        <span style="font-size:10px;color:#64748b;font-weight:600;">
-                            <?= date('H:i', strtotime($row['started_at'])) ?> WIB
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="display:inline-block;padding:2px 7px;border-radius:5px;background:#f1f5f9;color:#334155;border:1px solid #e2e8f0;font-size:11px;font-weight:700;">
-                            <?= htmlspecialchars($row['model_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:800;background:#fff1f2;color:#be123c;border:1px solid #ffe4e6;">
-                            <?= htmlspecialchars($row['defect_name']) ?>
-                        </span>
-                    </td>
-                    <td style="padding:10px 14px;text-align:center;">
-                        <?php if ($isKanban): ?>
-                            <span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:800;background:#eff6ff;color:#1d4ed8;border:1px solid #dbeafe;text-transform:uppercase;">
-                                Kanban
-                            </span>
-                        <?php else: ?>
-                            <span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:800;background:#f5f3ff;color:#6d28d9;border:1px solid #ede9fe;text-transform:uppercase;">
-                                Safety Stock
-                            </span>
-                        <?php endif; ?>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <span style="font-weight:800;color:#0f172a;font-family:monospace;background:#f1f5f9;padding:2px 7px;border-radius:4px;border:1px solid #e2e8f0;font-size:11px;display:inline-block;">
-                            <?= htmlspecialchars($row['kanban_no']) ?>
-                        </span>
-                        <div style="font-weight:700;color:#334155;font-size:11px;margin-top:3px;">
-                            <?= htmlspecialchars($row['customer_name']) ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:800;color:#0f172a;font-size:12px;font-family:monospace;">
-                            <?= htmlspecialchars($row['lot_number'] ?: '-') ?>
-                        </div>
-                        <div style="font-size:10px;color:#64748b;font-weight:600;margin-top:2px;font-family:monospace;">
-                            <?= htmlspecialchars($row['ref_number'] ?: '-') ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;">
-                        <div style="font-weight:700;color:#0f172a;font-size:11px;">
-                            <?= htmlspecialchars($row['inspector_name'] ?? 'System') ?>
-                        </div>
-                    </td>
-                    <td style="padding:10px 14px;text-align:right;">
-                        <div style="font-weight:900;color:#b91c1c;font-size:13px;">
-                            <?= number_format($row['qty_ng']) ?> Pcs
-                        </div>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-        <?php endif;
-        $html = ob_get_clean();
+        // Quick count of total records without LIMIT 300
+        $sqlCount = "SELECT COUNT(*) FROM inspection_ng_records ngr
+                     INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
+                     LEFT JOIN master_parts mp ON ngr.part_id = mp.id
+                     LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
+                     WHERE {$wSqlH}";
+        $stmtCount = $pdo->prepare($sqlCount);
+        $stmtCount->execute($paramsH);
+        $totalRecords = (int)$stmtCount->fetchColumn();
+
+        // Format items array for clean client-side rendering
+        $formattedItems = [];
+        foreach ($rows as $row) {
+            $isKanban = ($row['inspection_type'] === 'kanban');
+            $dt = strtotime($row['started_at']);
+            $formattedItems[] = [
+                'ng_id'          => (int)$row['ng_id'],
+                'date_formatted' => date('d M Y', $dt),
+                'time_formatted' => date('H:i', $dt) . ' WIB',
+                'part_code'      => $row['part_code'],
+                'part_name'      => $row['part_name'],
+                'model_name'     => $row['model_name'],
+                'defect_name'    => $row['defect_name'],
+                'inspection_type'=> $row['inspection_type'],
+                'type_label'     => $isKanban ? 'Kanban' : 'Safety Stock',
+                'is_kanban'      => $isKanban,
+                'kanban_no'      => $row['kanban_no'],
+                'customer_name'  => $row['customer_name'],
+                'lot_number'     => $row['lot_number'] ?: '-',
+                'ref_number'     => $row['ref_number'] ?: '-',
+                'inspector_name' => $row['inspector_name'] ?: 'System',
+                'qty_ng'         => (int)$row['qty_ng']
+            ];
+        }
 
         echo json_encode([
             'success'            => true,
-            'count'              => count($rows),
-            'html'               => $html,
+            'count'              => count($formattedItems),
+            'total_count'        => $totalRecords,
+            'is_capped'          => ($totalRecords > count($formattedItems)),
+            'items'              => $formattedItems,
             'filteredDefectName' => $filteredDefectName
         ]);
         exit;

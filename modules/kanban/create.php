@@ -617,8 +617,99 @@ if ($pdo) {
         }
     }
 
+    function onPreviewRowInputChange(input, previewIdx) {
+        var tr = document.getElementById('preview-row-' + previewIdx);
+        if (!tr) return;
+
+        // Jika baris ini sebelumnya ditandai duplikat, begitu user mengubah nilainya (misal no kanban / qty / req date),
+        // otomatis ubah status baris ini menjadi baris Baru (akan disimpan).
+        var isDup = (tr.getAttribute('data-duplicate') === '1');
+        if (isDup) {
+            tr.setAttribute('data-duplicate', '0');
+            tr.setAttribute('data-row-type', 'new');
+            tr.className = 'hover:bg-slate-50/80 is-new-row transition-colors';
+
+            var statusCell = tr.children[1];
+            if (statusCell) {
+                statusCell.innerHTML = '<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">✓ Diedit (Baru)</span>';
+            }
+        }
+
+        // Perbarui atribut pencarian
+        var kNo = (tr.querySelector('input[name*="[kanban_no]"]') || {}).value || '';
+        var iCode = (tr.querySelector('input[name*="[item_code]"]') || {}).value || '';
+        var iDesc = (tr.querySelector('input[name*="[item_description]"]') || {}).value || '';
+        var sLoc = (tr.querySelector('input[name*="[str_loc]"]') || {}).value || '';
+        var sArea = (tr.querySelector('input[name*="[supply_area]"]') || {}).value || '';
+        tr.setAttribute('data-search', (kNo + ' ' + iCode + ' ' + iDesc + ' ' + sLoc + ' ' + sArea).toLowerCase());
+
+        recalculatePreviewStats();
+    }
+
     var previewRowIndex = 0;
     var activePreviewFilter = 'all';
+
+    function recalculatePreviewStats() {
+        var tbody = document.getElementById('preview-kanban-rows-body');
+        if (!tbody) return;
+        var rows = tbody.querySelectorAll('tr');
+
+        var totalRows = rows.length;
+        var totalNew = 0;
+        var totalQtyChange = 0;
+        var totalDup = 0;
+
+        for (var i = 0; i < rows.length; i++) {
+            var tr = rows[i];
+            var isDup = (tr.getAttribute('data-duplicate') === '1');
+            var isQtyChange = (tr.getAttribute('data-qtychange') === '1');
+
+            if (isDup) {
+                totalDup++;
+            } else if (isQtyChange) {
+                var actSelect = tr.querySelector('.qty-action-select');
+                if (actSelect && actSelect.value !== 'skip') {
+                    totalQtyChange++;
+                } else if (!actSelect) {
+                    totalQtyChange++;
+                }
+            } else {
+                totalNew++;
+            }
+        }
+
+        var cAll = document.getElementById('count-card-all');
+        var cNew = document.getElementById('count-card-new');
+        var cQty = document.getElementById('count-card-qty_change');
+        var cDup = document.getElementById('count-card-dup');
+
+        if (cAll) cAll.textContent = totalRows;
+        if (cNew) cNew.textContent = totalNew;
+        if (cQty) cQty.textContent = totalQtyChange;
+        if (cDup) cDup.textContent = totalDup;
+
+        var actionableCount = totalNew + totalQtyChange;
+
+        var updateBtn = function(btn) {
+            if (!btn) return;
+            if (actionableCount > 0) {
+                btn.disabled = false;
+                btn.className = 'btn-primary py-2 px-4 text-xs font-bold shadow-md shadow-blue-600/20 cursor-pointer';
+                var btnText = '✓ Simpan ' + actionableCount + ' Data ke Database';
+                if (totalQtyChange > 0) {
+                    btnText = '✓ Simpan (' + totalNew + ' Baru, ' + totalQtyChange + ' Revisi Qty)';
+                }
+                btn.innerHTML = btnText;
+            } else {
+                btn.disabled = true;
+                btn.className = 'py-2 px-4 text-xs font-bold rounded-lg bg-slate-300 text-slate-500 cursor-not-allowed';
+                btn.innerHTML = '⚠️ Semua Baris Duplikat (0 Data Baru)';
+            }
+        };
+
+        updateBtn(document.getElementById('btn-submit-preview'));
+        updateBtn(document.getElementById('btn-submit-preview-top'));
+    }
 
     function previewExcelKanbanFile() {
         var fileInput = document.getElementById('excel-file-input');
@@ -641,7 +732,18 @@ if ($pdo) {
         .then(function(data) {
             document.getElementById('excel-loading').classList.add('hidden');
             if (!data.success) {
-                alert('Gagal membaca file: ' + data.message);
+                var errorMsg = data.message || 'Berkas Excel tidak valid atau gagal diproses oleh sistem.';
+                if (typeof Swal !== 'undefined') {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Validasi Berkas Gagal',
+                        text: errorMsg,
+                        confirmButtonText: 'Tutup & Periksa Berkas',
+                        confirmButtonColor: '#dc2626'
+                    });
+                } else {
+                    alert('PERINGATAN: ' + errorMsg);
+                }
                 return;
             }
 
@@ -649,7 +751,17 @@ if ($pdo) {
         })
         .catch(function(err) {
             document.getElementById('excel-loading').classList.add('hidden');
-            alert('Terjadi kesalahan koneksi server saat membaca file Excel!');
+            if (typeof Swal !== 'undefined') {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Kesalahan Sistem',
+                    text: 'Terjadi gangguan saat memproses berkas Excel di server. Pastikan format berkas sesuai standar.',
+                    confirmButtonText: 'Tutup',
+                    confirmButtonColor: '#475569'
+                });
+            } else {
+                alert('Terjadi gangguan koneksi server saat membaca file Excel.');
+            }
         });
     }
 
@@ -686,30 +798,6 @@ if ($pdo) {
                 bulkBanner.classList.add('hidden');
             }
         }
-
-        var submitBtn = document.getElementById('btn-submit-preview');
-        var submitBtnTop = document.getElementById('btn-submit-preview-top');
-
-        var updateSubmitBtnState = function(btn) {
-            if (!btn) return;
-            var actionableCount = totalNew + totalQtyChange;
-            if (actionableCount > 0) {
-                btn.disabled = false;
-                btn.className = 'btn-primary py-1.5 px-5 text-xs font-bold shadow-md shadow-blue-600/20 cursor-pointer';
-                var btnText = '✓ Simpan ' + actionableCount + ' Data ke Database';
-                if (totalQtyChange > 0) {
-                    btnText = '✓ Simpan (' + totalNew + ' Baru, ' + totalQtyChange + ' Revisi Qty)';
-                }
-                btn.innerHTML = btnText;
-            } else {
-                btn.disabled = true;
-                btn.className = 'py-1.5 px-5 text-xs font-bold rounded-lg bg-slate-300 text-slate-500 cursor-not-allowed';
-                btn.innerHTML = '⚠️ Semua Baris Duplikat (0 Data Baru)';
-            }
-        };
-
-        updateSubmitBtnState(submitBtn);
-        updateSubmitBtnState(submitBtnTop);
 
 
         var tbody = document.getElementById('preview-kanban-rows-body');
@@ -814,40 +902,40 @@ if ($pdo) {
                     <td class="px-3 py-2 text-center font-bold text-slate-400 preview-row-number" style="width: 40px; min-width: 40px;">${previewRowIndex}</td>
                     <td class="px-3 py-2 text-center" style="width: 170px; min-width: 170px;">${statusBadge}</td>
                     <td class="px-3 py-2" style="min-width: 160px;">
-                        <input type="text" name="rows[${previewRowIndex}][kanban_no]" value="${escapeHtml(r.kanban_no)}" class="form-input py-1 text-xs font-mono font-bold" required>
+                        <input type="text" name="rows[${previewRowIndex}][kanban_no]" value="${escapeHtml(r.kanban_no)}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" class="form-input py-1 text-xs font-mono font-bold" required>
                     </td>
                     <td class="px-3 py-2" style="min-width: 180px;">
-                        <input type="text" name="rows[${previewRowIndex}][item_code]" value="${escapeHtml(r.item_code)}" list="master-parts-list" oninput="onItemCodeInput(this, 'prev-${previewRowIndex}')" class="form-input py-1 text-xs font-mono font-bold" required autocomplete="off">
+                        <input type="text" name="rows[${previewRowIndex}][item_code]" value="${escapeHtml(r.item_code)}" list="master-parts-list" oninput="onItemCodeInput(this, 'prev-${previewRowIndex}'); onPreviewRowInputChange(this, ${previewRowIndex});" class="form-input py-1 text-xs font-mono font-bold" required autocomplete="off">
                     </td>
                     <td class="px-3 py-2" style="min-width: 220px;">
-                        <input type="text" name="rows[${previewRowIndex}][item_description]" id="item-desc-prev-${previewRowIndex}" value="${escapeHtml(r.item_description)}" class="form-input py-1 text-xs" required>
+                        <input type="text" name="rows[${previewRowIndex}][item_description]" id="item-desc-prev-${previewRowIndex}" value="${escapeHtml(r.item_description)}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" class="form-input py-1 text-xs" required>
                     </td>
                     <td class="px-3 py-2" style="min-width: 240px;">
-                        <select name="rows[${previewRowIndex}][customer_select]" id="cust-select-prev-${previewRowIndex}" onchange="onCustomerSelectChange(this, 'prev-${previewRowIndex}')" class="form-input py-1 text-xs font-semibold" required>
+                        <select name="rows[${previewRowIndex}][customer_select]" id="cust-select-prev-${previewRowIndex}" onchange="onCustomerSelectChange(this, 'prev-${previewRowIndex}'); onPreviewRowInputChange(this, ${previewRowIndex});" class="form-input py-1 text-xs font-semibold" required>
                             ${custOptionsHtml}
                         </select>
-                        <input type="text" name="rows[${previewRowIndex}][customer_custom]" id="custom-cust-prev-${previewRowIndex}" placeholder="Nama PT Customer Baru" class="form-input py-1 text-xs font-semibold mt-1 hidden">
+                        <input type="text" name="rows[${previewRowIndex}][customer_custom]" id="custom-cust-prev-${previewRowIndex}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="Nama PT Customer Baru" class="form-input py-1 text-xs font-semibold mt-1 hidden">
                     </td>
                     <td class="px-3 py-2" style="min-width: 150px;">
-                        <input type="text" name="rows[${previewRowIndex}][req_date]" value="${escapeHtml(r.req_date)}" placeholder="YYYY-MM-DD HH:MM:SS" class="form-input py-1 text-xs font-semibold" required>
+                        <input type="text" name="rows[${previewRowIndex}][req_date]" value="${escapeHtml(r.req_date)}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="YYYY-MM-DD HH:MM:SS" class="form-input py-1 text-xs font-semibold" required>
                     </td>
                     <td class="px-3 py-2" style="min-width: 150px;">
-                        <input type="text" name="rows[${previewRowIndex}][eta]" value="${escapeHtml(r.eta)}" placeholder="YYYY-MM-DD HH:MM:SS" class="form-input py-1 text-xs font-semibold" required>
+                        <input type="text" name="rows[${previewRowIndex}][eta]" value="${escapeHtml(r.eta)}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="YYYY-MM-DD HH:MM:SS" class="form-input py-1 text-xs font-semibold" required>
                     </td>
                     <td class="px-3 py-2" style="min-width: 100px;">
-                        <input type="number" name="rows[${previewRowIndex}][qty]" value="${r.qty}" min="1" class="form-input py-1 text-xs font-bold text-center" required>
+                        <input type="number" name="rows[${previewRowIndex}][qty]" value="${r.qty}" min="1" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" class="form-input py-1 text-xs font-bold text-center" required>
                     </td>
                     <td class="px-3 py-2" style="min-width: 120px;">
-                        <input type="text" name="rows[${previewRowIndex}][str_loc]" value="${escapeHtml(r.str_loc || '')}" placeholder="Str. Loc" class="form-input py-1 text-xs font-mono">
+                        <input type="text" name="rows[${previewRowIndex}][str_loc]" value="${escapeHtml(r.str_loc || '')}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="Str. Loc" class="form-input py-1 text-xs font-mono">
                     </td>
                     <td class="px-3 py-2" style="min-width: 120px;">
-                        <input type="text" name="rows[${previewRowIndex}][supply_area]" value="${escapeHtml(r.supply_area || '')}" placeholder="Supply Area" class="form-input py-1 text-xs font-mono">
+                        <input type="text" name="rows[${previewRowIndex}][supply_area]" value="${escapeHtml(r.supply_area || '')}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="Supply Area" class="form-input py-1 text-xs font-mono">
                     </td>
                     <td class="px-3 py-2" style="min-width: 110px;">
-                        <input type="text" name="rows[${previewRowIndex}][check_type]" value="${escapeHtml(r.check_type || '')}" placeholder="100% / -" class="form-input py-1 text-xs font-bold text-center">
+                        <input type="text" name="rows[${previewRowIndex}][check_type]" value="${escapeHtml(r.check_type || '')}" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="100% / -" class="form-input py-1 text-xs font-bold text-center">
                     </td>
                     <td class="px-3 py-2" style="min-width: 210px;">
-                        <textarea name="rows[${previewRowIndex}][remark]" rows="1" placeholder="Catatan" class="form-input py-1 text-xs resize-y" style="min-height: 38px;">${escapeHtml(r.remark)}</textarea>
+                        <textarea name="rows[${previewRowIndex}][remark]" rows="1" oninput="onPreviewRowInputChange(this, ${previewRowIndex})" placeholder="Catatan" class="form-input py-1 text-xs resize-y" style="min-height: 38px;">${escapeHtml(r.remark)}</textarea>
                     </td>
                     <td class="px-3 py-2 text-center" style="width: 60px; min-width: 60px;">
                         <button type="button" onclick="removePreviewKanbanRow(${previewRowIndex})" class="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded cursor-pointer" title="Hapus Baris">
@@ -864,6 +952,7 @@ if ($pdo) {
         document.getElementById('excel-preview-container').classList.remove('hidden');
         document.getElementById('preview-search-input').value = '';
         setPreviewFilter('all');
+        recalculatePreviewStats();
     }
 
     function setAllQtyChangeActions(action) {
@@ -890,6 +979,7 @@ if ($pdo) {
         } else {
             tr.classList.remove('opacity-50', 'line-through');
         }
+        recalculatePreviewStats();
     }
 
     function setPreviewFilter(filterType) {
@@ -1028,6 +1118,7 @@ if ($pdo) {
 
         filterPreviewRows();
         updatePreviewRowNumbers();
+        recalculatePreviewStats();
     }
 
     function removePreviewKanbanRow(idx) {
@@ -1036,6 +1127,7 @@ if ($pdo) {
             row.parentNode.removeChild(row);
             updatePreviewRowNumbers();
             filterPreviewRows();
+            recalculatePreviewStats();
         }
     }
 

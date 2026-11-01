@@ -7,6 +7,7 @@ require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
 
 $currentUser = current_user();
+$canApprove = in_array($currentUser['role'] ?? '', ['admin', 'supervisor', 'chief', 'manager', 'superadmin'], true);
 $pdo = getDB();
 
 $statusFilter = sanitize($_GET['status'] ?? 'pending');
@@ -16,8 +17,14 @@ if (!in_array($statusFilter, ['pending', 'approved', 'rejected', 'all'], true)) 
 
 $searchQuery = trim(sanitize($_GET['q'] ?? ''));
 
+// Pagination Config
+$perPage = 25;
+$page = max(1, (int)($_GET['page'] ?? 1));
+
 $requests = [];
 $counts = ['pending' => 0, 'approved' => 0, 'rejected' => 0, 'all' => 0];
+$totalFiltered = 0;
+$totalPages = 1;
 $loadError = null;
 
 if ($pdo) {
@@ -29,7 +36,40 @@ if ($pdo) {
             $counts['all'] += (int)$r['cnt'];
         }
 
-        // Main Query: Query did_approval_requests directly with users (100% immune to master_parts collation mismatch)
+        // Base Filter Clauses
+        $whereClauses = ["1=1"];
+        $params = [];
+
+        if ($statusFilter !== 'all') {
+            $whereClauses[] = "r.status = :st";
+            $params[':st'] = $statusFilter;
+        }
+
+        if (!empty($searchQuery)) {
+            // Optimized index-friendly search filter
+            $whereClauses[] = "(r.part_code LIKE :sq_p OR r.lot_number LIKE :sq_l OR r.part_name LIKE :sq_n)";
+            $params[':sq_p'] = $searchQuery . '%';
+            $params[':sq_l'] = $searchQuery . '%';
+            $params[':sq_n'] = '%' . $searchQuery . '%';
+        }
+
+        $whereSql = implode(" AND ", $whereClauses);
+
+        // Count Total Filtered Rows for Pagination
+        $stmtCountFiltered = $pdo->prepare("SELECT COUNT(*) FROM did_approval_requests r WHERE {$whereSql}");
+        $stmtCountFiltered->execute($params);
+        $totalFiltered = (int)$stmtCountFiltered->fetchColumn();
+        $totalPages = max(1, (int)ceil($totalFiltered / $perPage));
+        if ($page > $totalPages) {
+            $page = $totalPages;
+        }
+        $offset = ($page - 1) * $perPage;
+
+        // Main Query: Order by index-friendly clauses
+        $orderBySql = ($statusFilter === 'pending') 
+            ? "ORDER BY r.requested_at DESC" 
+            : "ORDER BY CASE WHEN r.status = 'pending' THEN 1 ELSE 2 END, r.requested_at DESC";
+
         $sql = "
             SELECT r.*, 
                    u_req.name AS requester_name,
@@ -39,24 +79,18 @@ if ($pdo) {
             FROM did_approval_requests r
             LEFT JOIN users u_req ON u_req.id = r.requested_by
             LEFT JOIN users u_rev ON u_rev.id = r.reviewed_by
-            WHERE 1=1
+            WHERE {$whereSql}
+            {$orderBySql}
+            LIMIT :limit OFFSET :offset
         ";
-        $params = [];
-
-        if ($statusFilter !== 'all') {
-            $sql .= " AND r.status = :st";
-            $params[':st'] = $statusFilter;
-        }
-
-        if (!empty($searchQuery)) {
-            $sql .= " AND (r.part_code LIKE :sq OR r.lot_number LIKE :sq OR r.part_name LIKE :sq)";
-            $params[':sq'] = '%' . $searchQuery . '%';
-        }
-
-        $sql .= " ORDER BY CASE WHEN r.status = 'pending' THEN 1 ELSE 2 END, r.requested_at DESC LIMIT 100";
 
         $stmtMain = $pdo->prepare($sql);
-        $stmtMain->execute($params);
+        foreach ($params as $k => $v) {
+            $stmtMain->bindValue($k, $v);
+        }
+        $stmtMain->bindValue(':limit', (int)$perPage, PDO::PARAM_INT);
+        $stmtMain->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
+        $stmtMain->execute();
         $requests = $stmtMain->fetchAll(PDO::FETCH_ASSOC);
 
         // Enrich display_part_name from master_parts safely via memory lookup (zero collation mismatch)
@@ -113,10 +147,10 @@ if ($pdo) {
         <!-- Live Status Counter Pills -->
         <div class="flex items-center gap-2 text-xs font-bold">
             <span class="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-full">
-                Pending: <?= number_format($counts['pending']) ?>
+                Pending: <span id="counter-pill-pending"><?= number_format($counts['pending']) ?></span>
             </span>
             <span class="px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-full">
-                Disetujui: <?= number_format($counts['approved']) ?>
+                Disetujui: <span id="counter-pill-approved"><?= number_format($counts['approved']) ?></span>
             </span>
         </div>
     </div>
@@ -127,16 +161,16 @@ if ($pdo) {
         <!-- Status Tabs -->
         <div class="flex items-center space-x-1 bg-slate-100 p-1 rounded-xl text-xs font-bold">
             <a href="?status=pending<?= !empty($searchQuery) ? '&q=' . urlencode($searchQuery) : '' ?>" class="px-3.5 py-1.5 rounded-lg transition-all <?= $statusFilter === 'pending' ? 'bg-white text-blue-700 shadow-2xs font-extrabold' : 'text-slate-600 hover:text-slate-900' ?>">
-                Pending (<?= number_format($counts['pending']) ?>)
+                Pending (<span id="tab-counter-pending"><?= number_format($counts['pending']) ?></span>)
             </a>
             <a href="?status=approved<?= !empty($searchQuery) ? '&q=' . urlencode($searchQuery) : '' ?>" class="px-3.5 py-1.5 rounded-lg transition-all <?= $statusFilter === 'approved' ? 'bg-white text-emerald-700 shadow-2xs font-extrabold' : 'text-slate-600 hover:text-slate-900' ?>">
-                Disetujui (<?= number_format($counts['approved']) ?>)
+                Disetujui (<span id="tab-counter-approved"><?= number_format($counts['approved']) ?></span>)
             </a>
             <a href="?status=rejected<?= !empty($searchQuery) ? '&q=' . urlencode($searchQuery) : '' ?>" class="px-3.5 py-1.5 rounded-lg transition-all <?= $statusFilter === 'rejected' ? 'bg-white text-rose-700 shadow-2xs font-extrabold' : 'text-slate-600 hover:text-slate-900' ?>">
-                Ditolak (<?= number_format($counts['rejected']) ?>)
+                Ditolak (<span id="tab-counter-rejected"><?= number_format($counts['rejected']) ?></span>)
             </a>
             <a href="?status=all<?= !empty($searchQuery) ? '&q=' . urlencode($searchQuery) : '' ?>" class="px-3.5 py-1.5 rounded-lg transition-all <?= $statusFilter === 'all' ? 'bg-white text-slate-900 shadow-2xs font-extrabold' : 'text-slate-600 hover:text-slate-900' ?>">
-                Semua (<?= number_format($counts['all']) ?>)
+                Semua (<span id="tab-counter-all"><?= number_format($counts['all']) ?></span>)
             </a>
         </div>
 
@@ -169,9 +203,11 @@ if ($pdo) {
                     <tr>
                         <th class="px-3 py-3 text-center w-16">
                             <div class="flex items-center justify-center gap-1.5">
-                                <input type="checkbox" id="bulk-did-check-all" onchange="toggleSelectAllDidRequests(this.checked)"
-                                       title="Pilih Semua Request Pending"
-                                       class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-xs">
+                                <?php if ($canApprove): ?>
+                                    <input type="checkbox" id="bulk-did-check-all" onchange="toggleSelectAllDidRequests(this.checked)"
+                                           title="Pilih Semua Request Pending di Halaman Ini"
+                                           class="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-xs">
+                                <?php endif; ?>
                                 <span>No</span>
                             </div>
                         </th>
@@ -198,11 +234,12 @@ if ($pdo) {
                             $isPending = ($r['status'] === 'pending');
                             $reqTimeFormatted = date('d M Y H:i:s', strtotime($r['requested_at']));
                             $revTimeFormatted = !empty($r['reviewed_at']) ? date('d M Y H:i:s', strtotime($r['reviewed_at'])) : '-';
+                            $rowNum = $offset + $idx + 1;
                             ?>
-                            <tr class="hover:bg-slate-50/80 transition-colors did-request-row <?= $isPending ? 'row-pending-did' : 'row-completed-did' ?>">
+                            <tr id="row-did-<?= (int)$r['id'] ?>" class="hover:bg-slate-50/80 transition-colors did-request-row <?= $isPending ? 'row-pending-did' : 'row-completed-did' ?>">
                                 <td class="px-3 py-3 text-center">
                                     <div class="flex items-center justify-center gap-1.5">
-                                        <?php if ($isPending): ?>
+                                        <?php if ($isPending && $canApprove): ?>
                                             <input type="checkbox" class="bulk-did-cb w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shadow-xs"
                                                    value="<?= (int)$r['id'] ?>"
                                                    data-part="<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code']) ?>"
@@ -210,15 +247,17 @@ if ($pdo) {
                                                    onchange="onDidCheckChange()"
                                                    title="Pilih request #<?= (int)$r['id'] ?> untuk disetujui">
                                         <?php else: ?>
-                                            <span style="width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: <?= $r['status'] === 'approved' ? '#16a34a' : '#e11d48' ?>;">
+                                            <span style="width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; color: <?= $r['status'] === 'approved' ? '#16a34a' : ($r['status'] === 'pending' ? '#d97706' : '#e11d48') ?>;">
                                                 <?php if ($r['status'] === 'approved'): ?>
                                                     <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
-                                                <?php else: ?>
+                                                <?php elseif ($r['status'] === 'rejected'): ?>
                                                     <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12"/></svg>
+                                                <?php else: ?>
+                                                    <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                                                 <?php endif; ?>
                                             </span>
                                         <?php endif; ?>
-                                        <span class="font-mono font-bold text-slate-700 text-xs"><?= $idx + 1 ?></span>
+                                        <span class="font-mono font-bold text-slate-700 text-xs"><?= $rowNum ?></span>
                                     </div>
                                 </td>
                                 <td class="px-4 py-3 whitespace-nowrap font-mono text-[11px] font-semibold text-slate-600">
@@ -267,14 +306,28 @@ if ($pdo) {
                                 </td>
                                 <td class="px-4 py-3 text-center whitespace-nowrap">
                                     <?php if ($r['status'] === 'pending'): ?>
-                                        <div class="flex items-center justify-center space-x-1.5">
-                                            <button type="button" onclick="approveDidRequest(<?= $r['id'] ?>, '<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['display_part_name'] ?? $r['part_name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['lot_number'], ENT_QUOTES) ?>')" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-extrabold text-[10px] shadow-2xs transition-all cursor-pointer">
-                                                Setujui
-                                            </button>
-                                            <button type="button" onclick="rejectDidRequest(<?= $r['id'] ?>, '<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['display_part_name'] ?? $r['part_name'], ENT_QUOTES) ?>', '<?= htmlspecialchars($r['lot_number'], ENT_QUOTES) ?>')" class="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-extrabold text-[10px] shadow-2xs transition-all cursor-pointer">
-                                                Tolak
-                                            </button>
-                                        </div>
+                                        <?php if ($canApprove): ?>
+                                            <div class="flex items-center justify-center space-x-1.5">
+                                                <button type="button" 
+                                                        class="btn-action-approve px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-extrabold text-[10px] shadow-2xs transition-all cursor-pointer"
+                                                        data-id="<?= (int)$r['id'] ?>"
+                                                        data-part-code="<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code']) ?>"
+                                                        data-part-name="<?= htmlspecialchars($r['display_part_name'] ?? $r['part_name']) ?>"
+                                                        data-lot="<?= htmlspecialchars($r['lot_number']) ?>">
+                                                    Setujui
+                                                </button>
+                                                <button type="button" 
+                                                        class="btn-action-reject px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-extrabold text-[10px] shadow-2xs transition-all cursor-pointer"
+                                                        data-id="<?= (int)$r['id'] ?>"
+                                                        data-part-code="<?= htmlspecialchars($r['display_part_code'] ?? $r['part_code']) ?>"
+                                                        data-part-name="<?= htmlspecialchars($r['display_part_name'] ?? $r['part_name']) ?>"
+                                                        data-lot="<?= htmlspecialchars($r['lot_number']) ?>">
+                                                    Tolak
+                                                </button>
+                                            </div>
+                                        <?php else: ?>
+                                            <span class="text-amber-600 font-semibold text-[11px]">Menunggu Approval</span>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <span class="text-slate-400 font-semibold text-[11px]">Selesai</span>
                                     <?php endif; ?>
@@ -285,9 +338,57 @@ if ($pdo) {
                 </tbody>
             </table>
         </div>
+
+        <!-- Pagination Bar -->
+        <?php if ($totalPages > 1 || $totalFiltered > 0): ?>
+            <div class="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-600 gap-3">
+                <div>
+                    Menampilkan <b><?= $totalFiltered > 0 ? $offset + 1 : 0 ?></b> s/d <b><?= min($totalFiltered, $offset + count($requests)) ?></b> dari total <b><?= number_format($totalFiltered) ?></b> request
+                </div>
+                
+                <?php if ($totalPages > 1): ?>
+                    <div class="flex items-center space-x-1">
+                        <?php
+                        $basePaginationUrl = "?status=" . urlencode($statusFilter) . (!empty($searchQuery) ? "&q=" . urlencode($searchQuery) : "");
+                        ?>
+                        <!-- First & Prev -->
+                        <?php if ($page > 1): ?>
+                            <a href="<?= $basePaginationUrl ?>&page=1" class="px-2.5 py-1 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 font-bold transition-all text-slate-700" title="Halaman Pertama">&laquo;</a>
+                            <a href="<?= $basePaginationUrl ?>&page=<?= $page - 1 ?>" class="px-2.5 py-1 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 font-bold transition-all text-slate-700">Prev</a>
+                        <?php else: ?>
+                            <span class="px-2.5 py-1 bg-slate-100 border border-slate-200 rounded-lg text-slate-400 cursor-not-allowed font-bold">&laquo;</span>
+                            <span class="px-2.5 py-1 bg-slate-100 border border-slate-200 rounded-lg text-slate-400 cursor-not-allowed font-bold">Prev</span>
+                        <?php endif; ?>
+
+                        <!-- Page Numbers (Max 5 windows) -->
+                        <?php
+                        $startPage = max(1, $page - 2);
+                        $endPage = min($totalPages, $page + 2);
+                        for ($p = $startPage; $p <= $endPage; $p++):
+                        ?>
+                            <?php if ($p === $page): ?>
+                                <span class="px-3 py-1 bg-blue-600 text-white font-extrabold rounded-lg shadow-2xs"><?= $p ?></span>
+                            <?php else: ?>
+                                <a href="<?= $basePaginationUrl ?>&page=<?= $p ?>" class="px-3 py-1 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 font-bold text-slate-700 transition-all"><?= $p ?></a>
+                            <?php endif; ?>
+                        <?php endfor; ?>
+
+                        <!-- Next & Last -->
+                        <?php if ($page < $totalPages): ?>
+                            <a href="<?= $basePaginationUrl ?>&page=<?= $page + 1 ?>" class="px-2.5 py-1 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 font-bold transition-all text-slate-700">Next</a>
+                            <a href="<?= $basePaginationUrl ?>&page=<?= $totalPages ?>" class="px-2.5 py-1 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 font-bold transition-all text-slate-700" title="Halaman Terakhir">&raquo;</a>
+                        <?php else: ?>
+                            <span class="px-2.5 py-1 bg-slate-100 border border-slate-200 rounded-lg text-slate-400 cursor-not-allowed font-bold">Next</span>
+                            <span class="px-2.5 py-1 bg-slate-100 border border-slate-200 rounded-lg text-slate-400 cursor-not-allowed font-bold">&raquo;</span>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
     </div>
 
     <!-- FLOATING BULK ACTION BOTTOM BAR (SOLID STYLING - CENTER BOTTOM) -->
+    <?php if ($canApprove): ?>
     <div id="bulk-did-action-bar" 
          style="display: none; position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9998; background-color: #0f172a; color: #ffffff; border: 1px solid #334155; border-radius: 14px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3); padding: 10px 18px;"
          class="items-center gap-4">
@@ -314,6 +415,7 @@ if ($pdo) {
             </button>
         </div>
     </div>
+    <?php endif; ?>
 
 </div>
 
@@ -327,6 +429,69 @@ function escapeHtml(str) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
 }
+
+function updateLocalCounters(pendingDelta, approvedDelta, rejectedDelta) {
+    function adjust(elId, delta) {
+        var el = document.getElementById(elId);
+        if (el) {
+            var cur = parseInt(el.textContent.replace(/,/g, ''), 10) || 0;
+            var next = Math.max(0, cur + delta);
+            el.textContent = next.toLocaleString();
+        }
+    }
+    if (pendingDelta) {
+        adjust('counter-pill-pending', pendingDelta);
+        adjust('tab-counter-pending', pendingDelta);
+    }
+    if (approvedDelta) {
+        adjust('counter-pill-approved', approvedDelta);
+        adjust('tab-counter-approved', approvedDelta);
+    }
+    if (rejectedDelta) {
+        adjust('tab-counter-rejected', rejectedDelta);
+    }
+}
+
+function removeTableRow(id) {
+    var row = document.getElementById('row-did-' + id);
+    if (row) {
+        row.style.transition = 'all 0.3s ease';
+        row.style.opacity = '0';
+        row.style.transform = 'scale(0.98)';
+        setTimeout(function() {
+            if (row.parentNode) row.parentNode.removeChild(row);
+            onDidCheckChange();
+        }, 300);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Delegated Event Listener for Single Approve
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-action-approve');
+        if (btn) {
+            e.preventDefault();
+            var id = btn.getAttribute('data-id');
+            var partCode = btn.getAttribute('data-part-code') || '';
+            var partName = btn.getAttribute('data-part-name') || '';
+            var lotNumber = btn.getAttribute('data-lot') || '';
+            approveDidRequest(id, partCode, partName, lotNumber);
+        }
+    });
+
+    // Delegated Event Listener for Single Reject
+    document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-action-reject');
+        if (btn) {
+            e.preventDefault();
+            var id = btn.getAttribute('data-id');
+            var partCode = btn.getAttribute('data-part-code') || '';
+            var partName = btn.getAttribute('data-part-name') || '';
+            var lotNumber = btn.getAttribute('data-lot') || '';
+            rejectDidRequest(id, partCode, partName, lotNumber);
+        }
+    });
+});
 
 function approveDidRequest(id, partCode, partName, lotNumber) {
     var partDisplay = partName && partName !== '-' ? escapeHtml(partCode) + ' (' + escapeHtml(partName) + ')' : escapeHtml(partCode);
@@ -367,10 +532,12 @@ function approveDidRequest(id, partCode, partName, lotNumber) {
                         icon: 'success',
                         title: 'Disetujui!',
                         text: data.message || 'Request DID berhasil disetujui.',
-                        confirmButtonColor: '#059669'
-                    }).then(function() {
-                        window.location.reload();
+                        confirmButtonColor: '#059669',
+                        timer: 1500,
+                        showConfirmButton: false
                     });
+                    removeTableRow(id);
+                    updateLocalCounters(-1, +1, 0);
                 } else {
                     Swal.fire({
                         icon: 'error',
@@ -408,7 +575,7 @@ function rejectDidRequest(id, partCode, partName, lotNumber) {
         confirmButtonText: 'Tolak Request',
         cancelButtonText: 'Batal',
         preConfirm: function() {
-            var input = document.getElementById('swal-reject-reason');
+            var input = Swal.getPopup().querySelector('#swal-reject-reason');
             var val = input ? input.value.trim() : '';
             if (!val) {
                 Swal.showValidationMessage('Alasan penolakan wajib diisi!');
@@ -441,10 +608,12 @@ function rejectDidRequest(id, partCode, partName, lotNumber) {
                         icon: 'success',
                         title: 'Ditolak',
                         text: data.message || 'Request DID telah ditolak.',
-                        confirmButtonColor: '#dc2626'
-                    }).then(function() {
-                        window.location.reload();
+                        confirmButtonColor: '#dc2626',
+                        timer: 1500,
+                        showConfirmButton: false
                     });
+                    removeTableRow(id);
+                    updateLocalCounters(-1, 0, +1);
                 } else {
                     Swal.fire({
                         icon: 'error',
@@ -573,10 +742,15 @@ function confirmBulkApproveDidRequests() {
                         icon: 'success',
                         title: 'Disetujui!',
                         text: data.message || (count + ' request DID berhasil disetujui.'),
-                        confirmButtonColor: '#059669'
-                    }).then(function() {
-                        window.location.reload();
+                        confirmButtonColor: '#059669',
+                        timer: 1500,
+                        showConfirmButton: false
                     });
+                    selectedIds.forEach(function(itemId) {
+                        removeTableRow(itemId);
+                    });
+                    updateLocalCounters(-count, +count, 0);
+                    clearBulkDidSelection();
                 } else {
                     Swal.fire({
                         icon: 'error',

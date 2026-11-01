@@ -305,10 +305,12 @@ try {
             }
 
             // C. Cek apakah sudah pernah PASSED di sesi lain — 3-way match: part_code + ref + lot
-            // Logika: Safety Stock → tolak selalu. Kanban → tolak hanya jika passed-nya di Kanban juga.
+            // LATEST-STATE CHECK: Ambil status sesi/lot paling mutakhir untuk kombinasi Part + Lot + Ref ini
+            // Jika record terakhir adalah REJECTED/NG, maka box ini adalah eks-NG yang sedang masuk alur sortir/re-inspeksi,
+            // sehingga TIDAK boleh diblokir oleh record Passed dari masa lampau.
             $stmtChkPassed = $pdo->prepare("
-                SELECT isl.id, s.id as session_id, s.inspection_type, ki.kanban_no, isl.qty, s.closed_at, s.line_name,
-                       u.name AS inspector_name,
+                SELECT isl.id, s.id as session_id, s.inspection_type, s.status AS session_status, ki.kanban_no, isl.qty, s.closed_at, s.line_name,
+                       isl.lot_result, isl.lot_status, u.name AS inspector_name,
                        COALESCE(mp.part_name, did.part_name, ki.item_description, '') AS part_name,
                        COALESCE(mp.part_code, did.part_code, ki.item_code, :pcode1) AS matched_part_code
                 FROM inspection_session_lots isl
@@ -320,8 +322,9 @@ try {
                 WHERE UPPER(isl.ref_number) = UPPER(:ref)
                   AND UPPER(isl.lot_number) = UPPER(:lot)
                   AND (UPPER(did.part_code) = UPPER(:pcode2) OR UPPER(ki.item_code) = UPPER(:pcode3) OR UPPER(mp.part_code) = UPPER(:pcode4))
-                  AND (isl.lot_result = 'passed' OR s.status = 'passed')
+                  AND s.status != 'in_progress'
                   AND s.id != :sid
+                ORDER BY isl.id DESC, s.id DESC
                 LIMIT 1
             ");
             $stmtChkPassed->execute([
@@ -334,6 +337,20 @@ try {
                 ':sid'    => $sessionId
             ]);
             $passedRow = $stmtChkPassed->fetch(PDO::FETCH_ASSOC);
+
+            // Validasi apakah baris terakhir benar-benar berstatus passed (bukan rejected/ng)
+            $isLatestRowPassed = false;
+            if ($passedRow) {
+                $isLatestRowRejected = (
+                    $passedRow['lot_result'] === 'rejected' ||
+                    $passedRow['session_status'] === 'rejected' ||
+                    in_array($passedRow['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'rejected'])
+                );
+
+                if (!$isLatestRowRejected && (in_array($passedRow['lot_result'], ['passed', 'skipped']) || $passedRow['session_status'] === 'passed')) {
+                    $isLatestRowPassed = true;
+                }
+            }
 
             // Cek apakah Safety Stock ini masih memiliki saldo aktif (available_qty > 0)
             $stmtSsActive = $pdo->prepare("
@@ -372,7 +389,7 @@ try {
                 if ($qty > (int)$ssActiveRow['qty']) {
                     $qty = (int)$ssActiveRow['qty'];
                 }
-            } elseif ($passedRow) {
+            } elseif ($isLatestRowPassed && $passedRow) {
                 // Jika pernah Safety Stock tapi saldo sudah habis
                 if ($currentInspectionType !== 'safety_stock' && $passedRow['inspection_type'] === 'safety_stock') {
                     $pdo->rollBack();
@@ -458,9 +475,13 @@ try {
             $rawQr = "Z1{$effectivePartCode}|Z2{$lotNumber}|Z3{$qty}" . (!empty($refNumber) ? "|Z5{$refNumber}" : '');
         }
 
-        // 5.5 Deteksi apakah box berasal dari Safety Stock Gudang
+        // 5.5 Deteksi apakah box berasal dari Safety Stock Gudang (3-Way Match: Part Code + Lot Number + Ref Number)
+        // HANYA ambil dari Safety Stock jika kuota Kanban belum terpenuhi oleh scan-scan sebelumnya!
         $matchedSS = null;
-        if (($sess['inspection_type'] ?? 'kanban') === 'kanban' && !empty($refNumber)) {
+        $isSafetyStockSession = (($sess['inspection_type'] ?? 'kanban') === 'safety_stock');
+        $remainingKanbanQuota = max(0, $kanbanTargetQty - $currSessionAllocatedQty);
+
+        if (!$isSafetyStockSession && !empty($refNumber) && $remainingKanbanQuota > 0) {
             $stmtFindSS = $pdo->prepare("
                 SELECT ss.id AS ss_session_id, ss.status AS ss_status, ss.total_scanned_qty,
                        isl_ss.id AS ss_lot_id, isl_ss.qty AS ss_lot_qty, isl_ss.lot_result, isl_ss.lot_status
@@ -470,11 +491,16 @@ try {
                 WHERE ss.inspection_type = 'safety_stock'
                   AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
                   AND UPPER(did.part_code) = UPPER(:pcode)
+                  AND UPPER(isl_ss.lot_number) = UPPER(:lot)
                   AND UPPER(isl_ss.ref_number) = UPPER(:ref)
                 ORDER BY ss.id DESC
                 LIMIT 1
             ");
-            $stmtFindSS->execute([':pcode' => $effectivePartCode, ':ref' => $refNumber]);
+            $stmtFindSS->execute([
+                ':pcode' => $effectivePartCode,
+                ':lot'   => $lotNumber,
+                ':ref'   => $refNumber
+            ]);
             $matchedSS = $stmtFindSS->fetch(PDO::FETCH_ASSOC);
         }
 
@@ -486,7 +512,6 @@ try {
         $ssLeftoverQty = 0;
 
         if ($matchedSS && $isKanban) {
-            $remainingKanbanQuota = max(0, $kanbanTargetQty - $currSessionAllocatedQty);
             // Sisa stok Safety Stock yang masih ada di gudang jika ada kelebihan stok
             if ($qty < $ssAvailQty) {
                 $ssLeftoverQty = $ssAvailQty - $qty;

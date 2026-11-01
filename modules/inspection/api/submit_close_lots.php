@@ -214,7 +214,11 @@ try {
         WHERE s.inspection_type = 'safety_stock'
           AND s.status IN ('passed', 'rejected')
           AND (s.auto_fulfilled_by_session_id IS NULL OR s.auto_fulfilled_by_session_id = 0)
-          AND UPPER(isl.ref_number) = UPPER(:ref)
+          AND UPPER(isl.lot_number) = UPPER(:lot)
+          AND (
+              (isl.ref_number IS NOT NULL AND isl.ref_number != '' AND UPPER(isl.ref_number) = UPPER(:ref))
+              OR ((isl.ref_number IS NULL OR isl.ref_number = '') AND (:ref_empty IS NULL OR :ref_empty2 = ''))
+          )
           AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
         ORDER BY isl.id DESC
         LIMIT 1
@@ -225,25 +229,29 @@ try {
     $seenRefInPayload = [];
 
     foreach ($cleanLots as $kIdx => &$lot) {
-        // Cek duplikasi ref_number di dalam payload form yang sama
-        if (!empty($lot['ref_number'])) {
-            $upperRef = strtoupper($lot['ref_number']);
-            if (isset($seenRefInPayload[$upperRef])) {
+        // Cek duplikasi box (lot + ref) di dalam payload form yang sama
+        $boxKey = strtoupper(($lot['lot_number'] ?? '') . '_' . ($lot['ref_number'] ?? ''));
+        if (!empty($boxKey) && $boxKey !== '_') {
+            if (isset($seenRefInPayload[$boxKey])) {
                 $pdo->rollBack();
                 echo json_encode([
                     'success' => false,
-                    'message' => "Ref Number '{$lot['ref_number']}' terduplikasi di dalam form pengisian ini. Setiap box fisik harus memiliki Ref Number unik."
+                    'message' => "Kombinasi Lot '{$lot['lot_number']}' (Ref: '{$lot['ref_number']}') terduplikasi di dalam form pengisian ini."
                 ]);
                 exit;
             }
-            $seenRefInPayload[$upperRef] = true;
+            $seenRefInPayload[$boxKey] = true;
 
-            // Cek apakah berasal dari Safety Stock
+            // Cek apakah berasal dari Safety Stock (3-way match: Part + Lot + Ref)
+            $lRef = $lot['ref_number'] ?? '';
             $stmtFindSS->execute([
-                ':ref' => $lot['ref_number'],
-                ':p1'  => $kRow['item_code'],
-                ':p2'  => $kRow['item_code'],
-                ':p3'  => $kRow['item_code']
+                ':lot'        => $lot['lot_number'],
+                ':ref'        => $lRef ?: '',
+                ':ref_empty'  => $lRef ?: null,
+                ':ref_empty2' => $lRef ?: '',
+                ':p1'         => $kRow['item_code'],
+                ':p2'         => $kRow['item_code'],
+                ':p3'         => $kRow['item_code']
             ]);
             $ssMatch = $stmtFindSS->fetch(PDO::FETCH_ASSOC);
 

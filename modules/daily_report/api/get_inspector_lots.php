@@ -19,6 +19,9 @@ if (!is_logged_in()) {
     exit;
 }
 
+// Lepas session lock segera agar request lain/tab paralel tidak terblokir
+session_write_close();
+
 $inspectorName = trim($_GET['inspector_name'] ?? '');
 $startDate     = sanitize($_GET['start_date'] ?? '');
 $endDate       = sanitize($_GET['end_date'] ?? '');
@@ -189,7 +192,8 @@ try {
         LEFT JOIN users u ON u.id = ss.inspector_id
         LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
         LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
-        LEFT JOIN master_parts mp ON (mp.id = ss.part_id OR UPPER(mp.part_code) = UPPER(COALESCE(did.part_code, ki.item_code)))
+        LEFT JOIN master_parts mp ON mp.id = ss.part_id
+        LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
         WHERE {$whereStr}
     ";
     $countStmt = $pdo->prepare($countSql);
@@ -219,9 +223,9 @@ try {
             ss.status AS session_status,
             ss.closed_at AS session_closed_at,
             COALESCE(ss.line_name, l.name, 'Line 1') AS line_name,
-            COALESCE(did.part_code, ki.item_code, mp.part_code, '-') AS part_code,
-            COALESCE(did.part_name, ki.item_description, mp.part_name, '-') AS part_name,
-            COALESCE(mm.name, mp.model, '-') AS model_name,
+            COALESCE(did.part_code, ki.item_code, mp.part_code, mp_fb.part_code, '-') AS part_code,
+            COALESCE(did.part_name, ki.item_description, mp.part_name, mp_fb.part_name, '-') AS part_name,
+            COALESCE(mm.name, mp.model, mp_fb.model, '-') AS model_name,
             COALESCE(ki.kanban_no, '-') AS kanban_no,
             COALESCE(ki.customer, 'INTERNAL') AS customer
         FROM inspection_session_lots isl
@@ -230,8 +234,9 @@ try {
         LEFT JOIN users u ON u.id = ss.inspector_id
         LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
         LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
-        LEFT JOIN master_parts mp ON (mp.id = ss.part_id OR UPPER(mp.part_code) = UPPER(COALESCE(did.part_code, ki.item_code)))
-        LEFT JOIN master_models mm ON mm.id = mp.model_id
+        LEFT JOIN master_parts mp ON mp.id = ss.part_id
+        LEFT JOIN master_parts mp_fb ON (ss.part_id IS NULL AND mp_fb.part_code = COALESCE(did.part_code, ki.item_code))
+        LEFT JOIN master_models mm ON mm.id = COALESCE(mp.model_id, mp_fb.model_id)
         WHERE {$whereStr}
         ORDER BY isl.id DESC
         LIMIT :lim OFFSET :off

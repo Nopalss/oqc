@@ -118,7 +118,7 @@ function nav_active($keyword, $currentUri) {
                     if ($pdoSide) {
                         $cntPendingNg = getOpenQuarantineLotsCount($pdoSide);
                         if ($cntPendingNg > 0) {
-                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px] ml-auto flex-shrink-0">' . ($cntPendingNg > 99 ? '99+' : $cntPendingNg) . '</span>';
+                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px] ml-auto flex-shrink-0">' . number_format($cntPendingNg) . '</span>';
                         }
                     }
                 } catch (Exception $eSide) {}
@@ -141,19 +141,40 @@ function nav_active($keyword, $currentUri) {
             <?php if (can_access('daily_report')): ?>
             <!-- Laporan Inspeksi Harian -->
             <a href="<?= base_url('modules/daily_report/index.php') ?>"
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('daily_report', $currentUri) ?>"
+               class="sidebar-nav-item flex items-center justify-between px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('daily_report', $currentUri) ?>"
                title="Laporan Inspeksi Harian per Label">
-                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                </svg>
-                <span class="sidebar-text truncate">Laporan Harian</span>
+                <div class="flex items-center min-w-0">
+                    <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                    <span class="sidebar-text truncate">Laporan Harian</span>
+                </div>
+                <?php
+                try {
+                    $pdoSide = getDB();
+                    if ($pdoSide) {
+                        $cntPendingApproval = (int)$pdoSide->query("
+                            SELECT COUNT(ss.id) 
+                            FROM inspection_sessions ss
+                            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+                            WHERE ss.is_approved = 0
+                              AND ss.status IN ('passed', 'rejected')
+                              AND (ss.original_ss_session_id IS NULL OR ss.original_ss_session_id = 0)
+                              AND (ki.remark IS NULL OR (ki.remark NOT LIKE '%AUTO-SS-SESS-%' AND ki.remark NOT LIKE '%Split%'))
+                        ")->fetchColumn();
+                        if ($cntPendingApproval > 0) {
+                            echo '<span class="sidebar-text text-[11px] font-semibold text-amber-400 ml-auto flex-shrink-0" title="' . $cntPendingApproval . ' sesi belum disetujui">' . number_format($cntPendingApproval) . '</span>';
+                        }
+                    }
+                } catch (Exception $eSide) {}
+                ?>
             </a>
             <?php endif; ?>
         </div>
         <?php endif; ?>
 
         <!-- Group 2: Data Referensi -->
-        <?php if (can_access('did') || can_access('kanban')): ?>
+        <?php if (can_access('did') || can_access('kanban') || can_access('standard_oqc')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Data Referensi
@@ -186,7 +207,7 @@ function nav_active($keyword, $currentUri) {
                     if ($pdoSide) {
                         $cntPendingSide = (int)$pdoSide->query("SELECT COUNT(*) FROM did_approval_requests WHERE status = 'pending'")->fetchColumn();
                         if ($cntPendingSide > 0) {
-                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px]">' . ($cntPendingSide > 99 ? '99+' : $cntPendingSide) . '</span>';
+                            echo '<span class="sidebar-text px-1.5 py-0.5 bg-rose-500 text-white rounded-full font-extrabold text-[9px]">' . number_format($cntPendingSide) . '</span>';
                         }
                     }
                 } catch (Exception $eSide) {}
@@ -197,12 +218,24 @@ function nav_active($keyword, $currentUri) {
             <?php if (can_access('kanban')): ?>
             <!-- Planning Inspeksi (Kanban & Safety Stock) -->
             <a href="<?= base_url('modules/kanban/index.php') ?>" 
-               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('kanban', $currentUri) ?>"
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('kanban', $currentUri) ?>"
                title="Planning Inspeksi (Kanban & Safety Stock)">
                 <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
                 </svg>
                 <span class="sidebar-text truncate">Planning Inspeksi</span>
+            </a>
+            <?php endif; ?>
+
+            <?php if (can_access('standard_oqc')): ?>
+            <!-- Standard OQC (SOP & Petunjuk Kerja) -->
+            <a href="<?= base_url('modules/standard_oqc/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 <?= nav_active('standard_oqc', $currentUri) ?>"
+               title="Standard OQC (SOP & Petunjuk Kerja)">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Standard OQC</span>
             </a>
             <?php endif; ?>
         </div>

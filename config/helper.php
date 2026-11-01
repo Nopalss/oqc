@@ -435,6 +435,7 @@ function get_first_accessible_url() {
         'master_models'    => 'modules/master_models/index.php',
         'master_customers' => 'modules/master_customers/index.php',
         'master_drawings'  => 'modules/master_drawings/index.php',
+        'standard_oqc'    => 'modules/standard_oqc/index.php',
         'master_defects'   => 'modules/master_defects/index.php',
         'users'            => 'modules/users/index.php',
         'roles'            => 'modules/roles/index.php',
@@ -478,8 +479,9 @@ function get_system_menus() {
             'daily_report'    => ['label' => 'Laporan Harian', 'desc' => 'Rekapitulasi laporan inspeksi harian dan export excel']
         ],
         'Data Referensi' => [
-            'did'    => ['label' => 'Upload DID', 'desc' => 'Import dan status kelengkapan data DID/dimensi'],
-            'kanban' => ['label' => 'Planning Inspeksi', 'desc' => 'Import kanban dan alokasi safety stock']
+            'did'          => ['label' => 'Upload DID', 'desc' => 'Import dan status kelengkapan data DID/dimensi'],
+            'kanban'       => ['label' => 'Planning Inspeksi', 'desc' => 'Import kanban dan alokasi safety stock'],
+            'standard_oqc' => ['label' => 'Standard OQC', 'desc' => 'Dokumen SOP, Petunjuk Kerja (WI), dan Prosedur Standar']
         ],
         'Master Data' => [
             'master_parts'     => ['label' => 'Master Data Part', 'desc' => 'Pengelolaan data part number (FR-4)'],
@@ -594,7 +596,7 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
     if (!$pdo || $sid <= 0) return null;
 
     try {
-        $stmtSessEx = $pdo->prepare("SELECT s.excess_qty, s.kanban_item_id, s.part_id, did.part_code, did.part_name, b.id as batch_id
+        $stmtSessEx = $pdo->prepare("SELECT s.excess_qty, s.total_scanned_qty, s.kanban_item_id, s.part_id, did.part_code, did.part_name, b.id as batch_id, k.qty as kanban_target_qty
                                      FROM inspection_sessions s
                                      JOIN daily_inspection_data did ON did.id = s.did_id
                                      LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -604,22 +606,76 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
         $sessEx = $stmtSessEx->fetch(PDO::FETCH_ASSOC);
 
         if ($sessEx && (int)$sessEx['excess_qty'] > 0) {
-            $excessQty = (int)$sessEx['excess_qty'];
-
+            $totalExcessQty = (int)$sessEx['excess_qty'];
             $checkRef = "AUTO-SS-SESS-" . $sid;
+
             $stmtChkSS = $pdo->prepare("SELECT id FROM kanban_items WHERE remark LIKE :chk LIMIT 1");
             $stmtChkSS->execute([':chk' => '%' . $checkRef . '%']);
             $existingSSItem = $stmtChkSS->fetch(PDO::FETCH_ASSOC);
 
             if (!$existingSSItem) {
-                $stmtLastLot = $pdo->prepare("SELECT lot_number, ref_number, scanned_qr_raw FROM inspection_session_lots WHERE inspection_session_id = :sid ORDER BY id DESC LIMIT 1");
-                $stmtLastLot->execute([':sid' => $sid]);
-                $lastLotRow = $stmtLastLot->fetch(PDO::FETCH_ASSOC);
+                // Ambil seluruh box/lot fisik yang di-scan pada sesi ini sesuai urutan FIFO (id ASC)
+                $stmtAllLots = $pdo->prepare("
+                    SELECT id, lot_number, ref_number, qty, scanned_qr_raw 
+                    FROM inspection_session_lots 
+                    WHERE inspection_session_id = :sid 
+                    ORDER BY id ASC
+                ");
+                $stmtAllLots->execute([':sid' => $sid]);
+                $sessionLots = $stmtAllLots->fetchAll(PDO::FETCH_ASSOC);
 
-                $lastLotNumber = $lastLotRow['lot_number'] ?? 'LOT-OVERFLOW';
-                $lastRefNumber = $lastLotRow['ref_number'] ?? null;
-                $lastQrRaw     = $lastLotRow['scanned_qr_raw'] ?? null;
+                if (empty($sessionLots)) {
+                    return null;
+                }
 
+                // Hitung kuota yang dibutuhkan oleh Kanban saat sesi ini dimulai
+                $targetKanbanNeeded = max(0, (int)$sessEx['total_scanned_qty'] - $totalExcessQty);
+
+                // Hitung alokasi FIFO per-box:
+                // Box di awal antrean dipakai terlebih dahulu sampai targetKanbanNeeded habis (0).
+                // Box sisanya atau potongan terakhir yang masih bersisa dialokasikan ke Safety Stock.
+                $overflowLots = [];
+                $neededCounter = $targetKanbanNeeded;
+
+                foreach ($sessionLots as $sLot) {
+                    $boxQty = (int)$sLot['qty'];
+                    if ($neededCounter >= $boxQty) {
+                        // Seluruh isi box ini habis terpakai untuk Kanban
+                        $neededCounter -= $boxQty;
+                    } elseif ($neededCounter > 0) {
+                        // Sebagian isi box ini dipakai untuk Kanban, sisanya masuk Safety Stock
+                        $usedForKanban = $neededCounter;
+                        $remainingBoxQty = $boxQty - $usedForKanban;
+                        $neededCounter = 0;
+
+                        if ($remainingBoxQty > 0) {
+                            $overflowLots[] = [
+                                'lot_number'     => $sLot['lot_number'],
+                                'ref_number'     => $sLot['ref_number'],
+                                'qty'            => $remainingBoxQty,
+                                'scanned_qr_raw' => $sLot['scanned_qr_raw'],
+                                'is_split'       => true,
+                                'taken_qty'      => $usedForKanban
+                            ];
+                        }
+                    } else {
+                        // Kanban sudah terpenuhi sepenuhnya, box ini UTUH 100% masuk Safety Stock
+                        $overflowLots[] = [
+                            'lot_number'     => $sLot['lot_number'],
+                            'ref_number'     => $sLot['ref_number'],
+                            'qty'            => $boxQty,
+                            'scanned_qr_raw' => $sLot['scanned_qr_raw'],
+                            'is_split'       => false,
+                            'taken_qty'      => 0
+                        ];
+                    }
+                }
+
+                if (empty($overflowLots)) {
+                    return null;
+                }
+
+                // Batch Safety Stock
                 $batchId = (int)($sessEx['batch_id'] ?? 0);
                 if ($batchId <= 0) {
                     $batchId = (int)$pdo->query("SELECT id FROM kanban_batches WHERE plan_type = 'safety_stock' ORDER BY id ASC LIMIT 1")->fetchColumn();
@@ -629,69 +685,81 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
                     $stmtInsBatch->execute();
                     $batchId = (int)$pdo->lastInsertId();
                 }
+
                 $pCode   = $sessEx['part_code'];
                 $pName   = $sessEx['part_name'];
                 $partId  = $sessEx['part_id'] ?: null;
-
-                // 1. Create kanban_items entry for Safety Stock
-                $stmtInsSS = $pdo->prepare("INSERT INTO kanban_items 
-                    (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, check_type, remark, created_at) 
-                    VALUES (:bid, 'safety_stock', :kno, :code, :desc, 'INTERNAL SAFETY STOCK', NOW(), :qty, 'WH-SS-OVERFLOW', 'SAFETY STOCK WAREHOUSE', 'Safety Stock', :rem, NOW())");
-                $stmtInsSS->execute([
-                    ':bid'  => $batchId,
-                    ':kno'  => 'SS-' . $lastLotNumber,
-                    ':code' => $pCode,
-                    ':desc' => $pName,
-                    ':qty'  => $excessQty,
-                    ':rem'  => "Auto Safety Stock Sisa Excess Kanban (Sisa Qty: {$excessQty} pcs, Lot: {$lastLotNumber}" . ($lastRefNumber ? ", Ref No: {$lastRefNumber}" : "") . ") [Ref: {$checkRef}]"
-                ]);
-                $ssKanbanItemId = (int)$pdo->lastInsertId();
-
-                // 2. Ensure DID record exists for Safety Stock
-                $stmtChkDid = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE UPPER(part_code) = UPPER(:pcode) AND UPPER(lot_number) = UPPER(:lot) ORDER BY id DESC LIMIT 1");
-                $stmtChkDid->execute([':pcode' => $pCode, ':lot' => $lastLotNumber]);
-                $ssDidId = (int)$stmtChkDid->fetchColumn();
-
-                if ($ssDidId === 0) {
-                    $stmtInsDid = $pdo->prepare("INSERT INTO daily_inspection_data (part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, created_at) VALUES (:pcode, :pname, :lot, '1', CURDATE(), 'OK', 'SAFETY_STOCK_OVERFLOW', NOW())");
-                    $stmtInsDid->execute([':pcode' => $pCode, ':pname' => $pName, ':lot' => $lastLotNumber]);
-                    $ssDidId = (int)$pdo->lastInsertId();
-                }
-
-                // 3. Auto-create PASSED inspection_sessions for Safety Stock
                 $currUser = function_exists('current_user') ? current_user() : null;
                 $curUserId = (int)($currUser['id'] ?? ($_SESSION['user_id'] ?? 1));
 
-                $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
-                    (inspection_type, did_id, kanban_item_id, part_id, inspector_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
-                    VALUES ('safety_stock', :did, :kanban, :part, :insp, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
-                $stmtInsSSSession->execute([
-                    ':did'    => $ssDidId,
-                    ':kanban' => $ssKanbanItemId,
-                    ':part'   => $partId,
-                    ':insp'   => $curUserId,
-                    ':tqty'   => $excessQty
-                ]);
-                $ssSessionId = (int)$pdo->lastInsertId();
+                $firstSsSessionId = null;
 
-                // 4. Create inspection_session_lots entry for Safety Stock session
-                $stmtInsSSLot = $pdo->prepare("INSERT INTO inspection_session_lots 
-                    (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, lot_result, closed_at, created_at) 
-                    VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', 'passed', NOW(), NOW())");
-                $stmtInsSSLot->execute([
-                    ':sid' => $ssSessionId,
-                    ':ref' => $lastRefNumber,
-                    ':lot' => $lastLotNumber,
-                    ':qty' => $excessQty,
-                    ':raw' => $lastQrRaw,
-                    ':rem' => "Sisa Kelebihan Kanban dari Sesi #" . $sid
-                ]);
+                // Insert setiap sisa box ke Safety Stock secara presisi per-lot (FIFO)
+                foreach ($overflowLots as $oIdx => $oLot) {
+                    $oLotNum = $oLot['lot_number'] ?: 'LOT-OVERFLOW';
+                    $oRefNum = $oLot['ref_number'] ?: null;
+                    $oQty    = (int)$oLot['qty'];
+                    $oRaw    = $oLot['scanned_qr_raw'] ?: null;
+                    $splitTag = $oLot['is_split'] ? " (Sisa {$oQty} pcs setelah diambil {$oLot['taken_qty']} pcs untuk Kanban)" : " (Utuh 1 Box {$oQty} pcs)";
 
-                if ($ssSessionId > 0 && function_exists('syncDailySummaryForSession')) {
-                    syncDailySummaryForSession($pdo, $ssSessionId);
+                    // 1. Create kanban_items entry for this specific overflow lot
+                    $stmtInsSS = $pdo->prepare("INSERT INTO kanban_items 
+                        (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, check_type, remark, created_at) 
+                        VALUES (:bid, 'safety_stock', :kno, :code, :desc, 'INTERNAL SAFETY STOCK', NOW(), :qty, 'WH-SS-OVERFLOW', 'SAFETY STOCK WAREHOUSE', 'Safety Stock', :rem, NOW())");
+                    $stmtInsSS->execute([
+                        ':bid'  => $batchId,
+                        ':kno'  => 'SS-' . $oLotNum,
+                        ':code' => $pCode,
+                        ':desc' => $pName,
+                        ':qty'  => $oQty,
+                        ':rem'  => "Auto Safety Stock Sisa Excess Kanban (Lot: {$oLotNum}" . ($oRefNum ? ", Ref: {$oRefNum}" : "") . ", Qty: {$oQty} pcs){$splitTag} [Ref: {$checkRef}-LOT-{$oIdx}]"
+                    ]);
+                    $ssKanbanItemId = (int)$pdo->lastInsertId();
+
+                    // 2. Ensure DID record exists for this specific lot
+                    $stmtChkDid = $pdo->prepare("SELECT id FROM daily_inspection_data WHERE UPPER(part_code) = UPPER(:pcode) AND UPPER(lot_number) = UPPER(:lot) ORDER BY id DESC LIMIT 1");
+                    $stmtChkDid->execute([':pcode' => $pCode, ':lot' => $oLotNum]);
+                    $ssDidId = (int)$stmtChkDid->fetchColumn();
+
+                    if ($ssDidId === 0) {
+                        $stmtInsDid = $pdo->prepare("INSERT INTO daily_inspection_data (part_code, part_name, lot_number, cavity, inspecting_date, status_inspect, pic, created_at) VALUES (:pcode, :pname, :lot, '1', CURDATE(), 'OK', 'SAFETY_STOCK_OVERFLOW', NOW())");
+                        $stmtInsDid->execute([':pcode' => $pCode, ':pname' => $pName, ':lot' => $oLotNum]);
+                        $ssDidId = (int)$pdo->lastInsertId();
+                    }
+
+                    // 3. Create PASSED inspection_sessions for this specific overflow lot
+                    $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
+                        (inspection_type, did_id, kanban_item_id, part_id, inspector_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
+                        VALUES ('safety_stock', :did, :kanban, :part, :insp, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
+                    $stmtInsSSSession->execute([
+                        ':did'    => $ssDidId,
+                        ':kanban' => $ssKanbanItemId,
+                        ':part'   => $partId,
+                        ':insp'   => $curUserId,
+                        ':tqty'   => $oQty
+                    ]);
+                    $ssSessionId = (int)$pdo->lastInsertId();
+                    if ($firstSsSessionId === null) $firstSsSessionId = $ssSessionId;
+
+                    // 4. Create inspection_session_lots entry matching the exact lot and ref
+                    $stmtInsSSLot = $pdo->prepare("INSERT INTO inspection_session_lots 
+                        (inspection_session_id, ref_number, lot_number, qty, scanned_qr_raw, remarks, lot_status, lot_result, closed_at, created_at) 
+                        VALUES (:sid, :ref, :lot, :qty, :raw, :rem, 'ok', 'passed', NOW(), NOW())");
+                    $stmtInsSSLot->execute([
+                        ':sid' => $ssSessionId,
+                        ':ref' => $oRefNum,
+                        ':lot' => $oLotNum,
+                        ':qty' => $oQty,
+                        ':raw' => $oRaw,
+                        ':rem' => "Sisa Kelebihan Kanban dari Sesi #" . $sid . ($oLot['is_split'] ? " (Pecahan Sisa)" : " (Utuh 1 Box)")
+                    ]);
+
+                    if ($ssSessionId > 0 && function_exists('syncDailySummaryForSession')) {
+                        syncDailySummaryForSession($pdo, $ssSessionId);
+                    }
                 }
 
-                return $ssSessionId;
+                return $firstSsSessionId;
             }
         }
     } catch (Exception $e) {
@@ -764,8 +832,8 @@ function get_part_drawing_assets($partCode, $modelName = '') {
 
                 // 2D Drawing: PDF yang bukan dokumen QC
                 if ($ext === 'pdf' && !$result['drawing_2d_path']) {
-                    // Cek jika bukan pi, qp, pac, atau packing
-                    $isQcDoc = preg_match('/(^|[_\-\s])(pi|process|qp|qpoint|q[_\-\s]?point|quality|pac|approval|cert|pack|packing)($|[_\-\s0-9])/i', $nameOnly);
+                    // Cek jika bukan pi, qp, pac, packing, atau mi / monitoring model
+                    $isQcDoc = preg_match('/(^|[_\-\s])(pi|process|qp|qpoint|q[_\-\s]?point|quality|pac|approval|cert|pack|packing|mi|monitoring)($|[_\-\s0-9])/i', $nameOnly);
                     if (!$isQcDoc) {
                         $relPath = 'uploads/parts/' . $cleanPartCode . '/' . $f;
                         $result['drawing_2d_path'] = $relPath;
@@ -848,18 +916,38 @@ function get_part_drawing_assets($partCode, $modelName = '') {
                 if ($ext === 'pdf' && !$result['drawing_2d_path']) {
                     $relPath = str_replace($rootAppDir . DIRECTORY_SEPARATOR, '', $fullPath);
                     $relPath = str_replace('\\', '/', $relPath);
-                    $result['drawing_2d_path'] = $relPath;
-                    $result['drawing_2d_url']  = base_url($relPath);
+                    if (file_exists($fullPath)) {
+                        $result['drawing_2d_path'] = $relPath;
+                        $result['drawing_2d_url']  = base_url($relPath);
+                    }
                 }
 
                 // 3D Model: STP or STEP
                 if (($ext === 'stp' || $ext === 'step') && !$result['drawing_3d_path']) {
                     $relPath = str_replace($rootAppDir . DIRECTORY_SEPARATOR, '', $fullPath);
                     $relPath = str_replace('\\', '/', $relPath);
-                    $result['drawing_3d_path'] = $relPath;
-                    $result['drawing_3d_url']  = base_url($relPath);
+                    if (file_exists($fullPath)) {
+                        $result['drawing_3d_path'] = $relPath;
+                        $result['drawing_3d_url']  = base_url($relPath);
+                    }
                 }
             }
+        }
+    }
+
+    // Double check physical existence for safe return
+    if ($result['drawing_2d_path']) {
+        $checkFull = $rootAppDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $result['drawing_2d_path']);
+        if (!file_exists($checkFull)) {
+            $result['drawing_2d_path'] = null;
+            $result['drawing_2d_url']  = null;
+        }
+    }
+    if ($result['drawing_3d_path']) {
+        $checkFull = $rootAppDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $result['drawing_3d_path']);
+        if (!file_exists($checkFull)) {
+            $result['drawing_3d_path'] = null;
+            $result['drawing_3d_url']  = null;
         }
     }
 
@@ -918,6 +1006,7 @@ if (!function_exists('getOpenQuarantineLotsCount')) {
                     isl.id AS lot_id,
                     isl.lot_number,
                     isl.ref_number,
+                    isl.lot_result,
                     isl.lot_status,
                     k.item_code AS part_code
                 FROM inspection_session_lots isl
@@ -975,7 +1064,7 @@ if (!function_exists('getOpenQuarantineLotsCount')) {
                 }
                 $whereRelStr = "(" . implode(" OR ", $whereParts) . ")";
                 $sqlAllRounds = "
-                    SELECT isl.id AS lot_id, isl.lot_number, isl.ref_number, isl.lot_status, k.item_code AS part_code
+                    SELECT isl.id AS lot_id, isl.lot_number, isl.ref_number, isl.lot_result, isl.lot_status, k.item_code AS part_code
                     FROM inspection_session_lots isl
                     JOIN inspection_sessions s ON s.id = isl.inspection_session_id
                     JOIN kanban_items k ON k.id = s.kanban_item_id
@@ -1022,8 +1111,10 @@ if (!function_exists('getOpenQuarantineLotsCount')) {
                         break;
                     }
                 }
+                $resStatus = strtolower($latestRow['lot_result'] ?? '');
                 $lotSt = strtolower($latestRow['lot_status'] ?? '');
-                $isClosed = ($groupClosure !== null || in_array($lotSt, ['abolished', 'action_closed'], true));
+                $isPassed = ($resStatus === 'passed');
+                $isClosed = ($groupClosure !== null || in_array($lotSt, ['abolished', 'action_closed'], true) || $isPassed);
                 if (!$isClosed) {
                     $openCount++;
                 }

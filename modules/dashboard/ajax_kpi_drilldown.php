@@ -95,7 +95,7 @@ if ($filterType === 'all_years') {
             $filterPeriodLabel = "Hari Ini (" . date('d M Y') . ")";
             break;
         case 'mingguan':
-            $startDate = date('Y-m-d', strtotime('monday this week'));
+            $startDate = getWorkCycleWeekStartDate();
             $endDate   = date('Y-m-d');
             $filterPeriodLabel = "Minggu Ini (" . date('d M', strtotime($startDate)) . " - " . date('d M Y', strtotime($endDate)) . ")";
             break;

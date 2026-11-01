@@ -10,7 +10,7 @@ if (!function_exists('get_document_types_config')) {
             'pi' => [
                 'code' => 'pi',
                 'label' => 'PI',
-                'full_label' => 'Process Inspection (PI)',
+                'full_label' => 'Pedoman Inspeksi (PI)',
                 'folder' => 'PI',
                 'icon' => '<svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414A1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>',
             ],
@@ -34,6 +34,13 @@ if (!function_exists('get_document_types_config')) {
                 'full_label' => 'Standar Packing',
                 'folder' => 'Standar_Packing',
                 'icon' => '<svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>',
+            ],
+            'mi' => [
+                'code' => 'mi',
+                'label' => 'Monitoring Model',
+                'full_label' => 'Monitoring Model (MI)',
+                'folder' => 'Monitoring_Model',
+                'icon' => '<svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>',
             ],
         ];
     }
@@ -77,6 +84,9 @@ if (!function_exists('classify_part_file_type')) {
             }
             if (preg_match('/(^|[_\-\s])(pack|packing|standar[_\-\s]?pack)($|[_\-\s0-9])/i', $nameOnly)) {
                 return 'standar_packing';
+            }
+            if (preg_match('/(^|[_\-\s])(mi|monitoring|monitoring[_\-\s]?model|model[_\-\s]?inspection)($|[_\-\s0-9])/i', $nameOnly)) {
+                return 'mi';
             }
             // Sisanya diklasifikasikan sebagai gambar kerja 2D
             return 'drawing_2d';
@@ -267,7 +277,8 @@ if (!function_exists('resolve_safe_document_upload_name')) {
             'pi'              => 'pi',
             'qpoint'          => 'qpoint',
             'pac'             => 'pac',
-            'standar_packing' => 'packing'
+            'standar_packing' => 'packing',
+            'mi'              => 'mi'
         ];
         $defaultPrefix = $basePrefixMap[$docKey] ?? $docKey;
 

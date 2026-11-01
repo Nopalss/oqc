@@ -88,7 +88,7 @@ require_menu_access('master_drawings');
                             <span class="font-mono font-bold text-slate-700 text-[11px]">1768125-00.stp / 3d.stp</span>
                         </div>
                         <div class="flex items-center justify-between p-1.5 bg-white border border-indigo-100 rounded-lg">
-                            <span class="text-slate-600 font-medium">Process Inspection (PI):</span>
+                            <span class="text-slate-600 font-medium">Pedoman Inspeksi (PI):</span>
                             <span class="font-mono font-bold text-indigo-700 text-[11px]">pi_00.pdf / pi.pdf</span>
                         </div>
                         <div class="flex items-center justify-between p-1.5 bg-white border border-amber-100 rounded-lg">

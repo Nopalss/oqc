@@ -73,6 +73,9 @@ $selectedYear     = isset($_GET['year']) && is_numeric($_GET['year']) ? (int)$_G
 $defectId = isset($_GET['defect_id']) && is_numeric($_GET['defect_id']) ? (int)$_GET['defect_id'] : 0;
 $partId   = isset($_GET['part_id']) && is_numeric($_GET['part_id']) ? (int)$_GET['part_id'] : 0;
 
+$trendMode     = sanitize($_GET['trend_mode'] ?? 'multi_horizon');
+$subResolution = sanitize($_GET['sub_resolution'] ?? 'weekly');
+
 $monthNames = [
     1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
     5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
@@ -122,11 +125,24 @@ if (!empty($customStartDate) && !empty($customEndDate)) {
     $endDate         = ($selectedYear === (int)date('Y')) ? date('Y-m-d') : sprintf('%04d-12-31', $selectedYear);
     $presetFilter    = 'specific_year';
     $filterTitleDesc = "Tahun " . $selectedYear;
-} elseif ($filterType === 'month_year' || $presetFilter === 'month_year') {
-    $startDate       = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
-    $endDate         = date('Y-m-t', strtotime($startDate));
-    $presetFilter    = 'month_year';
-    $filterTitleDesc = "Bulan " . ($monthNames[$selectedMonth] ?? $selectedMonth) . " " . $selectedYear;
+} elseif ($filterType === 'month_year' || $presetFilter === 'month_year' || $presetFilter === 'bulanan' || empty($presetFilter)) {
+    $presetFilter = 'month_year';
+    $monthStart   = sprintf('%04d-%02d-01', $selectedYear, $selectedMonth);
+    $firstDayDt   = new DateTime($monthStart);
+    $firstDayDow  = (int)$firstDayDt->format('N'); // 1 = Mon ... 7 = Sun
+
+    // Cari Hari Minggu pertama di bulan ini (Sunday Anchor standar pabrik)
+    $w1Sun = clone $firstDayDt;
+    if ($firstDayDow !== 7) {
+        $w1Sun->modify('-' . $firstDayDow . ' days');
+    }
+    if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+        $w1Sun->modify('+7 days');
+    }
+
+    $startDate       = $w1Sun->format('Y-m-d');
+    $endDate         = date('Y-m-t', strtotime($monthStart));
+    $filterTitleDesc = date('d/m/Y', strtotime($startDate)) . ' s.d. ' . date('d/m/Y', strtotime($endDate));
 } else {
     switch ($presetFilter) {
         case 'hari_ini':
@@ -145,10 +161,19 @@ if (!empty($customStartDate) && !empty($customEndDate)) {
             $filterTitleDesc = "Tahun Ini (" . date('Y') . ")";
             break;
         default:
-            $presetFilter    = 'bulanan';
-            $startDate       = date('Y-m-01');
-            $endDate         = date('Y-m-d');
-            $filterTitleDesc = "Bulan Ini (" . ($monthNames[(int)date('n')] ?? date('F')) . " " . date('Y') . ")";
+            $monthStart      = date('Y-m-01');
+            $firstDayDt      = new DateTime($monthStart);
+            $firstDayDow     = (int)$firstDayDt->format('N');
+            $w1Sun = clone $firstDayDt;
+            if ($firstDayDow !== 7) {
+                $w1Sun->modify('-' . $firstDayDow . ' days');
+            }
+            if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+                $w1Sun->modify('+7 days');
+            }
+            $startDate       = $w1Sun->format('Y-m-d');
+            $endDate         = date('Y-m-t', strtotime($monthStart));
+            $filterTitleDesc = date('d/m/Y', strtotime($startDate)) . ' s.d. ' . date('d/m/Y', strtotime($endDate));
     }
 }
 
@@ -273,6 +298,19 @@ if ($pdo) {
         $stD = $pdo->prepare("SELECT name FROM defect_types WHERE id = :id");
         $stD->execute([':id' => $defectId]);
         $defectName = $stD->fetchColumn() ?: ('Defect #' . $defectId);
+
+        // Ambil target defect spesifik atau global
+        $stThreshDef = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'specific_defect' AND reference_id = :id LIMIT 1");
+        $stThreshDef->execute([':id' => $defectId]);
+        $dThreshVal = $stThreshDef->fetchColumn();
+        if ($dThreshVal === false || $dThreshVal === null) {
+            $stThreshGlobDef = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'global_defect' AND reference_id IS NULL LIMIT 1");
+            $stThreshGlobDef->execute();
+            $dThreshVal = $stThreshGlobDef->fetchColumn();
+        }
+        $defectThreshold = ($dThreshVal !== false && $dThreshVal !== null) ? (float)$dThreshVal : null;
+    } else {
+        $defectThreshold = null;
     }
     if ($partId > 0) {
         $stP = $pdo->prepare("SELECT mp.part_code, mp.part_name, COALESCE(mm.name, mp.model, 'General Model') as model_name 
@@ -286,6 +324,19 @@ if ($pdo) {
             $partName  = $pRow['part_name'];
             $modelName = $pRow['model_name'];
         }
+
+        // Ambil target part spesifik atau global
+        $stThresh = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'specific_part' AND reference_id = :id LIMIT 1");
+        $stThresh->execute([':id' => $partId]);
+        $pThreshVal = $stThresh->fetchColumn();
+        if ($pThreshVal === false || $pThreshVal === null) {
+            $stThreshGlob = $pdo->prepare("SELECT threshold_val FROM defect_threshold_targets WHERE target_type = 'global_part' AND reference_id IS NULL LIMIT 1");
+            $stThreshGlob->execute();
+            $pThreshVal = $stThreshGlob->fetchColumn();
+        }
+        $partThreshold = ($pThreshVal !== false && $pThreshVal !== null) ? (float)$pThreshVal : null;
+    } else {
+        $partThreshold = null;
     }
 }
 
@@ -349,125 +400,286 @@ $auditRecords     = [];
 if ($pdo) {
     if ($mode === 'overview') {
         // ── Skenario 1: Overview Mode (Focus on Defect) ───────────────────────
-        // 1. Timeline Data for Defect
+        // 1. Timeline Data for Defect (Multi-Horizon Support: Tahunan -> Bulanan -> Mingguan/Harian)
         try {
-            if ($isSingleDay) {
-                $wHour = [
-                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                    "s.started_at >= :sd AND s.started_at < :ed_next"
-                ];
-                $pHour = [
-                    ':sd'      => $startDate . ' 00:00:00',
-                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-                ];
-                if ($defectId > 0) {
-                    $wHour[] = "ngr.defect_type_id = :defId";
-                    $pHour[':defId'] = $defectId;
-                }
-                if ($selectedCustomer !== '') {
-                    $wHour[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-                    $pHour[':cust'] = $selectedCustomer;
-                }
-                $wHourSql = implode(' AND ', $wHour);
-                $stT = $pdo->prepare("SELECT DATE_FORMAT(s.started_at, '%H:00') as time_key,
-                                             COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                                             COUNT(DISTINCT s.id) as total_lots
-                                      FROM inspection_ng_records ngr
-                                      INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                                      LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                                      WHERE {$wHourSql}
-                                      GROUP BY time_key");
-                $stT->execute($pHour);
-                foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $tk = $r['time_key'];
-                    if (isset($trendMap[$tk])) {
-                        $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
-                        $trendMap[$tk]['lot'] = (int)$r['total_lots'];
-                    }
-                }
+            $isPartMode = false;
+            $itemId     = $defectId;
+            $itemCol    = "dds.defect_type_id";
+            $refYear    = $selectedYear ?: (int)date('Y');
+            $refMonth   = $selectedMonth ?: (int)date('n');
+
+            // 1a. HORIZON TAHUNAN (Dinamis: Tahun dengan riwayat data s/d refYear)
+            $wYDetect = [
+                "{$itemCol} = :itemId",
+                "YEAR(dds.summary_date) <= :refYear"
+            ];
+            $pYDetect = [
+                ':itemId'  => $itemId,
+                ':refYear' => $refYear
+            ];
+            if ($selectedCustomer !== '') {
+                $wYDetect[] = "dds.customer = :cust";
+                $pYDetect[':cust'] = $selectedCustomer;
+            }
+            $stDetectY = $pdo->prepare("SELECT DISTINCT YEAR(dds.summary_date) AS yr
+                                        FROM oqc_daily_defect_summary dds
+                                        WHERE " . implode(' AND ', $wYDetect) . "
+                                        ORDER BY yr ASC");
+            $stDetectY->execute($pYDetect);
+            $detectedYears = $stDetectY->fetchAll(PDO::FETCH_COLUMN);
+
+            if (empty($detectedYears)) {
+                $years = [$refYear - 2, $refYear - 1, $refYear];
             } else {
-                $wSumT = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
-                $pSumT = [':sd' => $startDate, ':ed' => $endDate];
-                if ($defectId > 0) {
-                    $wSumT[] = "dds.defect_type_id = :defId";
-                    $pSumT[':defId'] = $defectId;
-                }
-                if ($selectedCustomer !== '') {
-                    $wSumT[] = "dds.customer = :cust";
-                    $pSumT[':cust'] = $selectedCustomer;
-                }
-                $wSumTSql = implode(' AND ', $wSumT);
-
-                if ($intervalType === 'tahun') {
-                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y')";
-                } elseif ($intervalType === 'hari') {
-                    $groupExpr = "dds.summary_date";
+                if (count($detectedYears) > 4) {
+                    $years = array_slice($detectedYears, -4);
                 } else {
-                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y-%m')";
+                    $years = $detectedYears;
+                }
+                if (!in_array($refYear, $years)) {
+                    $years[] = $refYear;
+                    sort($years);
+                }
+            }
+
+            $yearlyMap = [];
+            foreach ($years as $yr) {
+                $yearlyMap[(string)$yr] = ['pcs' => 0, 'lot' => 0];
+            }
+
+            $minYear = min($years);
+            $maxYear = max($years);
+            $wY = [
+                "{$itemCol} = :itemId",
+                "dds.summary_date >= :minY_d AND dds.summary_date <= :maxY_d"
+            ];
+            $pY = [
+                ':itemId' => $itemId,
+                ':minY_d' => sprintf('%04d-01-01', $minYear),
+                ':maxY_d' => sprintf('%04d-12-31', $maxYear)
+            ];
+            if ($selectedCustomer !== '') {
+                $wY[] = "dds.customer = :cust";
+                $pY[':cust'] = $selectedCustomer;
+            }
+            $stY = $pdo->prepare("SELECT 
+                                    DATE_FORMAT(dds.summary_date, '%Y') AS y_key,
+                                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                  FROM oqc_daily_defect_summary dds
+                                  WHERE " . implode(' AND ', $wY) . "
+                                  GROUP BY y_key");
+            $stY->execute($pY);
+            foreach ($stY->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $yk = $r['y_key'];
+                if (isset($yearlyMap[$yk])) {
+                    $yearlyMap[$yk]['pcs'] = (int)$r['total_pcs'];
+                    $yearlyMap[$yk]['lot'] = (int)$r['total_lots'];
+                }
+            }
+
+            // 1b. HORIZON BULANAN (Jan s/d Bulan Berjalan / 12 Bulan)
+            $maxMonth = ($refYear === (int)date('Y')) ? (int)date('n') : 12;
+            $mNamesShort = [
+                1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+                7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+            ];
+            $monthlyMap = [];
+            for ($m = 1; $m <= $maxMonth; $m++) {
+                $monthlyMap[$m] = ['pcs' => 0, 'lot' => 0];
+            }
+
+            $maxMonthLastDay = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $refYear, $maxMonth)));
+            $wM = [
+                "{$itemCol} = :itemId",
+                "dds.summary_date >= :minM_d AND dds.summary_date <= :maxM_d"
+            ];
+            $pM = [
+                ':itemId' => $itemId,
+                ':minM_d' => sprintf('%04d-01-01', $refYear),
+                ':maxM_d' => $maxMonthLastDay
+            ];
+            if ($selectedCustomer !== '') {
+                $wM[] = "dds.customer = :cust";
+                $pM[':cust'] = $selectedCustomer;
+            }
+            $stM = $pdo->prepare("SELECT 
+                                    MONTH(dds.summary_date) AS m_num,
+                                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                  FROM oqc_daily_defect_summary dds
+                                  WHERE " . implode(' AND ', $wM) . "
+                                  GROUP BY m_num");
+            $stM->execute($pM);
+            foreach ($stM->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $mn = (int)$r['m_num'];
+                if (isset($monthlyMap[$mn])) {
+                    $monthlyMap[$mn]['pcs'] = (int)$r['total_pcs'];
+                    $monthlyMap[$mn]['lot'] = (int)$r['total_lots'];
+                }
+            }
+
+            // 1c. HORIZON MIKRO: Mingguan (Sunday Anchor) atau Harian
+            $monthStart = sprintf('%04d-%02d-01', $refYear, $refMonth);
+            $firstDayDt = new DateTime($monthStart);
+            $w1Sun = clone $firstDayDt;
+            if ($w1Sun->format('w') != 0) {
+                $w1Sun->modify('next Sunday');
+            }
+            if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+                $w1Sun->modify('+7 days');
+            }
+
+            $monthEndStr = date('Y-m-t', strtotime($monthStart));
+            $microMap = [];
+
+            if ($subResolution === 'daily') {
+                $monthEndDt = new DateTime($monthEndStr);
+                $curDay = clone $w1Sun;
+                while ($curDay <= $monthEndDt) {
+                    $dStr = $curDay->format('Y-m-d');
+                    $dDayNum = $curDay->format('d');
+                    $microMap[$dStr] = [
+                        'label'    => $dDayNum . ' ' . $mNamesShort[$refMonth],
+                        'category' => 'Harian (' . $mNamesShort[$refMonth] . ')',
+                        'pcs'      => 0,
+                        'lot'      => 0
+                    ];
+                    $curDay->modify('+1 day');
                 }
 
-                $stSumT = $pdo->prepare("SELECT {$groupExpr} as time_key,
-                                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
-                                                COALESCE(SUM(dds.lot_count), 0) as total_lots
-                                         FROM oqc_daily_defect_summary dds
-                                         WHERE {$wSumTSql}
-                                         GROUP BY time_key");
-                $stSumT->execute($pSumT);
-                foreach ($stSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $tk = $r['time_key'];
-                    if (isset($trendMap[$tk])) {
-                        $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                        $trendMap[$tk]['lot'] += (int)$r['total_lots'];
-                    }
-                }
-
-                // In-progress active session if range covers today
-                if ($endDate >= date('Y-m-d')) {
-                    $wActT = [
-                        "s.status = 'in_progress'",
-                        "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                        "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                if (!empty($microMap)) {
+                    $wD = [
+                        "{$itemCol} = :itemId",
+                        "dds.summary_date >= :dStart AND dds.summary_date <= :dEnd"
                     ];
-                    $pActT = [
-                        ':sd_act'      => $startDate . ' 00:00:00',
-                        ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                    $pD = [
+                        ':itemId' => $itemId,
+                        ':dStart' => $w1Sun->format('Y-m-d'),
+                        ':dEnd'   => $monthEndStr
                     ];
-                    if ($defectId > 0) {
-                        $wActT[] = "ngr.defect_type_id = :defId";
-                        $pActT[':defId'] = $defectId;
-                    }
                     if ($selectedCustomer !== '') {
-                        $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-                        $pActT[':cust'] = $selectedCustomer;
+                        $wD[] = "dds.customer = :cust";
+                        $pD[':cust'] = $selectedCustomer;
                     }
-                    $wActTSql = implode(' AND ', $wActT);
-
-                    if ($intervalType === 'tahun') {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y')";
-                    } elseif ($intervalType === 'hari') {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m-%d')";
-                    } else {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m')";
-                    }
-
-                    $stActT = $pdo->prepare("SELECT {$groupAct} as time_key,
-                                                    COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                                                    COUNT(DISTINCT s.id) as total_lots
-                                             FROM inspection_ng_records ngr
-                                             INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                                             LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                                             WHERE {$wActTSql}
-                                             GROUP BY time_key");
-                    $stActT->execute($pActT);
-                    foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                        $tk = $r['time_key'];
-                        if (isset($trendMap[$tk])) {
-                            $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                            $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                    $stD = $pdo->prepare("SELECT 
+                                            dds.summary_date,
+                                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                          FROM oqc_daily_defect_summary dds
+                                          WHERE " . implode(' AND ', $wD) . "
+                                          GROUP BY dds.summary_date");
+                    $stD->execute($pD);
+                    foreach ($stD->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $sDate = $r['summary_date'];
+                        if (isset($microMap[$sDate])) {
+                            $microMap[$sDate]['pcs'] = (int)$r['total_pcs'];
+                            $microMap[$sDate]['lot'] = (int)$r['total_lots'];
                         }
                     }
                 }
+            } else {
+                // Resolusi Mingguan (W1 - W4)
+                $monthEndDt = new DateTime($monthEndStr);
+                $curSun = clone $w1Sun;
+                $wIdx = 1;
+                $weeklyBuckets = [];
+
+                while ($curSun <= $monthEndDt) {
+                    $wKey = 'W' . $wIdx;
+                    $wStart = $curSun->format('Y-m-d');
+                    $wEndDt = clone $curSun;
+                    $wEndDt->modify('+6 days');
+                    if ($wEndDt > $monthEndDt) {
+                        $wEndDt = clone $monthEndDt;
+                    }
+                    $wEnd = $wEndDt->format('Y-m-d');
+
+                    $wLabel = $wKey . ' (' . $curSun->format('d') . '-' . $wEndDt->format('d') . ' ' . $curSun->format('M') . ')';
+
+                    $weeklyBuckets[$wKey] = [
+                        'label'      => $wLabel,
+                        'category'   => 'Mingguan (' . $mNamesShort[$refMonth] . ')',
+                        'pcs'        => 0,
+                        'lot'        => 0,
+                        'start_date' => $wStart,
+                        'end_date'   => $wEnd
+                    ];
+
+                    $curSun->modify('+7 days');
+                    $wIdx++;
+                }
+
+                if (!empty($weeklyBuckets)) {
+                    $lastBucketKey = 'W' . ($wIdx - 1);
+                    $wEffStart = $weeklyBuckets['W1']['start_date'];
+                    $wEffEnd   = $weeklyBuckets[$lastBucketKey]['end_date'];
+
+                    $wW = [
+                        "{$itemCol} = :itemId",
+                        "dds.summary_date >= :ws AND dds.summary_date <= :we"
+                    ];
+                    $pW = [
+                        ':itemId' => $itemId,
+                        ':ws'     => $wEffStart,
+                        ':we'     => $wEffEnd
+                    ];
+                    if ($selectedCustomer !== '') {
+                        $wW[] = "dds.customer = :cust";
+                        $pW[':cust'] = $selectedCustomer;
+                    }
+                    $stW = $pdo->prepare("SELECT 
+                                            dds.summary_date,
+                                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                          FROM oqc_daily_defect_summary dds
+                                          WHERE " . implode(' AND ', $wW) . "
+                                          GROUP BY dds.summary_date");
+                    $stW->execute($pW);
+                    foreach ($stW->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $sDate = $r['summary_date'];
+                        $pcs = (int)$r['total_pcs'];
+                        $lot = (int)$r['total_lots'];
+                        foreach ($weeklyBuckets as $wbKey => &$wb) {
+                            if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
+                                $wb['pcs'] += $pcs;
+                                $wb['lot'] += $lot;
+                                break;
+                            }
+                        }
+                        unset($wb);
+                    }
+                    $microMap = $weeklyBuckets;
+                }
             }
+
+            // Rakit kembali $trendMap Multi-Horizon komposit untuk Defect
+            $trendMap = [];
+            foreach ($yearlyMap as $yrKey => $yv) {
+                $trendMap["Y_{$yrKey}"] = [
+                    'category' => 'Tahunan',
+                    'label'    => "Tahun {$yrKey}",
+                    'pcs'      => $yv['pcs'],
+                    'lot'      => $yv['lot']
+                ];
+            }
+            foreach ($monthlyMap as $mNum => $mv) {
+                $trendMap["M_{$mNum}"] = [
+                    'category' => 'Bulanan (' . $refYear . ')',
+                    'label'    => "Bulan {$mNamesShort[$mNum]}",
+                    'pcs'      => $mv['pcs'],
+                    'lot'      => $mv['lot']
+                ];
+            }
+            foreach ($microMap as $microKey => $mcv) {
+                $trendMap["MIC_{$microKey}"] = [
+                    'category' => $mcv['category'],
+                    'label'    => $mcv['label'],
+                    'pcs'      => $mcv['pcs'],
+                    'lot'      => $mcv['lot']
+                ];
+            }
+
         } catch (Exception $e) {}
 
         // 2. Distribution Data: Top Parts for this Defect
@@ -630,127 +842,289 @@ if ($pdo) {
             $stAud->execute($pAud);
             $auditRecords = $stAud->fetchAll(PDO::FETCH_ASSOC);
         } catch (Exception $e) {}
-
     } else {
         // ── Skenario 2: Part Overview Mode (Focus on Part) ───────────────────
-        // 1. Timeline Data for Part
+        // 1. Timeline Data for Part (Multi-Horizon Support: Tahunan -> Bulanan -> Mingguan/Harian)
         try {
-            if ($isSingleDay) {
-                $wHour = [
-                    "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                    "s.started_at >= :sd AND s.started_at < :ed_next"
-                ];
-                $pHour = [
-                    ':sd'      => $startDate . ' 00:00:00',
-                    ':ed_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
-                ];
-                if ($partId > 0) {
-                    $wHour[] = "ngr.part_id = :pId";
-                    $pHour[':pId'] = $partId;
-                }
-                if ($selectedCustomer !== '') {
-                    $wHour[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-                    $pHour[':cust'] = $selectedCustomer;
-                }
-                $wHourSql = implode(' AND ', $wHour);
-                $stT = $pdo->prepare("SELECT DATE_FORMAT(s.started_at, '%H:00') as time_key,
-                                             COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                                             COUNT(DISTINCT s.id) as total_lots
-                                      FROM inspection_ng_records ngr
-                                      INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                                      LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                                      WHERE {$wHourSql}
-                                      GROUP BY time_key");
-                $stT->execute($pHour);
-                foreach ($stT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $tk = $r['time_key'];
-                    if (isset($trendMap[$tk])) {
-                        $trendMap[$tk]['pcs'] = (int)$r['total_pcs'];
-                        $trendMap[$tk]['lot'] = (int)$r['total_lots'];
-                    }
-                }
+            $isPartMode = true;
+            $itemId     = $partId;
+            $itemCol    = "dds.part_id";
+            $refYear    = $selectedYear ?: (int)date('Y');
+            $refMonth   = $selectedMonth ?: (int)date('n');
+
+            // 1a. HORIZON TAHUNAN (Dinamis: Tahun dengan riwayat data s/d refYear)
+            $wYDetect = [
+                "{$itemCol} = :itemId",
+                "YEAR(dds.summary_date) <= :refYear"
+            ];
+            $pYDetect = [
+                ':itemId'  => $itemId,
+                ':refYear' => $refYear
+            ];
+            if ($selectedCustomer !== '') {
+                $wYDetect[] = "dds.customer = :cust";
+                $pYDetect[':cust'] = $selectedCustomer;
+            }
+            $stDetectY = $pdo->prepare("SELECT DISTINCT YEAR(dds.summary_date) AS yr
+                                        FROM oqc_daily_defect_summary dds
+                                        WHERE " . implode(' AND ', $wYDetect) . "
+                                        ORDER BY yr ASC");
+            $stDetectY->execute($pYDetect);
+            $detectedYears = $stDetectY->fetchAll(PDO::FETCH_COLUMN);
+
+            if (empty($detectedYears)) {
+                $years = [$refYear - 2, $refYear - 1, $refYear];
             } else {
-                $wSumT = ["dds.summary_date >= :sd AND dds.summary_date <= :ed"];
-                $pSumT = [':sd' => $startDate, ':ed' => $endDate];
-                if ($partId > 0) {
-                    $wSumT[] = "dds.part_id = :pId";
-                    $pSumT[':pId'] = $partId;
-                }
-                if ($selectedCustomer !== '') {
-                    $wSumT[] = "dds.customer = :cust";
-                    $pSumT[':cust'] = $selectedCustomer;
-                }
-                $wSumTSql = implode(' AND ', $wSumT);
-
-                if ($intervalType === 'tahun') {
-                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y')";
-                } elseif ($intervalType === 'hari') {
-                    $groupExpr = "dds.summary_date";
+                if (count($detectedYears) > 4) {
+                    $years = array_slice($detectedYears, -4);
                 } else {
-                    $groupExpr = "DATE_FORMAT(dds.summary_date, '%Y-%m')";
+                    $years = $detectedYears;
+                }
+                if (!in_array($refYear, $years)) {
+                    $years[] = $refYear;
+                    sort($years);
+                }
+            }
+
+            $yearlyMap = [];
+            foreach ($years as $yr) {
+                $yearlyMap[(string)$yr] = ['pcs' => 0, 'lot' => 0];
+            }
+
+            $minYear = min($years);
+            $maxYear = max($years);
+            $wY = [
+                "{$itemCol} = :itemId",
+                "dds.summary_date >= :minY_d AND dds.summary_date <= :maxY_d"
+            ];
+            $pY = [
+                ':itemId' => $itemId,
+                ':minY_d' => sprintf('%04d-01-01', $minYear),
+                ':maxY_d' => sprintf('%04d-12-31', $maxYear)
+            ];
+            if ($selectedCustomer !== '') {
+                $wY[] = "dds.customer = :cust";
+                $pY[':cust'] = $selectedCustomer;
+            }
+            $stY = $pdo->prepare("SELECT 
+                                    DATE_FORMAT(dds.summary_date, '%Y') AS y_key,
+                                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                  FROM oqc_daily_defect_summary dds
+                                  WHERE " . implode(' AND ', $wY) . "
+                                  GROUP BY y_key");
+            $stY->execute($pY);
+            foreach ($stY->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $yk = $r['y_key'];
+                if (isset($yearlyMap[$yk])) {
+                    $yearlyMap[$yk]['pcs'] = (int)$r['total_pcs'];
+                    $yearlyMap[$yk]['lot'] = (int)$r['total_lots'];
+                }
+            }
+
+            // 1b. HORIZON BULANAN (Jan s/d Bulan Berjalan / 12 Bulan)
+            $maxMonth = ($refYear === (int)date('Y')) ? (int)date('n') : 12;
+            $mNamesShort = [
+                1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+                7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+            ];
+            $monthlyMap = [];
+            for ($m = 1; $m <= $maxMonth; $m++) {
+                $monthlyMap[$m] = ['pcs' => 0, 'lot' => 0];
+            }
+
+            $maxMonthLastDay = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $refYear, $maxMonth)));
+            $wM = [
+                "{$itemCol} = :itemId",
+                "dds.summary_date >= :minM_d AND dds.summary_date <= :maxM_d"
+            ];
+            $pM = [
+                ':itemId' => $itemId,
+                ':minM_d' => sprintf('%04d-01-01', $refYear),
+                ':maxM_d' => $maxMonthLastDay
+            ];
+            if ($selectedCustomer !== '') {
+                $wM[] = "dds.customer = :cust";
+                $pM[':cust'] = $selectedCustomer;
+            }
+            $stM = $pdo->prepare("SELECT 
+                                    MONTH(dds.summary_date) AS m_num,
+                                    COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                    COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                  FROM oqc_daily_defect_summary dds
+                                  WHERE " . implode(' AND ', $wM) . "
+                                  GROUP BY m_num");
+            $stM->execute($pM);
+            foreach ($stM->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $mn = (int)$r['m_num'];
+                if (isset($monthlyMap[$mn])) {
+                    $monthlyMap[$mn]['pcs'] = (int)$r['total_pcs'];
+                    $monthlyMap[$mn]['lot'] = (int)$r['total_lots'];
+                }
+            }
+
+            // 1c. HORIZON MIKRO (Sunday Anchor: Mingguan atau Harian Siklus Kerja)
+            $monthStart  = sprintf('%04d-%02d-01', $refYear, $refMonth);
+            $firstDayDt  = new DateTime($monthStart);
+            $firstDayDow = (int)$firstDayDt->format('N'); // 1 = Mon ... 7 = Sun
+
+            $w1Sun = clone $firstDayDt;
+            if ($firstDayDow !== 7) {
+                $w1Sun->modify('-' . $firstDayDow . ' days');
+            }
+            if ($w1Sun->format('m') !== $firstDayDt->format('m')) {
+                $w1Sun->modify('+7 days');
+            }
+
+            $monthEndStr = date('Y-m-t', strtotime($monthStart));
+            $microMap = [];
+
+            if ($subResolution === 'daily') {
+                $monthEndDt = new DateTime($monthEndStr);
+                $curDay = clone $w1Sun;
+                while ($curDay <= $monthEndDt) {
+                    $dStr = $curDay->format('Y-m-d');
+                    $dDayNum = $curDay->format('d');
+                    $microMap[$dStr] = [
+                        'label'    => $dDayNum . ' ' . $mNamesShort[$refMonth],
+                        'category' => 'Harian (' . $mNamesShort[$refMonth] . ')',
+                        'pcs'      => 0,
+                        'lot'      => 0
+                    ];
+                    $curDay->modify('+1 day');
                 }
 
-                $stSumT = $pdo->prepare("SELECT {$groupExpr} as time_key,
-                                                COALESCE(SUM(dds.qty_ng), 0) as total_pcs,
-                                                COALESCE(SUM(dds.lot_count), 0) as total_lots
-                                         FROM oqc_daily_defect_summary dds
-                                         WHERE {$wSumTSql}
-                                         GROUP BY time_key");
-                $stSumT->execute($pSumT);
-                foreach ($stSumT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                    $tk = $r['time_key'];
-                    if (isset($trendMap[$tk])) {
-                        $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                        $trendMap[$tk]['lot'] += (int)$r['total_lots'];
-                    }
-                }
-
-                if ($endDate >= date('Y-m-d')) {
-                    $wActT = [
-                        "s.status = 'in_progress'",
-                        "(ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)",
-                        "s.started_at >= :sd_act AND s.started_at < :ed_act_next"
+                if (!empty($microMap)) {
+                    $wD = [
+                        "{$itemCol} = :itemId",
+                        "dds.summary_date >= :dStart AND dds.summary_date <= :dEnd"
                     ];
-                    $pActT = [
-                        ':sd_act'      => $startDate . ' 00:00:00',
-                        ':ed_act_next' => date('Y-m-d', strtotime($endDate . ' +1 day')) . ' 00:00:00'
+                    $pD = [
+                        ':itemId' => $itemId,
+                        ':dStart' => $w1Sun->format('Y-m-d'),
+                        ':dEnd'   => $monthEndStr
                     ];
-                    if ($partId > 0) {
-                        $wActT[] = "ngr.part_id = :pId";
-                        $pActT[':pId'] = $partId;
-                    }
                     if ($selectedCustomer !== '') {
-                        $wActT[] = "COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') = :cust";
-                        $pActT[':cust'] = $selectedCustomer;
+                        $wD[] = "dds.customer = :cust";
+                        $pD[':cust'] = $selectedCustomer;
                     }
-                    $wActTSql = implode(' AND ', $wActT);
-
-                    if ($intervalType === 'tahun') {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y')";
-                    } elseif ($intervalType === 'hari') {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m-%d')";
-                    } else {
-                        $groupAct = "DATE_FORMAT(s.started_at, '%Y-%m')";
-                    }
-
-                    $stActT = $pdo->prepare("SELECT {$groupAct} as time_key,
-                                                    COALESCE(SUM(ngr.qty_ng), 0) as total_pcs,
-                                                    COUNT(DISTINCT s.id) as total_lots
-                                             FROM inspection_ng_records ngr
-                                             INNER JOIN inspection_sessions s ON ngr.inspection_session_id = s.id
-                                             LEFT JOIN kanban_items ki ON s.kanban_item_id = ki.id
-                                             WHERE {$wActTSql}
-                                             GROUP BY time_key");
-                    $stActT->execute($pActT);
-                    foreach ($stActT->fetchAll(PDO::FETCH_ASSOC) as $r) {
-                        $tk = $r['time_key'];
-                        if (isset($trendMap[$tk])) {
-                            $trendMap[$tk]['pcs'] += (int)$r['total_pcs'];
-                            $trendMap[$tk]['lot'] += (int)$r['total_lots'];
+                    $stD = $pdo->prepare("SELECT 
+                                            dds.summary_date,
+                                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                          FROM oqc_daily_defect_summary dds
+                                          WHERE " . implode(' AND ', $wD) . "
+                                          GROUP BY dds.summary_date");
+                    $stD->execute($pD);
+                    foreach ($stD->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $sDate = $r['summary_date'];
+                        if (isset($microMap[$sDate])) {
+                            $microMap[$sDate]['pcs'] = (int)$r['total_pcs'];
+                            $microMap[$sDate]['lot'] = (int)$r['total_lots'];
                         }
                     }
                 }
+            } else {
+                // Mingguan W1..W5
+                $weeklyBuckets = [];
+                $curSun = clone $w1Sun;
+                $wIdx = 1;
+                $targetMonth = $firstDayDt->format('m');
+
+                while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+                    $curSat = clone $curSun;
+                    $curSat->modify('+6 days');
+
+                    $sStr = $curSun->format('Y-m-d');
+                    $eStr = $curSat->format('Y-m-d');
+                    $sLabel = $curSun->format('d');
+                    $eLabel = $curSat->format('d');
+                    $sMonth = $curSun->format('M');
+                    $eMonth = $curSat->format('M');
+                    $lblText = ($sMonth === $eMonth) ? "W{$wIdx} ({$sLabel}-{$eLabel} {$sMonth})" : "W{$wIdx} ({$sLabel} {$sMonth}-{$eLabel} {$eMonth})";
+
+                    $weeklyBuckets["W{$wIdx}"] = [
+                        'label'      => $lblText,
+                        'category'   => 'Mingguan (' . $mNamesShort[$refMonth] . ')',
+                        'start_date' => $sStr,
+                        'end_date'   => $eStr,
+                        'pcs'        => 0,
+                        'lot'        => 0
+                    ];
+                    $curSun->modify('+7 days');
+                    $wIdx++;
+                }
+
+                if (!empty($weeklyBuckets)) {
+                    $lastBucketKey = 'W' . ($wIdx - 1);
+                    $wEffStart = $weeklyBuckets['W1']['start_date'];
+                    $wEffEnd   = $weeklyBuckets[$lastBucketKey]['end_date'];
+
+                    $wW = [
+                        "{$itemCol} = :itemId",
+                        "dds.summary_date >= :ws AND dds.summary_date <= :we"
+                    ];
+                    $pW = [
+                        ':itemId' => $itemId,
+                        ':ws'     => $wEffStart,
+                        ':we'     => $wEffEnd
+                    ];
+                    if ($selectedCustomer !== '') {
+                        $wW[] = "dds.customer = :cust";
+                        $pW[':cust'] = $selectedCustomer;
+                    }
+                    $stW = $pdo->prepare("SELECT 
+                                            dds.summary_date,
+                                            COALESCE(SUM(dds.qty_ng), 0) AS total_pcs,
+                                            COALESCE(SUM(dds.lot_count), 0) AS total_lots
+                                          FROM oqc_daily_defect_summary dds
+                                          WHERE " . implode(' AND ', $wW) . "
+                                          GROUP BY dds.summary_date");
+                    $stW->execute($pW);
+                    foreach ($stW->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                        $sDate = $r['summary_date'];
+                        $pcs = (int)$r['total_pcs'];
+                        $lot = (int)$r['total_lots'];
+                        foreach ($weeklyBuckets as $wbKey => &$wb) {
+                            if ($sDate >= $wb['start_date'] && $sDate <= $wb['end_date']) {
+                                $wb['pcs'] += $pcs;
+                                $wb['lot'] += $lot;
+                                break;
+                            }
+                        }
+                        unset($wb);
+                    }
+                    $microMap = $weeklyBuckets;
+                }
             }
+
+            // Rakit kembali $trendMap Multi-Horizon komposit
+            $trendMap = [];
+            foreach ($yearlyMap as $yrKey => $yv) {
+                $trendMap["Y_{$yrKey}"] = [
+                    'category' => 'Tahunan',
+                    'label'    => "Tahun {$yrKey}",
+                    'pcs'      => $yv['pcs'],
+                    'lot'      => $yv['lot']
+                ];
+            }
+            foreach ($monthlyMap as $mNum => $mv) {
+                $trendMap["M_{$mNum}"] = [
+                    'category' => 'Bulanan (' . $refYear . ')',
+                    'label'    => "Bulan {$mNamesShort[$mNum]}",
+                    'pcs'      => $mv['pcs'],
+                    'lot'      => $mv['lot']
+                ];
+            }
+            foreach ($microMap as $microKey => $mcv) {
+                $trendMap["MIC_{$microKey}"] = [
+                    'category' => $mcv['category'],
+                    'label'    => $mcv['label'],
+                    'pcs'      => $mcv['pcs'],
+                    'lot'      => $mcv['lot']
+                ];
+            }
+
         } catch (Exception $e) {}
 
         // 2. Distribution Data: Top Defects for this Part
@@ -923,9 +1297,14 @@ $peakVal      = 0;
 $peakLabel    = 'Nihil / 0 Cacat';
 $activeIntervalCount = count($trendMap);
 
+// Hitung total PCS dan LOT aktual dari rentang filter aktif (bukan menjumlahkan multi-horizon yang redundan)
+foreach ($distributionList as $di) {
+    $totalPcsAcc  += (int)$di['total_pcs'];
+    $totalLotsAcc += (int)$di['total_lots'];
+}
+
+// Cari interval kasus tertinggi (peak period) dari horizon tren
 foreach ($trendMap as $t) {
-    $totalPcsAcc  += $t['pcs'];
-    $totalLotsAcc += $t['lot'];
     $val = ($selectedUnit === 'lot') ? $t['lot'] : $t['pcs'];
     if ($val > $peakVal) {
         $peakVal   = $val;
@@ -936,10 +1315,7 @@ $metricAcc = ($selectedUnit === 'lot') ? $totalLotsAcc : $totalPcsAcc;
 $avgPerInterval = ($activeIntervalCount > 0 && $metricAcc > 0) ? round($metricAcc / $activeIntervalCount, 1) : 0;
 
 // Grand Metric for Distribution Percentages
-$grandDistMetric = 0;
-foreach ($distributionList as $di) {
-    $grandDistMetric += ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
-}
+$grandDistMetric = $metricAcc;
 
 // ── 6. Setup Spreadsheet & Formatting Functions ──────────────────────────────
 $spreadsheet = new Spreadsheet();
@@ -1039,233 +1415,462 @@ $ws1->setCellValue('A6', strtoupper($selectedUnit) . ' akumulasi (' . number_for
 applyStyle($ws1, 'A6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF9F1239']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFF1F2']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 applyStyle($ws1, 'A4:D6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFECDD3']]]]);
 
-// KPI Card 2: Puncak Kasus (Peak)
-$ws1->mergeCells('E4:H4');
-$ws1->setCellValue('E4', 'PUNCAK KASUS (PEAK PERIOD)');
-applyStyle($ws1, 'E4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FFB45309']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+if ($mode === 'overview') {
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODE OVERVIEW (DEFECT FOCUS: 100% Stacked Full Width Multi-Horizon)
+    // ═══════════════════════════════════════════════════════════════════════
 
-$ws1->mergeCells('E5:H5');
-$ws1->setCellValue('E5', $peakLabel);
-applyStyle($ws1, 'E5', ['font' => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FFB45309']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
+    // KPI Card 2: Batas Target Defect
+    $targetDesc = ($defectThreshold !== null) ? (number_format($defectThreshold) . ' ' . strtoupper($selectedUnit)) : 'Belum Diset';
+    $isDefectOver = ($defectThreshold !== null && $metricAcc > $defectThreshold);
+    $targetStatus = ($defectThreshold === null) ? 'Belum Diatur' : ($isDefectOver ? '⚠️ Over Target' : '✓ Aman');
 
-$ws1->mergeCells('E6:H6');
-$ws1->setCellValue('E6', 'Periode dengan intensitas kasus tertinggi');
-applyStyle($ws1, 'E6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF92400E']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFFFFBEB']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'E4:H6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFFEF3C7']]]]);
+    $ws1->mergeCells('E4:H4');
+    $ws1->setCellValue('E4', 'BATAS TARGET DEFECT');
+    applyStyle($ws1, 'E4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => $isDefectOver ? 'FFB91C1C' : 'FF047857']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isDefectOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 
-// KPI Card 3: Rata-Rata per Periode
-$ws1->mergeCells('I4:M4');
-$ws1->setCellValue('I4', 'RATA-RATA TEMUAN PER INTERVAL');
-applyStyle($ws1, 'I4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+    $ws1->mergeCells('E5:H5');
+    $ws1->setCellValue('E5', $targetDesc);
+    applyStyle($ws1, 'E5', ['font' => ['bold' => true, 'size' => 16, 'color' => ['argb' => $isDefectOver ? 'FFB91C1C' : 'FF047857']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isDefectOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
 
-$ws1->mergeCells('I5:M5');
-$ws1->setCellValue('I5', number_format($avgPerInterval, 1) . ' ' . strtoupper($selectedUnit));
-applyStyle($ws1, 'I5', ['font' => ['bold' => true, 'size' => 18, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
+    $ws1->mergeCells('E6:H6');
+    $ws1->setCellValue('E6', 'Status Kepatuhan: ' . $targetStatus);
+    applyStyle($ws1, 'E6', ['font' => ['bold' => true, 'italic' => true, 'size' => 8, 'color' => ['argb' => $isDefectOver ? 'FF991B1B' : 'FF065F46']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isDefectOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+    applyStyle($ws1, 'E4:H6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => $isDefectOver ? 'FFFECACA' : 'FFA7F3D0']]]]);
 
-$ws1->mergeCells('I6:M6');
-$ws1->setCellValue('I6', 'Rata-rata dari ' . $activeIntervalCount . ' interval pemantauan');
-applyStyle($ws1, 'I6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF3730A3']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
-applyStyle($ws1, 'I4:M6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFE0E7FF']]]]);
+    // KPI Card 3: Puncak Kasus (Peak)
+    $ws1->mergeCells('I4:M4');
+    $ws1->setCellValue('I4', 'PUNCAK KASUS (PEAK PERIOD)');
+    applyStyle($ws1, 'I4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
 
-// ── Left Side Panel: Timeline Data Table (Columns A to E, Rows 8+) ───────────
-$leftSectionTitle = ($mode === 'overview') ? 'TREN KEJADIAN DEFECT' : 'TREN KEJADIAN PART';
-$ws1->mergeCells('A8:E8');
-$ws1->setCellValue('A8', $leftSectionTitle . ' SEPANJANG WAKTU');
-applyStyle($ws1, 'A8', [
-    'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => 'FFFFFFFF']],
-    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF2563EB']],
-    'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
-]);
+    $ws1->mergeCells('I5:M5');
+    $ws1->setCellValue('I5', $peakLabel);
+    applyStyle($ws1, 'I5', ['font' => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
 
-$ws1->setCellValue('A9', 'NO');
-$ws1->setCellValue('B9', 'INTERVAL / WAKTU');
-$ws1->setCellValue('C9', 'TEMUAN (PCS)');
-$ws1->setCellValue('D9', 'KASUS (LOT)');
-$ws1->setCellValue('E9', 'AKTIF (' . strtoupper($selectedUnit) . ')');
-applyStyle($ws1, 'A9:E9', hdrStyle('0F172A'));
+    $ws1->mergeCells('I6:M6');
+    $ws1->setCellValue('I6', 'Interval kasus tertinggi pada defect ini');
+    applyStyle($ws1, 'I6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF3730A3']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+    applyStyle($ws1, 'I4:M6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFE0E7FF']]]]);
 
-$trRow = 10;
-$trendStartRow = $trRow;
-$tIndex = 1;
+    // ── BAGIAN 1 (ATAS): TREN FLUKTUASI MULTI-HORIZON 100% WIDTH ─────────
+    $ws1->mergeCells('A8:M8');
+    $ws1->setCellValue('A8', '1. TREN & KOMPARASI KEJADIAN DEFECT (MULTI-HORIZON: TAHUNAN → BULANAN → MINGGUAN/HARIAN)');
+    applyStyle($ws1, 'A8', [
+        'font'      => ['bold' => true, 'size' => 11, 'color' => ['argb' => 'FFFFFFFF']],
+        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF1E293B']],
+        'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
+    ]);
 
-if (empty($trendMap)) {
-    $ws1->mergeCells('A10:E10');
-    $ws1->setCellValue('A10', 'Tidak ada data fluktuasi waktu pada filter ini.');
-    applyStyle($ws1, 'A10:E10', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
-    $trRow++;
-} else {
-    foreach ($trendMap as $t) {
-        $valAct = ($selectedUnit === 'lot') ? $t['lot'] : $t['pcs'];
-        $ws1->setCellValue("A{$trRow}", $tIndex++);
-        $ws1->setCellValue("B{$trRow}", $t['label']);
-        $ws1->setCellValue("C{$trRow}", (int)$t['pcs']);
-        $ws1->setCellValue("D{$trRow}", (int)$t['lot']);
-        $ws1->setCellValue("E{$trRow}", (int)$valAct);
+    $ws1->setCellValue('A9', 'NO');
+    $ws1->mergeCells('B9:G9');
+    $ws1->setCellValue('B9', 'PERIODE / WAKTU');
+    $ws1->mergeCells('H9:I9');
+    $ws1->setCellValue('H9', 'TEMUAN (PCS)');
+    $ws1->mergeCells('J9:K9');
+    $ws1->setCellValue('J9', 'KASUS (LOT)');
+    $ws1->mergeCells('L9:M9');
+    $ws1->setCellValue('L9', 'TARGET (' . strtoupper($selectedUnit) . ')');
+    applyStyle($ws1, 'A9:M9', hdrStyle('0F172A'));
 
-        $bg = ($tIndex % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-        applyStyle($ws1, "A{$trRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws1, "B{$trRow}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws1, "C{$trRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
-        applyStyle($ws1, "D{$trRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
-        applyStyle($ws1, "E{$trRow}", dataStyle($bg, 'BE123C', true, Alignment::HORIZONTAL_RIGHT));
+    $mhRow = 10;
+    $mhStartRow = $mhRow;
+    $mhIndex = 1;
 
-        $ws1->getStyle("C{$trRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $ws1->getStyle("D{$trRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $ws1->getStyle("E{$trRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $trRow++;
+    foreach ($trendMap as $tk => $tv) {
+        $ws1->setCellValue("A{$mhRow}", $mhIndex++);
+        
+        $ws1->mergeCells("B{$mhRow}:G{$mhRow}");
+        $ws1->setCellValue("B{$mhRow}", $tv['label']);
+
+        $ws1->mergeCells("H{$mhRow}:I{$mhRow}");
+        $ws1->setCellValue("H{$mhRow}", (int)$tv['pcs']);
+
+        $ws1->mergeCells("J{$mhRow}:K{$mhRow}");
+        $ws1->setCellValue("J{$mhRow}", (int)$tv['lot']);
+
+        $ws1->mergeCells("L{$mhRow}:M{$mhRow}");
+        if ($defectThreshold !== null) {
+            $ws1->setCellValue("L{$mhRow}", (float)$defectThreshold);
+        } else {
+            $ws1->setCellValue("L{$mhRow}", null);
+        }
+
+        // Highlight warna zona horizon
+        $bg = 'FFFFFF';
+        if (strpos($tv['category'], 'Tahunan') !== false) {
+            $bg = 'F8FAFC';
+        } elseif (strpos($tv['category'], 'Bulanan') !== false) {
+            $bg = 'EFF6FF';
+        } else {
+            $bg = 'ECFDF5';
+        }
+
+        applyStyle($ws1, "A{$mhRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws1, "B{$mhRow}:G{$mhRow}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws1, "H{$mhRow}:I{$mhRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "J{$mhRow}:K{$mhRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "L{$mhRow}:M{$mhRow}", dataStyle($bg, 'BE123C', true, Alignment::HORIZONTAL_RIGHT));
+
+        $ws1->getStyle("H{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws1->getStyle("J{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        if ($defectThreshold !== null) {
+            $ws1->getStyle("L{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        }
+        $mhRow++;
     }
-}
-$trendEndRow = $trRow - 1;
-$trendDataCount = count($trendMap);
+    $mhEndRow = $mhRow - 1;
+    $mhDataCount = count($trendMap);
 
-// ── Right Side Panel: Distribution Data Table (Columns G to M, Rows 8+) ──────
-$rightSectionTitle = ($mode === 'overview') ? 'SEBARAN PART TERDAMPAK' : 'SEBARAN JENIS DEFECT';
-$ws1->mergeCells('G8:M8');
-$ws1->setCellValue('G8', $rightSectionTitle . ' (TOP RANK & KONTRIBUSI)');
-applyStyle($ws1, 'G8', [
-    'font'      => ['bold' => true, 'size' => 10, 'color' => ['argb' => 'FFFFFFFF']],
-    'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF059669']],
-    'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
-]);
+    // Chart Multi-Horizon Combo / Dual Series (Full Width Kolom A s.d. M)
+    $chartMhStartRow = $mhEndRow + 2;
+    $chartMhEndRow   = $chartMhStartRow + 17;
 
-$ws1->setCellValue('G9', 'NO');
-$ws1->setCellValue('H9', ($mode === 'overview') ? 'PART CODE' : 'KODE DEFECT');
-$ws1->setCellValue('I9', ($mode === 'overview') ? 'PART NAME' : 'NAMA DEFECT');
-$ws1->setCellValue('J9', 'LABEL LENGKAP');
-$ws1->setCellValue('K9', 'TEMUAN (PCS)');
-$ws1->setCellValue('L9', 'KASUS (LOT)');
-$ws1->setCellValue('M9', '% KONTRIBUSI');
-applyStyle($ws1, 'G9:M9', hdrStyle('064E3B'));
+    if ($mhDataCount > 0 && $mhEndRow >= $mhStartRow) {
+        try {
+            $xAxisLabels = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$B\${$mhStartRow}:\$B\${$mhEndRow}", null, $mhDataCount)];
+            
+            // Series 1: Bar Temuan Aktual (Membaca Kolom H jika PCS, atau Kolom J jika LOT)
+            $actualCol = ($selectedUnit === 'lot') ? 'J' : 'H';
+            $seriesBarTitle  = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\${$actualCol}\$9", null, 1)];
+            $seriesBarValues = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\${$actualCol}\${$mhStartRow}:\${$actualCol}\${$mhEndRow}", null, $mhDataCount)];
+            $seriesMhBar = new DataSeries(DataSeries::TYPE_BARCHART, DataSeries::GROUPING_CLUSTERED, [0], $seriesBarTitle, $xAxisLabels, $seriesBarValues);
+            $seriesMhBar->setPlotDirection(DataSeries::DIRECTION_COL);
 
-$distRow = 10;
-$distStartRow = $distRow;
-$dIndex = 1;
+            $plotSeriesList = [$seriesMhBar];
 
-if (empty($distributionList)) {
-    $ws1->mergeCells('G10:M10');
-    $ws1->setCellValue('G10', 'Tidak ada data sebaran pada filter ini.');
-    applyStyle($ws1, 'G10:M10', dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
-    $distRow++;
-} else {
-    foreach ($distributionList as $di) {
-        $valAct = ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
-        $share = ($grandDistMetric > 0 && $valAct > 0) ? round(($valAct / $grandDistMetric) * 100, 1) : 0;
+            // Series 2: Garis Batas Target (Kolom L) jika target diatur
+            if ($defectThreshold !== null) {
+                $seriesLineTitle  = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$L\$9", null, 1)];
+                $seriesLineValues = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\$L\${$mhStartRow}:\$L\${$mhEndRow}", null, $mhDataCount)];
+                $seriesMhLine = new DataSeries(DataSeries::TYPE_LINECHART, DataSeries::GROUPING_STANDARD, [0], $seriesLineTitle, $xAxisLabels, $seriesLineValues);
+                $plotSeriesList[] = $seriesMhLine;
+            }
 
-        $ws1->setCellValue("G{$distRow}", $dIndex++);
-        $ws1->setCellValue("H{$distRow}", $di['item_code']);
-        $ws1->setCellValue("I{$distRow}", $di['item_name']);
-        $ws1->setCellValue("J{$distRow}", $di['full_label']);
-        $ws1->setCellValue("K{$distRow}", (int)$di['total_pcs']);
-        $ws1->setCellValue("L{$distRow}", (int)$di['total_lots']);
-        $ws1->setCellValue("M{$distRow}", $share / 100);
-
-        $bg = ($dIndex % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
-        applyStyle($ws1, "G{$distRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
-        applyStyle($ws1, "H{$distRow}", dataStyle($bg, '1D4ED8', true, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws1, "I{$distRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws1, "J{$distRow}", dataStyle($bg, '475569', false, Alignment::HORIZONTAL_LEFT));
-        applyStyle($ws1, "K{$distRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
-        applyStyle($ws1, "L{$distRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
-        applyStyle($ws1, "M{$distRow}", dataStyle($bg, '047857', true, Alignment::HORIZONTAL_RIGHT));
-
-        $ws1->getStyle("K{$distRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $ws1->getStyle("L{$distRow}")->getNumberFormat()->setFormatCode('#,##0');
-        $ws1->getStyle("M{$distRow}")->getNumberFormat()->setFormatCode('0.0%');
-        $distRow++;
+            $layoutMh = new Layout();
+            $layoutMh->setShowVal(true);
+            $plotAreaMh = new PlotArea($layoutMh, $plotSeriesList);
+            $legendMh   = new Legend(Legend::POSITION_BOTTOM, null, false);
+            $chartTitleMh = new Title("Grafik Tren & Komparasi Multi-Horizon Defect: " . $defectName);
+            $chartObjMh   = new Chart('chart_defect_multi_horizon', $chartTitleMh, $legendMh, $plotAreaMh, true);
+            $chartObjMh->setTopLeftPosition("A{$chartMhStartRow}");
+            $chartObjMh->setBottomRightPosition("M{$chartMhEndRow}");
+            $ws1->addChart($chartObjMh);
+        } catch (Exception $ex) {}
     }
-}
-$distEndRow = $distRow - 1;
-$distDataCount = count($distributionList);
 
-// Hide Column J (Helper label column used cleanly for Donut Chart labels)
-$ws1->getColumnDimension('J')->setVisible(false);
+    // ── BAGIAN 2 (BAWAH): SEBARAN PART TERDAMPAK + KONTRIBUSI 100% WIDTH ─
+    $distHeaderRow = $chartMhEndRow + 3;
+    $ws1->mergeCells("A{$distHeaderRow}:M{$distHeaderRow}");
+    $ws1->setCellValue("A{$distHeaderRow}", '2. SEBARAN PART TERDAMPAK PADA DEFECT TERPILIH (TOP RANK & KONTRIBUSI)');
+    applyStyle($ws1, "A{$distHeaderRow}", [
+        'font'      => ['bold' => true, 'size' => 11, 'color' => ['argb' => 'FFFFFFFF']],
+        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF059669']],
+        'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
+    ]);
 
-// ── Native Excel Charts Placement below the data tables ──────────────────────
-$chartStartRow = max($trendEndRow, $distEndRow) + 3;
-$chartEndRow   = $chartStartRow + 18;
+    $distSubHdrRow = $distHeaderRow + 1;
+    $ws1->setCellValue("A{$distSubHdrRow}", 'NO');
+    $ws1->mergeCells("B{$distSubHdrRow}:C{$distSubHdrRow}");
+    $ws1->setCellValue("B{$distSubHdrRow}", 'PART CODE');
+    $ws1->mergeCells("D{$distSubHdrRow}:G{$distSubHdrRow}");
+    $ws1->setCellValue("D{$distSubHdrRow}", 'PART NAME');
+    $ws1->mergeCells("H{$distSubHdrRow}:I{$distSubHdrRow}");
+    $ws1->setCellValue("H{$distSubHdrRow}", 'TEMUAN (PCS)');
+    $ws1->mergeCells("J{$distSubHdrRow}:K{$distSubHdrRow}");
+    $ws1->setCellValue("J{$distSubHdrRow}", 'KASUS (LOT)');
+    $ws1->mergeCells("L{$distSubHdrRow}:M{$distSubHdrRow}");
+    $ws1->setCellValue("L{$distSubHdrRow}", '% KONTRIBUSI');
+    applyStyle($ws1, "A{$distSubHdrRow}:M{$distSubHdrRow}", hdrStyle('064E3B'));
 
-// 1. Native Excel Line / Column Chart for Timeline Trend (Placed on Left: Cols A to E)
-if ($trendDataCount > 0 && $trendEndRow >= $trendStartRow) {
-    try {
-        $xAxisLabels = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$B\${$trendStartRow}:\$B\${$trendEndRow}", null, $trendDataCount)
-        ];
-        $dataValues = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\$E\${$trendStartRow}:\$E\${$trendEndRow}", null, $trendDataCount)
-        ];
-        $seriesTitle = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$E\$9", null, 1)
-        ];
+    $dRow = $distSubHdrRow + 1;
+    $dIndex = 1;
 
-        $chartType = ($trendDataCount <= 12) ? DataSeries::TYPE_BARCHART : DataSeries::TYPE_LINECHART;
-        $barDir    = ($trendDataCount <= 12) ? DataSeries::DIRECTION_COL : null;
+    if (empty($distributionList)) {
+        $ws1->mergeCells("A{$dRow}:M{$dRow}");
+        $ws1->setCellValue("A{$dRow}", 'Tidak ada temuan part untuk defect ini.');
+        applyStyle($ws1, "A{$dRow}:M{$dRow}", dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
+        $dRow++;
+    } else {
+        foreach ($distributionList as $di) {
+            $valAct = ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
+            $share = ($grandDistMetric > 0 && $valAct > 0) ? round(($valAct / $grandDistMetric) * 100, 1) : 0;
 
-        $seriesTrend = new DataSeries(
-            $chartType,
-            $barDir ? DataSeries::GROUPING_CLUSTERED : DataSeries::GROUPING_STANDARD,
-            [0],
-            $seriesTitle,
-            $xAxisLabels,
-            $dataValues
-        );
-        if ($barDir) $seriesTrend->setPlotDirection($barDir);
+            $bg = ($dIndex % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
+            $ws1->setCellValue("A{$dRow}", $dIndex++);
 
-        $layoutTrend = new Layout();
-        $layoutTrend->setShowVal(true);
+            $ws1->mergeCells("B{$dRow}:C{$dRow}");
+            $ws1->setCellValue("B{$dRow}", $di['item_code']);
 
-        $plotAreaTrend = new PlotArea($layoutTrend, [$seriesTrend]);
-        $legendTrend   = new Legend(Legend::POSITION_BOTTOM, null, false);
-        $chartTitleTrendText = ($mode === 'overview') 
-            ? ("Grafik Tren Fluktuasi Defect: " . $defectName)
-            : ("Grafik Tren Fluktuasi Part: " . $partCode);
-        $chartTitleTrend = new Title($chartTitleTrendText);
-        $chartObjTrend   = new Chart('chart_trend_timeline', $chartTitleTrend, $legendTrend, $plotAreaTrend, true);
+            $ws1->mergeCells("D{$dRow}:G{$dRow}");
+            $ws1->setCellValue("D{$dRow}", $di['item_name']);
 
-        $chartObjTrend->setTopLeftPosition("A{$chartStartRow}");
-        $chartObjTrend->setBottomRightPosition("E{$chartEndRow}");
-        $ws1->addChart($chartObjTrend);
-    } catch (Exception $ex) {}
-}
+            $ws1->mergeCells("H{$dRow}:I{$dRow}");
+            $ws1->setCellValue("H{$dRow}", (int)$di['total_pcs']);
 
-// 2. Native Excel Donut / Pie Chart for Distribution (Placed on Right: Cols G to M)
-if ($distDataCount > 0 && $distEndRow >= $distStartRow) {
-    try {
-        $distValCol = ($selectedUnit === 'lot') ? 'L' : 'K';
-        $xAxisLabelsDist = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$J\${$distStartRow}:\$J\${$distEndRow}", null, $distDataCount)
-        ];
-        $dataValuesDist = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\${$distValCol}\${$distStartRow}:\${$distValCol}\${$distEndRow}", null, $distDataCount)
-        ];
-        $seriesTitleDist = [
-            new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\${$distValCol}\$9", null, 1)
-        ];
+            $ws1->mergeCells("J{$dRow}:K{$dRow}");
+            $ws1->setCellValue("J{$dRow}", (int)$di['total_lots']);
 
-        $seriesDist = new DataSeries(
-            DataSeries::TYPE_DOUGHNUTCHART,
-            null,
-            range(0, count($dataValuesDist) - 1),
-            $seriesTitleDist,
-            $xAxisLabelsDist,
-            $dataValuesDist
-        );
+            $ws1->mergeCells("L{$dRow}:M{$dRow}");
+            $ws1->setCellValue("L{$dRow}", $share / 100);
 
-        $layoutDist = new Layout();
-        $layoutDist->setShowVal(true);
-        $layoutDist->setShowPercent(true);
+            applyStyle($ws1, "A{$dRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+            applyStyle($ws1, "B{$dRow}:C{$dRow}", dataStyle($bg, '1D4ED8', true, Alignment::HORIZONTAL_LEFT));
+            applyStyle($ws1, "D{$dRow}:G{$dRow}", dataStyle($bg, '0F172A', false, Alignment::HORIZONTAL_LEFT));
+            applyStyle($ws1, "H{$dRow}:I{$dRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
+            applyStyle($ws1, "J{$dRow}:K{$dRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
+            applyStyle($ws1, "L{$dRow}:M{$dRow}", dataStyle($bg, '047857', true, Alignment::HORIZONTAL_RIGHT));
 
-        $plotAreaDist = new PlotArea($layoutDist, [$seriesDist]);
-        $legendDist   = new Legend(Legend::POSITION_RIGHT, null, false);
-        $chartTitleDistText = ($mode === 'overview') 
-            ? ("Proporsi Sebaran Part Terdampak") 
-            : ("Proporsi Sebaran Jenis Defect");
-        $chartTitleDist = new Title($chartTitleDistText);
-        $chartObjDist   = new Chart('chart_distribution_donut', $chartTitleDist, $legendDist, $plotAreaDist, true);
+            $ws1->getStyle("H{$dRow}")->getNumberFormat()->setFormatCode('#,##0');
+            $ws1->getStyle("J{$dRow}")->getNumberFormat()->setFormatCode('#,##0');
+            $ws1->getStyle("L{$dRow}")->getNumberFormat()->setFormatCode('0.0%');
+            $dRow++;
+        }
+    }
 
-        $chartObjDist->setTopLeftPosition("G{$chartStartRow}");
-        $chartObjDist->setBottomRightPosition("M{$chartEndRow}");
-        $ws1->addChart($chartObjDist);
-    } catch (Exception $ex) {}
+} else {
+    // ═══════════════════════════════════════════════════════════════════════
+    // MODE PART OVERVIEW (PART FOCUS: 100% Stacked Full Width Mirrored)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // KPI Card 2: Batas Target Part
+    $targetDesc = ($partThreshold !== null) ? (number_format($partThreshold) . ' ' . strtoupper($selectedUnit)) : 'Belum Diset';
+    $isPartOver = ($partThreshold !== null && $metricAcc > $partThreshold);
+    $targetStatus = ($partThreshold === null) ? 'Belum Diatur' : ($isPartOver ? '⚠️ Over Target' : '✓ Aman');
+
+    $ws1->mergeCells('E4:H4');
+    $ws1->setCellValue('E4', 'BATAS TARGET PART');
+    applyStyle($ws1, 'E4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => $isPartOver ? 'FFB91C1C' : 'FF047857']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isPartOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+
+    $ws1->mergeCells('E5:H5');
+    $ws1->setCellValue('E5', $targetDesc);
+    applyStyle($ws1, 'E5', ['font' => ['bold' => true, 'size' => 16, 'color' => ['argb' => $isPartOver ? 'FFB91C1C' : 'FF047857']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isPartOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
+
+    $ws1->mergeCells('E6:H6');
+    $ws1->setCellValue('E6', 'Status Kepatuhan: ' . $targetStatus);
+    applyStyle($ws1, 'E6', ['font' => ['bold' => true, 'italic' => true, 'size' => 8, 'color' => ['argb' => $isPartOver ? 'FF991B1B' : 'FF065F46']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $isPartOver ? 'FFFEF2F2' : 'FFECFDF5']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+    applyStyle($ws1, 'E4:H6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => $isPartOver ? 'FFFECACA' : 'FFA7F3D0']]]]);
+
+    // KPI Card 3: Puncak Kasus (Peak)
+    $ws1->mergeCells('I4:M4');
+    $ws1->setCellValue('I4', 'PUNCAK KASUS (PEAK PERIOD)');
+    applyStyle($ws1, 'I4', ['font' => ['bold' => true, 'size' => 9, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+
+    $ws1->mergeCells('I5:M5');
+    $ws1->setCellValue('I5', $peakLabel);
+    applyStyle($ws1, 'I5', ['font' => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FF4338CA']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER]]);
+
+    $ws1->mergeCells('I6:M6');
+    $ws1->setCellValue('I6', 'Interval kasus tertinggi pada part ini');
+    applyStyle($ws1, 'I6', ['font' => ['italic' => true, 'size' => 8, 'color' => ['argb' => 'FF3730A3']], 'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFEEF2FF']], 'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER]]);
+    applyStyle($ws1, 'I4:M6', ['borders' => ['outline' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FFE0E7FF']]]]);
+
+    // ── BAGIAN 1 (ATAS): TREN FLUKTUASI MULTI-HORIZON 100% WIDTH ─────────
+    $ws1->mergeCells('A8:M8');
+    $ws1->setCellValue('A8', '1. TREN FLUKTUASI CACAT PART (MULTI-HORIZON: TAHUNAN → BULANAN → MINGGUAN/HARIAN)');
+    applyStyle($ws1, 'A8', [
+        'font'      => ['bold' => true, 'size' => 11, 'color' => ['argb' => 'FFFFFFFF']],
+        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF1E293B']],
+        'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
+    ]);
+
+    $ws1->setCellValue('A9', 'NO');
+    $ws1->mergeCells('B9:G9');
+    $ws1->setCellValue('B9', 'PERIODE / WAKTU');
+    $ws1->mergeCells('H9:I9');
+    $ws1->setCellValue('H9', 'TEMUAN (PCS)');
+    $ws1->mergeCells('J9:K9');
+    $ws1->setCellValue('J9', 'TEMUAN (LOT)');
+    $ws1->mergeCells('L9:M9');
+    $ws1->setCellValue('L9', 'TARGET (' . strtoupper($selectedUnit) . ')');
+    applyStyle($ws1, 'A9:M9', hdrStyle('0F172A'));
+
+    $mhRow = 10;
+    $mhStartRow = $mhRow;
+    $mhIndex = 1;
+
+    foreach ($trendMap as $tk => $tv) {
+        $ws1->setCellValue("A{$mhRow}", $mhIndex++);
+        
+        $ws1->mergeCells("B{$mhRow}:G{$mhRow}");
+        $ws1->setCellValue("B{$mhRow}", $tv['label']);
+
+        $ws1->mergeCells("H{$mhRow}:I{$mhRow}");
+        $ws1->setCellValue("H{$mhRow}", (int)$tv['pcs']);
+
+        $ws1->mergeCells("J{$mhRow}:K{$mhRow}");
+        $ws1->setCellValue("J{$mhRow}", (int)$tv['lot']);
+
+        $ws1->mergeCells("L{$mhRow}:M{$mhRow}");
+        if ($partThreshold !== null) {
+            $ws1->setCellValue("L{$mhRow}", (float)$partThreshold);
+        } else {
+            $ws1->setCellValue("L{$mhRow}", '-');
+        }
+
+        // Highlight warna zona horizon
+        $bg = 'FFFFFF';
+        if (strpos($tv['category'], 'Tahunan') !== false) {
+            $bg = 'F8FAFC';
+        } elseif (strpos($tv['category'], 'Bulanan') !== false) {
+            $bg = 'EFF6FF';
+        } else {
+            $bg = 'ECFDF5';
+        }
+
+        applyStyle($ws1, "A{$mhRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+        applyStyle($ws1, "B{$mhRow}:G{$mhRow}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
+        applyStyle($ws1, "H{$mhRow}:I{$mhRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "J{$mhRow}:K{$mhRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
+        applyStyle($ws1, "L{$mhRow}:M{$mhRow}", dataStyle($bg, 'E11D48', true, Alignment::HORIZONTAL_RIGHT));
+
+        $ws1->getStyle("H{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        $ws1->getStyle("J{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        if ($partThreshold !== null) {
+            $ws1->getStyle("L{$mhRow}")->getNumberFormat()->setFormatCode('#,##0');
+        }
+        $mhRow++;
+    }
+    $mhEndRow = $mhRow - 1;
+    $mhDataCount = count($trendMap);
+
+    // Chart Multi-Horizon Combo (Bar Aktual + Line Target Batas)
+    $chartMhStartRow = $mhEndRow + 2;
+    $chartMhEndRow   = $chartMhStartRow + 17;
+
+    if ($mhDataCount > 0 && $mhEndRow >= $mhStartRow) {
+        try {
+            $xAxisLabels = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$B\${$mhStartRow}:\$B\${$mhEndRow}", null, $mhDataCount)];
+            $actualCol = ($selectedUnit === 'lot') ? 'J' : 'H';
+            $barValues   = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\${$actualCol}\${$mhStartRow}:\${$actualCol}\${$mhEndRow}", null, $mhDataCount)];
+            $barTitle    = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\${$actualCol}\$9", null, 1)];
+
+            $seriesBar = new DataSeries(
+                DataSeries::TYPE_BARCHART,
+                DataSeries::GROUPING_CLUSTERED,
+                [0],
+                $barTitle,
+                $xAxisLabels,
+                $barValues
+            );
+            $seriesBar->setPlotDirection(DataSeries::DIRECTION_COL);
+
+            $plotSeriesList = [$seriesBar];
+
+            if ($partThreshold !== null) {
+                $lineValues = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_NUMBER, "'{$sheet1Title}'!\$L\${$mhStartRow}:\$L\${$mhEndRow}", null, $mhDataCount)];
+                $lineTitle  = [new DataSeriesValues(DataSeriesValues::DATASERIES_TYPE_STRING, "'{$sheet1Title}'!\$L\$9", null, 1)];
+                $seriesLine = new DataSeries(
+                    DataSeries::TYPE_LINECHART,
+                    DataSeries::GROUPING_STANDARD,
+                    [0],
+                    $lineTitle,
+                    null,
+                    $lineValues
+                );
+                $plotSeriesList[] = $seriesLine;
+            }
+
+            $layoutMh = new Layout();
+            $layoutMh->setShowVal(true);
+            $plotAreaMh = new PlotArea($layoutMh, $plotSeriesList);
+            $legendMh   = new Legend(Legend::POSITION_BOTTOM, null, false);
+            $chartTitleMh = new Title("Grafik Multi-Horizon: " . $partCode . " (" . $partName . ")" . ($partThreshold !== null ? " [Target: {$partThreshold}]" : ""));
+            $chartObjMh   = new Chart('chart_part_multi_horizon', $chartTitleMh, $legendMh, $plotAreaMh, true);
+            $chartObjMh->setTopLeftPosition("A{$chartMhStartRow}");
+            $chartObjMh->setBottomRightPosition("M{$chartMhEndRow}");
+            $ws1->addChart($chartObjMh);
+        } catch (Exception $ex) {}
+    }
+
+    // ── BAGIAN 2 (BAWAH): SEBARAN JENIS DEFECT + BATAS TARGET 100% WIDTH ─
+    $distHeaderRow = $chartMhEndRow + 3;
+    $ws1->mergeCells("A{$distHeaderRow}:M{$distHeaderRow}");
+    $ws1->setCellValue("A{$distHeaderRow}", '2. SEBARAN JENIS DEFECT PADA PART TERPILIH (LENGKAP DENGAN BATAS TARGET)');
+    applyStyle($ws1, "A{$distHeaderRow}", [
+        'font'      => ['bold' => true, 'size' => 11, 'color' => ['argb' => 'FFFFFFFF']],
+        'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FF059669']],
+        'alignment' => ['horizontal' => Alignment::HORIZONTAL_LEFT, 'vertical' => Alignment::VERTICAL_CENTER, 'indent' => 1]
+    ]);
+
+    $distSubHdrRow = $distHeaderRow + 1;
+    $ws1->setCellValue("A{$distSubHdrRow}", 'NO');
+    $ws1->mergeCells("B{$distSubHdrRow}:E{$distSubHdrRow}");
+    $ws1->setCellValue("B{$distSubHdrRow}", 'JENIS DEFECT');
+    $ws1->mergeCells("F{$distSubHdrRow}:G{$distSubHdrRow}");
+    $ws1->setCellValue("F{$distSubHdrRow}", 'TOTAL TEMUAN (' . strtoupper($selectedUnit) . ')');
+    $ws1->mergeCells("H{$distSubHdrRow}:I{$distSubHdrRow}");
+    $ws1->setCellValue("H{$distSubHdrRow}", 'KASUS (LOT)');
+    $ws1->setCellValue("J{$distSubHdrRow}", '% KONTRIBUSI');
+    $ws1->mergeCells("K{$distSubHdrRow}:L{$distSubHdrRow}");
+    $ws1->setCellValue("K{$distSubHdrRow}", 'BATAS TARGET');
+    $ws1->setCellValue("M{$distSubHdrRow}", 'STATUS EVALUASI');
+    applyStyle($ws1, "A{$distSubHdrRow}:M{$distSubHdrRow}", hdrStyle('064E3B'));
+
+    $dRow = $distSubHdrRow + 1;
+    $dIndex = 1;
+
+    if (empty($distributionList)) {
+        $ws1->mergeCells("A{$dRow}:M{$dRow}");
+        $ws1->setCellValue("A{$dRow}", 'Tidak ada temuan defect pada part ini.');
+        applyStyle($ws1, "A{$dRow}:M{$dRow}", dataStyle('F8FAFC', '94A3B8', false, Alignment::HORIZONTAL_CENTER));
+        $dRow++;
+    } else {
+        foreach ($distributionList as $di) {
+            $valAct = ($selectedUnit === 'lot') ? $di['total_lots'] : $di['total_pcs'];
+            $share = ($grandDistMetric > 0 && $valAct > 0) ? round(($valAct / $grandDistMetric) * 100, 1) : 0;
+
+            // Evaluasi target part
+            $targetText = '-';
+            $evalText   = '-';
+            $evalBg     = 'FFFFFF';
+            $evalFg     = '64748B';
+
+            if ($partThreshold !== null) {
+                $targetText = number_format($partThreshold) . ' ' . strtoupper($selectedUnit);
+                if ($valAct > $partThreshold) {
+                    $evalText = '⚠️ Over';
+                    $evalBg   = 'FEF2F2';
+                    $evalFg   = '991B1B';
+                } else {
+                    $evalText = '✓ Aman';
+                    $evalBg   = 'ECFDF5';
+                    $evalFg   = '065F46';
+                }
+            }
+
+            $bg = ($dIndex % 2 === 0) ? 'FFFFFF' : 'F8FAFC';
+            $ws1->setCellValue("A{$dRow}", $dIndex++);
+
+            $ws1->mergeCells("B{$dRow}:E{$dRow}");
+            $ws1->setCellValue("B{$dRow}", $di['item_name']);
+
+            $ws1->mergeCells("F{$dRow}:G{$dRow}");
+            $ws1->setCellValue("F{$dRow}", (int)$di['total_pcs']);
+
+            $ws1->mergeCells("H{$dRow}:I{$dRow}");
+            $ws1->setCellValue("H{$dRow}", (int)$di['total_lots']);
+
+            $ws1->setCellValue("J{$dRow}", $share / 100);
+
+            $ws1->mergeCells("K{$dRow}:L{$dRow}");
+            $ws1->setCellValue("K{$dRow}", $targetText);
+
+            $ws1->setCellValue("M{$dRow}", $evalText);
+
+            applyStyle($ws1, "A{$dRow}", dataStyle($bg, '64748B', false, Alignment::HORIZONTAL_CENTER));
+            applyStyle($ws1, "B{$dRow}:E{$dRow}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_LEFT));
+            applyStyle($ws1, "F{$dRow}:G{$dRow}", dataStyle($bg, 'DC2626', false, Alignment::HORIZONTAL_RIGHT));
+            applyStyle($ws1, "H{$dRow}:I{$dRow}", dataStyle($bg, '4338CA', false, Alignment::HORIZONTAL_RIGHT));
+            applyStyle($ws1, "J{$dRow}", dataStyle($bg, '047857', true, Alignment::HORIZONTAL_RIGHT));
+            applyStyle($ws1, "K{$dRow}:L{$dRow}", dataStyle($bg, '0F172A', true, Alignment::HORIZONTAL_CENTER));
+            applyStyle($ws1, "M{$dRow}", dataStyle($evalBg, $evalFg, true, Alignment::HORIZONTAL_CENTER));
+
+            $ws1->getStyle("F{$dRow}")->getNumberFormat()->setFormatCode('#,##0');
+            $ws1->getStyle("H{$dRow}")->getNumberFormat()->setFormatCode('#,##0');
+            $ws1->getStyle("J{$dRow}")->getNumberFormat()->setFormatCode('0.0%');
+            $dRow++;
+        }
+    }
 }
 
 

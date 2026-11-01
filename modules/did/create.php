@@ -81,8 +81,12 @@ if ($pdo) {
                             </div>
                         </div>
                         <div>
+                            <?php 
+                            $currentUser = current_user();
+                            $defaultPic = !empty($currentUser['name']) ? $currentUser['name'] : (!empty($currentUser['username']) ? $currentUser['username'] : 'QC Inspector');
+                            ?>
                             <label class="form-label">PIC / Petugas Inspector <span class="text-rose-500">*</span></label>
-                            <input type="text" name="pic" value="Budi QC" placeholder="Nama Petugas" class="form-input text-xs" required>
+                            <input type="text" name="pic" value="<?= htmlspecialchars($defaultPic, ENT_QUOTES, 'UTF-8') ?>" placeholder="Nama Petugas" class="form-input text-xs" required>
                         </div>
                     </div>
 

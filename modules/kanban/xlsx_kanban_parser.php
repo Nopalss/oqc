@@ -256,18 +256,61 @@ function xlsx_parse_kanban($filepath) {
                 $cleanSupply = '';
             }
 
+            // Validasi Ketat Kolom Wajib (Mandatory Columns)
+            // Jika salah satu kolom wajib kosong atau tidak valid, tolak seluruh file
+            $cleanItemCode = strtoupper(trim($itemCode));
+            if ($cleanItemCode === '') {
+                $zip->close();
+                return [
+                    'success' => false,
+                    'message' => "Validasi Gagal: Ditemukan data tidak lengkap pada Sheet '{$shName}', Baris {$rNum}. Kolom 'Item Code' tidak boleh kosong. Harap lengkapi dan verifikasi kembali seluruh data sebelum melakukan unggah ulang file."
+                ];
+            }
+
+            $cleanItemDesc = trim($itemDesc);
+            if ($cleanItemDesc === '') {
+                $zip->close();
+                return [
+                    'success' => false,
+                    'message' => "Validasi Gagal: Ditemukan data tidak lengkap pada Sheet '{$shName}', Baris {$rNum} (Kanban #{$kanbanNo}). Kolom 'Item Description' tidak boleh kosong. Harap lengkapi dan verifikasi kembali seluruh data sebelum melakukan unggah ulang file."
+                ];
+            }
+
+            if ($qty <= 0) {
+                $zip->close();
+                return [
+                    'success' => false,
+                    'message' => "Validasi Gagal: Ditemukan data kuantitas tidak valid pada Sheet '{$shName}', Baris {$rNum} (Kanban #{$kanbanNo}). Kolom 'Qty' wajib berupa angka dan lebih dari 0. Harap periksa kembali berkas Excel Anda."
+                ];
+            }
+
             $formattedReqDate = format_excel_date_kanban($reqDate);
-            $formattedEta     = format_excel_date_kanban($eta);
+            if (empty($formattedReqDate)) {
+                $zip->close();
+                return [
+                    'success' => false,
+                    'message' => "Validasi Gagal: Ditemukan data tanggal tidak valid atau kosong pada Sheet '{$shName}', Baris {$rNum} (Kanban #{$kanbanNo}). Kolom 'Req Date' wajib diisi dengan format tanggal yang valid. Harap periksa kembali berkas Excel Anda."
+                ];
+            }
+
+            $formattedEta = format_excel_date_kanban($eta);
+            if (empty($formattedEta)) {
+                $zip->close();
+                return [
+                    'success' => false,
+                    'message' => "Validasi Gagal: Ditemukan data tanggal tidak valid atau kosong pada Sheet '{$shName}', Baris {$rNum} (Kanban #{$kanbanNo}). Kolom 'ETA' wajib diisi dengan format tanggal yang valid. Harap periksa kembali berkas Excel Anda."
+                ];
+            }
 
             $allParsedRows[] = [
                 'sheet_name'       => $shName,
                 'row_num'          => $rNum,
                 'kanban_no'        => strtoupper($kanbanNo),
-                'item_code'        => strtoupper(trim($itemCode)),
-                'item_description' => trim($itemDesc),
-                'req_date'         => $formattedReqDate ?: date('Y-m-d H:i:s'),
-                'qty'              => ($qty > 0) ? $qty : 1,
-                'eta'              => $formattedEta ?: date('Y-m-d H:i:s'),
+                'item_code'        => $cleanItemCode,
+                'item_description' => $cleanItemDesc,
+                'req_date'         => $formattedReqDate,
+                'qty'              => $qty,
+                'eta'              => $formattedEta,
                 'str_loc'          => trim($strLoc),
                 'supply_area'      => $cleanSupply,
                 'check_type'       => $checkType,

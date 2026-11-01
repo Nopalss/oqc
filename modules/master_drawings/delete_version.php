@@ -18,6 +18,11 @@ csrf_verify();
 
 $part_id = (int)($_POST['part_id'] ?? 0);
 $rawFilename = trim($_POST['filename'] ?? '');
+$returnTo = trim($_POST['return_to'] ?? '');
+
+$redirectUrl = ($returnTo === 'upload') 
+    ? ('modules/master_drawings/upload.php?part_id=' . $part_id) 
+    : ('modules/master_drawings/detail.php?part_id=' . $part_id);
 
 if (!$part_id || empty($rawFilename)) {
     set_flash('error', 'Parameter penghapusan berkas tidak valid!');
@@ -28,13 +33,13 @@ if (!$part_id || empty($rawFilename)) {
 $safeFilename = basename($rawFilename);
 if ($safeFilename !== $rawFilename || $safeFilename === '.' || $safeFilename === '..') {
     set_flash('error', 'Nama berkas tidak aman atau tidak valid!');
-    redirect('modules/master_drawings/detail.php?part_id=' . $part_id);
+    redirect($redirectUrl);
 }
 
 $pdo = getDB();
 if (!$pdo) {
     set_flash('error', 'Database tidak terhubung!');
-    redirect('modules/master_drawings/detail.php?part_id=' . $part_id);
+    redirect($redirectUrl);
 }
 
 // 1. Fetch Part Info
@@ -97,4 +102,4 @@ if (@unlink($targetFile)) {
     set_flash('error', 'Gagal menghapus berkas dari server. Periksa hak akses file.');
 }
 
-redirect('modules/master_drawings/detail.php?part_id=' . $part_id);
+redirect($redirectUrl);

@@ -168,129 +168,219 @@ try {
     $sessionLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
 
     // Fetch previous rejection history per lot if available (Strict 3-Way match: part + lot + ref)
+    // OPTIMIZED: Batch lookup to eliminate N+1 query storm (replaces 3*N queries with 3 constant batch queries)
     $sessionPartId = (int)($session['part_id'] ?? 0);
 
-    foreach ($sessionLots as &$slRef) {
-        $slRef['previous_ng_defects'] = [];
-        $slRef['prev_passed_session']  = null;
-        $curRef = strtoupper(trim($slRef['ref_number'] ?? ''));
-        $curLot = strtoupper(trim($slRef['lot_number'] ?? ''));
+    // Kumpulkan pasangan unik ref_number dan lot_number
+    $lookupPairs = [];
+    $allRefs = [];
+    $allLots = [];
+
+    foreach ($sessionLots as &$slInit) {
+        $slInit['previous_ng_defects'] = [];
+        $slInit['prev_passed_session']  = null;
+        $curRef = strtoupper(trim($slInit['ref_number'] ?? ''));
+        $curLot = strtoupper(trim($slInit['lot_number'] ?? ''));
 
         if (!empty($curRef) || !empty($curLot)) {
-            // 1. Fetch info riwayat NG terdahulu untuk lot spesifik ini
-            $whereRej = [
-                "s.id != :curr_sid",
-                "(isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))"
-            ];
-            $paramsRej = [':curr_sid' => $sessionId];
-
-            if ($curRef !== '' && $curLot !== '') {
-                $whereRej[] = "UPPER(TRIM(isl.ref_number)) = :ref";
-                $whereRej[] = "UPPER(TRIM(isl.lot_number)) = :lot";
-                $paramsRej[':ref'] = $curRef;
-                $paramsRej[':lot'] = $curLot;
-            } elseif ($curRef !== '') {
-                $whereRej[] = "UPPER(TRIM(isl.ref_number)) = :ref";
-                $paramsRej[':ref'] = $curRef;
-            } else {
-                $whereRej[] = "UPPER(TRIM(isl.lot_number)) = :lot";
-                $paramsRej[':lot'] = $curLot;
-            }
-
-            if ($sessionPartId > 0) {
-                $whereRej[] = "(s.part_id = :part_id OR s.part_id IS NULL)";
-                $paramsRej[':part_id'] = $sessionPartId;
-            }
-
-            $sqlRej = "
-                SELECT s.id AS prev_session_id, s.started_at AS prev_started_at, s.closed_at AS prev_closed_at, u.name AS prev_inspector_name, ki.kanban_no,
-                       r.qty_ng, r.remark, COALESCE(dt.name, r.remark, 'Defect') AS defect_name, dt.code AS defect_code
-                FROM inspection_session_lots isl
-                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                LEFT JOIN users u ON u.id = s.inspector_id
-                LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
-                LEFT JOIN inspection_ng_records r ON r.session_lot_id = isl.id AND (r.is_cancelled IS NULL OR r.is_cancelled = 0)
-                LEFT JOIN defect_types dt ON dt.id = r.defect_type_id
-                WHERE " . implode(' AND ', $whereRej) . "
-                ORDER BY s.id ASC, r.id ASC
-            ";
-            $stmtRejHistory = $pdo->prepare($sqlRej);
-            $stmtRejHistory->execute($paramsRej);
-            $prevRows = $stmtRejHistory->fetchAll(PDO::FETCH_ASSOC);
-            if (!empty($prevRows)) {
-                $slRef['was_rejected_before'] = true;
-                $slRef['previous_ng_defects'] = $prevRows;
-
-                // Ambil info disposisi karantina jika ada
-                try {
-                    $sqlClosure = "
-                        SELECT lqc.*, u.name AS closed_by_name
-                        FROM lot_quarantine_closures lqc
-                        JOIN inspection_session_lots isl ON isl.id = lqc.session_lot_id
-                        JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                        LEFT JOIN users u ON u.id = lqc.closed_by
-                        WHERE " . implode(' AND ', $whereRej) . "
-                        ORDER BY lqc.id DESC LIMIT 1
-                    ";
-                    $stmtCl = $pdo->prepare($sqlClosure);
-                    $stmtCl->execute($paramsRej);
-                    $clRow = $stmtCl->fetch(PDO::FETCH_ASSOC);
-                    if ($clRow) {
-                        $slRef['disposition_info'] = [
-                            'has_disposition' => true,
-                            'notes'           => $clRow['notes'],
-                            'closed_by'       => $clRow['closed_by_name'] ?: 'Admin / Supervisor',
-                            'closed_at'       => !empty($clRow['closed_at']) ? date('d M Y, H:i', strtotime($clRow['closed_at'])) . ' WIB' : '-'
-                        ];
-                    }
-                } catch (Exception $eCl) {}
-            }
-
-            // 2. Fetch info sesi yang PASSED sebelumnya untuk lot spesifik ini
-            $wherePass = [
-                "s.id != :curr_sid",
-                "(isl.lot_result = 'passed' OR s.status = 'passed')",
-                "(isl.lot_result != 'rejected' OR isl.lot_result IS NULL)"
-            ];
-            $paramsPass = [':curr_sid' => $sessionId];
-
-            if ($curRef !== '' && $curLot !== '') {
-                $wherePass[] = "UPPER(TRIM(isl.ref_number)) = :ref";
-                $wherePass[] = "UPPER(TRIM(isl.lot_number)) = :lot";
-                $paramsPass[':ref'] = $curRef;
-                $paramsPass[':lot'] = $curLot;
-            } elseif ($curRef !== '') {
-                $wherePass[] = "UPPER(TRIM(isl.ref_number)) = :ref";
-                $paramsPass[':ref'] = $curRef;
-            } else {
-                $wherePass[] = "UPPER(TRIM(isl.lot_number)) = :lot";
-                $paramsPass[':lot'] = $curLot;
-            }
-
-            if ($sessionPartId > 0) {
-                $wherePass[] = "(s.part_id = :part_id OR s.part_id IS NULL)";
-                $paramsPass[':part_id'] = $sessionPartId;
-            }
-
-            $sqlPass = "
-                SELECT s.id AS passed_session_id, s.started_at AS passed_started_at,
-               s.closed_at AS passed_closed_at, u.name AS passed_inspector_name
-                FROM inspection_session_lots isl
-                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                LEFT JOIN users u ON u.id = s.inspector_id
-                WHERE " . implode(' AND ', $wherePass) . "
-                ORDER BY s.id DESC
-                LIMIT 1
-            ";
-            $stmtPassedHistory = $pdo->prepare($sqlPass);
-            $stmtPassedHistory->execute($paramsPass);
-            $passedRow = $stmtPassedHistory->fetch(PDO::FETCH_ASSOC);
-            if ($passedRow) {
-                $slRef['prev_passed_session'] = $passedRow;
-            }
+            $key = $curRef . '|' . $curLot;
+            $lookupPairs[$key] = ['ref' => $curRef, 'lot' => $curLot];
+            if ($curRef !== '') $allRefs[$curRef] = true;
+            if ($curLot !== '') $allLots[$curLot] = true;
         }
     }
-    unset($slRef);
+    unset($slInit);
+
+    if (!empty($lookupPairs)) {
+        // Susun klausa OR terikat parameter untuk pencocokan batch presisi
+        $batchOrClauses = [];
+        $batchParams = [':curr_sid' => $sessionId];
+        if ($sessionPartId > 0) {
+            $batchParams[':part_id'] = $sessionPartId;
+        }
+
+        $pairIdx = 0;
+        foreach ($lookupPairs as $pair) {
+            $pairIdx++;
+            $pRef = $pair['ref'];
+            $pLot = $pair['lot'];
+
+            if ($pRef !== '' && $pLot !== '') {
+                $batchOrClauses[] = "(UPPER(TRIM(isl.ref_number)) = :b_ref_{$pairIdx} AND UPPER(TRIM(isl.lot_number)) = :b_lot_{$pairIdx})";
+                $batchParams[":b_ref_{$pairIdx}"] = $pRef;
+                $batchParams[":b_lot_{$pairIdx}"] = $pLot;
+            } elseif ($pRef !== '') {
+                $batchOrClauses[] = "(UPPER(TRIM(isl.ref_number)) = :b_ref_{$pairIdx})";
+                $batchParams[":b_ref_{$pairIdx}"] = $pRef;
+            } else {
+                $batchOrClauses[] = "(UPPER(TRIM(isl.lot_number)) = :b_lot_{$pairIdx})";
+                $batchParams[":b_lot_{$pairIdx}"] = $pLot;
+            }
+        }
+
+        $batchOrSql = '(' . implode(' OR ', $batchOrClauses) . ')';
+        $partCond = ($sessionPartId > 0) ? " AND (s.part_id = :part_id OR s.part_id IS NULL)" : "";
+
+        // 1. Single Batch Query: Riwayat Rejection
+        $sqlBatchRej = "
+            SELECT isl.ref_number AS match_ref, isl.lot_number AS match_lot,
+                   s.id AS prev_session_id, s.started_at AS prev_started_at, s.closed_at AS prev_closed_at, 
+                   u.name AS prev_inspector_name, ki.kanban_no,
+                   r.qty_ng, r.remark, COALESCE(dt.name, r.remark, 'Defect') AS defect_name, dt.code AS defect_code
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN users u ON u.id = s.inspector_id
+            LEFT JOIN kanban_items ki ON ki.id = s.kanban_item_id
+            LEFT JOIN inspection_ng_records r ON r.session_lot_id = isl.id AND (r.is_cancelled IS NULL OR r.is_cancelled = 0)
+            LEFT JOIN defect_types dt ON dt.id = r.defect_type_id
+            WHERE s.id != :curr_sid
+              AND (isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') 
+                   OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))
+              {$partCond}
+              AND {$batchOrSql}
+            ORDER BY s.id ASC, r.id ASC
+        ";
+        $stmtBatchRej = $pdo->prepare($sqlBatchRej);
+        $stmtBatchRej->execute($batchParams);
+        $rawRejRows = $stmtBatchRej->fetchAll(PDO::FETCH_ASSOC);
+
+        // Group Rej Rows ke memory map
+        $rejByPair = [];
+        foreach ($rawRejRows as $rr) {
+            $mRef = strtoupper(trim($rr['match_ref'] ?? ''));
+            $mLot = strtoupper(trim($rr['match_lot'] ?? ''));
+            $k1 = $mRef . '|' . $mLot;
+            $k2 = $mRef . '|';
+            $k3 = '|' . $mLot;
+
+            $rejItem = [
+                'prev_session_id'     => $rr['prev_session_id'],
+                'prev_started_at'    => $rr['prev_started_at'],
+                'prev_closed_at'     => $rr['prev_closed_at'],
+                'prev_inspector_name' => $rr['prev_inspector_name'],
+                'kanban_no'          => $rr['kanban_no'],
+                'qty_ng'             => $rr['qty_ng'],
+                'remark'             => $rr['remark'],
+                'defect_name'        => $rr['defect_name'],
+                'defect_code'        => $rr['defect_code'],
+            ];
+
+            $rejByPair[$k1][] = $rejItem;
+            if ($mRef !== '') $rejByPair[$k2][] = $rejItem;
+            if ($mLot !== '') $rejByPair[$k3][] = $rejItem;
+        }
+
+        // 2. Single Batch Query: Disposisi Karantina
+        $dispByPair = [];
+        try {
+            $sqlBatchClosure = "
+                SELECT isl.ref_number AS match_ref, isl.lot_number AS match_lot,
+                       lqc.*, u.name AS closed_by_name
+                FROM lot_quarantine_closures lqc
+                JOIN inspection_session_lots isl ON isl.id = lqc.session_lot_id
+                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+                LEFT JOIN users u ON u.id = lqc.closed_by
+                WHERE s.id != :curr_sid
+                  AND (isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') 
+                       OR EXISTS (SELECT 1 FROM inspection_ng_records ngr WHERE ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)))
+                  {$partCond}
+                  AND {$batchOrSql}
+                ORDER BY lqc.id DESC
+            ";
+            $stmtBatchCl = $pdo->prepare($sqlBatchClosure);
+            $stmtBatchCl->execute($batchParams);
+            $rawClRows = $stmtBatchCl->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($rawClRows as $cl) {
+                $mRef = strtoupper(trim($cl['match_ref'] ?? ''));
+                $mLot = strtoupper(trim($cl['match_lot'] ?? ''));
+                $k1 = $mRef . '|' . $mLot;
+                $k2 = $mRef . '|';
+                $k3 = '|' . $mLot;
+
+                $dispInfo = [
+                    'has_disposition' => true,
+                    'notes'           => $cl['notes'],
+                    'closed_by'       => $cl['closed_by_name'] ?: 'Admin / Supervisor',
+                    'closed_at'       => !empty($cl['closed_at']) ? date('d M Y, H:i', strtotime($cl['closed_at'])) . ' WIB' : '-'
+                ];
+
+                if (!isset($dispByPair[$k1])) $dispByPair[$k1] = $dispInfo;
+                if ($mRef !== '' && !isset($dispByPair[$k2])) $dispByPair[$k2] = $dispInfo;
+                if ($mLot !== '' && !isset($dispByPair[$k3])) $dispByPair[$k3] = $dispInfo;
+            }
+        } catch (Exception $eCl) {}
+
+        // 3. Single Batch Query: Sesi PASSED Sebelumnya
+        $sqlBatchPass = "
+            SELECT isl.ref_number AS match_ref, isl.lot_number AS match_lot,
+                   s.id AS passed_session_id, s.started_at AS passed_started_at,
+                   s.closed_at AS passed_closed_at, u.name AS passed_inspector_name
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions s ON s.id = isl.inspection_session_id
+            LEFT JOIN users u ON u.id = s.inspector_id
+            WHERE s.id != :curr_sid
+              AND (isl.lot_result = 'passed' OR s.status = 'passed')
+              AND (isl.lot_result != 'rejected' OR isl.lot_result IS NULL)
+              {$partCond}
+              AND {$batchOrSql}
+            ORDER BY s.id DESC
+        ";
+        $stmtBatchPass = $pdo->prepare($sqlBatchPass);
+        $stmtBatchPass->execute($batchParams);
+        $rawPassRows = $stmtBatchPass->fetchAll(PDO::FETCH_ASSOC);
+
+        $passByPair = [];
+        foreach ($rawPassRows as $pr) {
+            $mRef = strtoupper(trim($pr['match_ref'] ?? ''));
+            $mLot = strtoupper(trim($pr['match_lot'] ?? ''));
+            $k1 = $mRef . '|' . $mLot;
+            $k2 = $mRef . '|';
+            $k3 = '|' . $mLot;
+
+            $passInfo = [
+                'passed_session_id'     => $pr['passed_session_id'],
+                'passed_started_at'    => $pr['passed_started_at'],
+                'passed_closed_at'     => $pr['passed_closed_at'],
+                'passed_inspector_name' => $pr['passed_inspector_name']
+            ];
+
+            if (!isset($passByPair[$k1])) $passByPair[$k1] = $passInfo;
+            if ($mRef !== '' && !isset($passByPair[$k2])) $passByPair[$k2] = $passInfo;
+            if ($mLot !== '' && !isset($passByPair[$k3])) $passByPair[$k3] = $passInfo;
+        }
+
+        // Tautkan kembali hasil batch memory map ke masing-masing lot
+        foreach ($sessionLots as &$slRef) {
+            $curRef = strtoupper(trim($slRef['ref_number'] ?? ''));
+            $curLot = strtoupper(trim($slRef['lot_number'] ?? ''));
+
+            $targetKey = '';
+            if ($curRef !== '' && $curLot !== '') {
+                $targetKey = $curRef . '|' . $curLot;
+            } elseif ($curRef !== '') {
+                $targetKey = $curRef . '|';
+            } elseif ($curLot !== '') {
+                $targetKey = '|' . $curLot;
+            }
+
+            if ($targetKey !== '') {
+                if (!empty($rejByPair[$targetKey])) {
+                    $slRef['was_rejected_before'] = true;
+                    $slRef['previous_ng_defects'] = $rejByPair[$targetKey];
+
+                    if (!empty($dispByPair[$targetKey])) {
+                        $slRef['disposition_info'] = $dispByPair[$targetKey];
+                    }
+                }
+
+                if (!empty($passByPair[$targetKey])) {
+                    $slRef['prev_passed_session'] = $passByPair[$targetKey];
+                }
+            }
+        }
+        unset($slRef);
+    }
 
     // ── AUTO-CLOSE SAFETY NET ────────────────────────────────────────────────
     // Jika sesi masih in_progress tapi SEMUA lotnya sudah 'skipped' atau 'passed'
@@ -313,20 +403,25 @@ try {
         if (!$hasInProgressLot) {
             $autoCloseStatus = $hasRejectedLot ? 'rejected' : 'passed';
             try {
-                $pdo->prepare("
+                $stmtUpdateClose = $pdo->prepare("
                     UPDATE inspection_sessions
                     SET status = :st, samples_checked = sample_size,
                         closed_at = COALESCE(closed_at, NOW())
                     WHERE id = :sid AND status = 'in_progress'
-                ")->execute([':st' => $autoCloseStatus, ':sid' => $sessionId]);
-                $session['status'] = $autoCloseStatus;
+                ");
+                $stmtUpdateClose->execute([':st' => $autoCloseStatus, ':sid' => $sessionId]);
+                
+                // Hanya trigger sync jika status benar-benar berhasil di-update dari in_progress
+                if ($stmtUpdateClose->rowCount() > 0) {
+                    $session['status'] = $autoCloseStatus;
 
-                // Sync Kanban jika ada
-                if (!empty($session['kanban_item_id']) && function_exists('syncKanbanStatus')) {
-                    syncKanbanStatus($pdo, (int)$session['kanban_item_id']);
-                }
-                if (function_exists('syncDailySummaryForSession')) {
-                    syncDailySummaryForSession($pdo, $sessionId);
+                    // Sync Kanban jika ada
+                    if (!empty($session['kanban_item_id']) && function_exists('syncKanbanStatus')) {
+                        syncKanbanStatus($pdo, (int)$session['kanban_item_id']);
+                    }
+                    if (function_exists('syncDailySummaryForSession')) {
+                        syncDailySummaryForSession($pdo, $sessionId);
+                    }
                 }
             } catch (Exception $eAutoClose) { /* Kolom mungkin tidak ada di DB lama */ }
         }
@@ -455,10 +550,24 @@ try {
     $stmtSubst->execute([':sid' => $sessionId, ':sid2' => $sessionId]);
     $substLog = $stmtSubst->fetchAll(PDO::FETCH_ASSOC);
 
-    // Resolve drawing URLs from filesystem convention uploads/drawings/[Model]/[PartCode]_[PartName]/
+    // Resolve drawing URLs from unified folder uploads/parts/{PartCode}/ and validate physical existence
     $fsDrawings = get_part_drawing_assets($session['part_code'] ?? '', $session['part_model'] ?? '');
-    $drawing2d = $fsDrawings['drawing_2d_url'] ?? ($session['drawing_2d_path'] ? base_url($session['drawing_2d_path']) : null);
-    $drawing3d = $fsDrawings['drawing_3d_url'] ?? ($session['drawing_3d_path'] ? base_url($session['drawing_3d_path']) : null);
+    $drawing2d = $fsDrawings['drawing_2d_url'] ?? null;
+    $drawing3d = $fsDrawings['drawing_3d_url'] ?? null;
+
+    $rootAppDir = realpath(__DIR__ . '/../../..');
+    if (!$drawing2d && !empty($session['drawing_2d_path'])) {
+        $check2d = $rootAppDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $session['drawing_2d_path']);
+        if (file_exists($check2d)) {
+            $drawing2d = base_url($session['drawing_2d_path']);
+        }
+    }
+    if (!$drawing3d && !empty($session['drawing_3d_path'])) {
+        $check3d = $rootAppDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $session['drawing_3d_path']);
+        if (file_exists($check3d)) {
+            $drawing3d = base_url($session['drawing_3d_path']);
+        }
+    }
 
 
     // Accumulated Kanban Qty across multiple sessions for the same kanban_item_id

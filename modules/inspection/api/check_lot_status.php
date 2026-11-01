@@ -43,7 +43,7 @@ try {
     $ssDetails = '';
 
     if (!empty($refNumber) && !empty($partCode)) {
-        // Cek apakah ref_number ini pernah masuk ke Safety Stock
+        // Cek apakah kombinasi part + lot + ref_number ini pernah masuk ke Safety Stock (3-way match)
         $stmtSS = $pdo->prepare("
             SELECT isl.id AS lot_id, s.id AS session_id, isl.lot_number, isl.ref_number,
                    COALESCE(isl.qty, s.total_scanned_qty, 0) AS available_qty,
@@ -56,12 +56,14 @@ try {
             LEFT JOIN master_parts mp ON mp.id = s.part_id
             WHERE s.inspection_type = 'safety_stock'
               AND UPPER(isl.ref_number) = UPPER(:ref)
+              AND UPPER(isl.lot_number) = UPPER(:lot)
               AND (UPPER(did.part_code) = UPPER(:p1) OR UPPER(ki.item_code) = UPPER(:p2) OR UPPER(mp.part_code) = UPPER(:p3))
             ORDER BY isl.id DESC
             LIMIT 1
         ");
         $stmtSS->execute([
             ':ref' => $refNumber,
+            ':lot' => $lotNumber,
             ':p1'  => $partCode,
             ':p2'  => $partCode,
             ':p3'  => $partCode
@@ -76,7 +78,7 @@ try {
             if ($avail <= 0 || $isFulfilled || $ssRow['session_status'] !== 'passed') {
                 $isExhausted = true;
                 $ssAvailableQty = 0;
-                $ssDetails = "Label Safety Stock Ref #{$refNumber} ini SUDAH HABIS TERPAKAI (sisa 0 pcs) di gudang!";
+                $ssDetails = "Label Safety Stock Part {$partCode} Lot #{$lotNumber} Ref #{$refNumber} ini SUDAH HABIS TERPAKAI (sisa 0 pcs) di gudang!";
             } else {
                 $ssAvailableQty = $avail;
                 $ssSessionId = (int)$ssRow['session_id'];
@@ -86,35 +88,36 @@ try {
         }
     }
 
-    // 2. CEK PROTEKSI DOUBLE-USE: Apakah label fisik (Ref Number) ini sudah PASSED di Kanban LAIN?
-    // Catatan: Hanya dicek jika Ref Number sudah diisi/discan. Lot harian boleh sama antar-box/Kanban.
+    // 2. CEK PROTEKSI DOUBLE-USE: Apakah label fisik (Part Code + Lot Number + Ref Number) ini sudah PASSED di Kanban LAIN?
+    // Catatan: Hanya dicek jika Ref Number sudah diisi/discan.
     // Jika ini label Safety Stock aktif, JANGAN tolak sebagai double-use Kanban lain!
     $alreadyUsedOther = false;
     $usedDetails = '';
 
     if (!$isSafetyStock && !empty($partCode) && !empty($refNumber)) {
-        // Cek apakah Ref Number fisik untuk Part Code ini sudah pernah PASSED di Kanban lain
+        // Cek status rekaman fisik TERAKHIR Part Code + Lot Number + Ref Number
+        // Jika status record terakhir adalah rejected/ng, maka BUKAN double-use, melainkan alur eks-NG/reinspeksi
         $checkUsedSql = "
-            SELECT isl.id, isl.lot_number, isl.ref_number, isl.qty,
-                   s.id as session_id, s.kanban_item_id, s.closed_at,
+            SELECT isl.id, isl.lot_number, isl.ref_number, isl.qty, isl.lot_result, isl.lot_status,
+                   s.id as session_id, s.kanban_item_id, s.closed_at, s.status as session_status,
                    k.kanban_no, COALESCE(mp.part_code, k.item_code) as part_code
             FROM inspection_session_lots isl
             JOIN inspection_sessions s ON s.id = isl.inspection_session_id
             JOIN kanban_items k ON k.id = s.kanban_item_id
             LEFT JOIN master_parts mp ON mp.id = s.part_id
             WHERE (UPPER(COALESCE(mp.part_code, k.item_code)) = UPPER(:pcode) OR UPPER(k.item_code) = UPPER(:pcode2))
-              AND isl.lot_result = 'passed'
-              AND (isl.lot_status IS NULL OR isl.lot_status != 'replaced')
-              AND s.status = 'passed'
+              AND UPPER(isl.lot_number) = UPPER(:lot_num)
+              AND UPPER(isl.ref_number) = UPPER(:ref_num)
+              AND s.status != 'in_progress'
               AND s.inspection_type = 'kanban'
               AND s.kanban_item_id != :curr_kid
-              AND UPPER(isl.ref_number) = UPPER(:ref_num)
             ORDER BY isl.id DESC LIMIT 1
         ";
 
         $paramsUsed = [
             ':pcode'    => $partCode,
             ':pcode2'   => $partCode,
+            ':lot_num'  => $lotNumber,
             ':curr_kid' => $currentKanban,
             ':ref_num'  => $refNumber
         ];
@@ -123,7 +126,19 @@ try {
         $stmtUsed->execute($paramsUsed);
         $usedRow = $stmtUsed->fetch(PDO::FETCH_ASSOC);
 
+        $isRowPassed = false;
         if ($usedRow) {
+            $isRowRejected = (
+                $usedRow['lot_result'] === 'rejected' ||
+                $usedRow['session_status'] === 'rejected' ||
+                in_array($usedRow['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'rejected'])
+            );
+            if (!$isRowRejected && (in_array($usedRow['lot_result'], ['passed', 'skipped']) || $usedRow['session_status'] === 'passed')) {
+                $isRowPassed = true;
+            }
+        }
+
+        if ($isRowPassed) {
             $alreadyUsedOther = true;
             $kNo = $usedRow['kanban_no'] ?: ('#' . $usedRow['kanban_item_id']);
             $usedRef = $usedRow['ref_number'] ?: '-';

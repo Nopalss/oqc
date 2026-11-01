@@ -141,7 +141,7 @@ if ($pdo) {
                             THEN 1 ELSE 0 END), 0) AS rejected_count
                     FROM (
                         SELECT isl.id, isl.inspection_session_id, isl.qty,
-                               COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('LOT-', isl.id)) AS ref_key
+                               CONCAT(COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('NOREF-', isl.id)), '_', COALESCE(TRIM(isl.lot_number), 'NOLOT')) AS ref_key
                         FROM inspection_session_lots isl
                         JOIN inspection_sessions ss2 ON ss2.id = isl.inspection_session_id
                         LEFT JOIN daily_inspection_data did2 ON did2.id = ss2.did_id
@@ -158,7 +158,7 @@ if ($pdo) {
                               WHERE ss3.inspection_type = 'safety_stock'
                                 AND (did3.part_code = :p3 OR ki3.item_code = :p4)
                                 AND (isl3.lot_status IS NULL OR isl3.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                              GROUP BY COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('LOT-', isl3.id))
+                              GROUP BY CONCAT(COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('NOREF-', isl3.id)), '_', COALESCE(TRIM(isl3.lot_number), 'NOLOT'))
                           )
                     ) latest_isl
                     JOIN inspection_sessions ss ON ss.id = latest_isl.inspection_session_id
@@ -182,7 +182,7 @@ if ($pdo) {
                     SELECT COUNT(DISTINCT latest_isl.ref_key)
                     FROM (
                         SELECT isl.id, isl.inspection_session_id,
-                               COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('LOT-', isl.id)) AS ref_key
+                               CONCAT(COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('NOREF-', isl.id)), '_', COALESCE(TRIM(isl.lot_number), 'NOLOT')) AS ref_key
                         FROM inspection_session_lots isl
                         JOIN inspection_sessions ss2 ON ss2.id = isl.inspection_session_id
                         LEFT JOIN daily_inspection_data did2 ON did2.id = ss2.did_id
@@ -200,7 +200,7 @@ if ($pdo) {
                               WHERE ss3.inspection_type = 'safety_stock'
                                 AND (did3.part_code = :p3 OR ki3.item_code = :p4)
                                 AND (isl3.lot_status IS NULL OR isl3.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                              GROUP BY COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('LOT-', isl3.id))
+                              GROUP BY CONCAT(COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('NOREF-', isl3.id)), '_', COALESCE(TRIM(isl3.lot_number), 'NOLOT'))
                           )
                     ) latest_isl
                     JOIN inspection_sessions ss ON ss.id = latest_isl.inspection_session_id
@@ -228,7 +228,7 @@ if ($pdo) {
                         WHERE ss2.inspection_type = 'safety_stock'
                           AND (did2.part_code = :sub_p1 OR ki2.item_code = :sub_p2)
                           AND (isl2.lot_status IS NULL OR isl2.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                        GROUP BY COALESCE(NULLIF(TRIM(isl2.ref_number), ''), CONCAT('LOT-', isl2.id))
+                        GROUP BY CONCAT(COALESCE(NULLIF(TRIM(isl2.ref_number), ''), CONCAT('NOREF-', isl2.id)), '_', COALESCE(TRIM(isl2.lot_number), 'NOLOT'))
                     )"
                 ];
                 $lotParams = [
@@ -419,41 +419,8 @@ if ($pdo) {
 
                 $khWhereStr = implode(" AND ", $khWhere);
 
-                // Count Total Filtered History
-                $stCountKh = $pdo->prepare("
-                    SELECT COUNT(s_ss.id)
-                    FROM inspection_sessions s_ss
-                    JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
-                    LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
-                    LEFT JOIN kanban_items ki_ss ON ki_ss.id = s_ss.kanban_item_id
-                    LEFT JOIN kanban_items ki ON ki.id = s_kanban.kanban_item_id
-                    LEFT JOIN inspection_session_lots isl_ss ON (
-                        isl_ss.inspection_session_id = s_ss.id
-                        AND isl_ss.id = (SELECT MIN(x.id) FROM inspection_session_lots x WHERE x.inspection_session_id = s_ss.id)
-                    )
-                    LEFT JOIN inspection_session_lots isl_k ON (
-                        isl_k.inspection_session_id = s_kanban.id
-                        AND isl_k.id = (
-                            SELECT MIN(x2.id) FROM inspection_session_lots x2
-                            WHERE x2.inspection_session_id = s_kanban.id
-                              AND (
-                                  x2.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
-                                  OR (isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND x2.ref_number = isl_ss.ref_number)
-                              )
-                        )
-                    )
-                    WHERE {$khWhereStr}
-                ");
-                $stCountKh->execute($khParams);
-                $totalFilteredHistory = (int)$stCountKh->fetchColumn();
-
-                $totalHistoryPages = max(1, (int)ceil($totalFilteredHistory / $historyLimit));
-                if ($historyPage > $totalHistoryPages) {
-                    $historyPage = $totalHistoryPages;
-                }
-                $historyOffset = ($historyPage - 1) * $historyLimit;
-
-                $stmtKanban = $pdo->prepare("
+                // 5. Query Semua Alokasi Lot Pemotong Kanban (Per Lot Fisik)
+                $stmtRawLots = $pdo->prepare("
                     SELECT 
                         s_kanban.id AS kanban_session_id,
                         s_kanban.started_at AS used_at,
@@ -462,74 +429,80 @@ if ($pdo) {
                         s_kanban.samples_checked,
                         s_kanban.sample_size,
                         s_kanban.ng_count,
-                        s_ss.id AS ss_session_id,
-                        -- Qty terpakai = qty fisik label lot kanban - kelebihan (excess) kanban,
-                        -- dibatasi maksimal saldo sesi SS tersebut.
-                        LEAST(
-                            s_ss.total_scanned_qty,
-                            GREATEST(0, COALESCE(isl_k.qty, s_kanban.total_scanned_qty) - COALESCE(s_kanban.excess_qty, 0))
-                        ) AS used_qty,
-                        COALESCE(
-                            (
-                                SELECT isl_k2.qty 
-                                FROM inspection_session_lots isl_k2
-                                WHERE isl_k2.inspection_session_id = s_kanban.id
-                                  AND isl_k2.ref_number = isl_ss.ref_number
-                                  AND isl_k2.ref_number IS NOT NULL
-                                  AND isl_k2.ref_number != ''
-                                  AND (isl_k2.lot_status IS NULL OR isl_k2.lot_status != 'replaced')
-                                ORDER BY isl_k2.id ASC
-                                LIMIT 1
-                            ),
-                            -- Priority 2: Fallback via remarks (path use_safety_stock_qty)
-                            (
-                                SELECT isl_k3.qty
-                                FROM inspection_session_lots isl_k3
-                                WHERE isl_k3.inspection_session_id = s_kanban.id
-                                  AND isl_k3.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
-                                  AND (isl_k3.lot_status IS NULL OR isl_k3.lot_status != 'replaced')
-                                ORDER BY isl_k3.id ASC
-                                LIMIT 1
-                            ),
-                            -- Priority 3: Fallback ke kalkulasi lama (untuk data historis)
-                            CASE 
-                                WHEN s_kanban.excess_qty > 0 AND s_ss.total_scanned_qty >= (s_kanban.total_scanned_qty - s_kanban.excess_qty)
-                                THEN GREATEST(0, s_kanban.total_scanned_qty - s_kanban.excess_qty)
-                                ELSE s_ss.total_scanned_qty
-                            END
-                        ) AS label_qty_legacy,
-                        COALESCE(isl_k.ref_number, isl_ss.ref_number, '-') AS ref_number,
-                        COALESCE(isl_k.lot_number, isl_ss.lot_number, '-') AS lot_number,
                         ki.kanban_no,
                         ki.customer,
-                        COALESCE(u.name, 'Inspector QC') AS inspector_name
-                    FROM inspection_sessions s_ss
-                    JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
+                        ki.qty AS target_kanban_qty,
+                        COALESCE(u.name, 'Inspector QC') AS inspector_name,
+                        isl_k.id AS k_lot_id,
+                        isl_k.ref_number,
+                        isl_k.lot_number,
+                        isl_k.qty AS lot_qty,
+                        isl_k.remarks AS lot_remarks
+                    FROM inspection_sessions s_kanban
+                    JOIN inspection_sessions s_ss ON s_ss.auto_fulfilled_by_session_id = s_kanban.id
                     LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
                     LEFT JOIN kanban_items ki_ss ON ki_ss.id = s_ss.kanban_item_id
                     LEFT JOIN kanban_items ki ON ki.id = s_kanban.kanban_item_id
                     LEFT JOIN users u ON u.id = s_kanban.inspector_id
-                    LEFT JOIN inspection_session_lots isl_ss ON (
-                        isl_ss.inspection_session_id = s_ss.id
-                        AND isl_ss.id = (SELECT MIN(x.id) FROM inspection_session_lots x WHERE x.inspection_session_id = s_ss.id)
-                    )
-                    LEFT JOIN inspection_session_lots isl_k ON (
-                        isl_k.inspection_session_id = s_kanban.id
-                        AND isl_k.id = (
-                            SELECT MIN(x2.id) FROM inspection_session_lots x2
-                            WHERE x2.inspection_session_id = s_kanban.id
-                              AND (
-                                  x2.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
-                                  OR (isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND x2.ref_number = isl_ss.ref_number)
-                              )
+                    JOIN inspection_session_lots isl_k ON isl_k.inspection_session_id = s_kanban.id
+                        AND (
+                            isl_k.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
+                            OR isl_k.remarks LIKE '%Alokasi Safety Stock Fisik%'
                         )
-                    )
                     WHERE {$khWhereStr}
-                    ORDER BY s_kanban.id DESC, s_ss.id ASC
-                    LIMIT " . (int)$historyLimit . " OFFSET " . (int)$historyOffset
-                );
-                $stmtKanban->execute($khParams);
-                $kanbanUsage = $stmtKanban->fetchAll(PDO::FETCH_ASSOC);
+                    ORDER BY s_kanban.id DESC, isl_k.id ASC
+                ");
+                $stmtRawLots->execute($khParams);
+                $rawAllocatedLots = $stmtRawLots->fetchAll(PDO::FETCH_ASSOC);
+
+                // Hitung kuota FIFO pemenuhan Kanban per lot:
+                // Hanya lot yang benar-benar memotong kuota Kanban (used_qty > 0) yang dimunculkan.
+                // Jika 1 Kanban butuh 100 pcs dan dipenuhi 2 lot @ 50 pcs -> tampil 2 baris terpisah!
+                $allEligibleAllocations = [];
+                $consumedQuotaByKanban = [];
+                $processedLotIds = [];
+
+                foreach ($rawAllocatedLots as $rLot) {
+                    $lotId = (int)$rLot['k_lot_id'];
+                    if (isset($processedLotIds[$lotId])) {
+                        continue;
+                    }
+                    $processedLotIds[$lotId] = true;
+
+                    $ksid = (int)$rLot['kanban_session_id'];
+                    $kTarget = (int)($rLot['target_kanban_qty'] ?: 0);
+                    $lotQty = (int)$rLot['lot_qty'];
+
+                    if (!isset($consumedQuotaByKanban[$ksid])) {
+                        $consumedQuotaByKanban[$ksid] = 0;
+                    }
+
+                    $alreadyTaken = $consumedQuotaByKanban[$ksid];
+                    $remainingNeeded = max(0, $kTarget - $alreadyTaken);
+
+                    // Qty yang benar-benar terpakai memotong Kanban
+                    $usedForKanban = min($lotQty, $remainingNeeded);
+                    $consumedQuotaByKanban[$ksid] += $usedForKanban;
+
+                    // HANYA MASUKKAN JIKA used_qty > 0 (lot yang berkontribusi)
+                    if ($usedForKanban > 0) {
+                        $rLot['used_qty'] = $usedForKanban;
+                        $rLot['ref_number'] = $rLot['ref_number'] ?: '-';
+                        $rLot['lot_number'] = $rLot['lot_number'] ?: '-';
+                        $allEligibleAllocations[] = $rLot;
+                    }
+                }
+
+                // Total Riwayat = Jumlah baris lot yang berkontribusi
+                $totalFilteredHistory = count($allEligibleAllocations);
+                $totalHistoryPages = max(1, (int)ceil($totalFilteredHistory / $historyLimit));
+                if ($historyPage > $totalHistoryPages) {
+                    $historyPage = $totalHistoryPages;
+                }
+                $historyOffset = ($historyPage - 1) * $historyLimit;
+
+                // Slice array untuk pagination server-side yang presisi
+                $kanbanUsage = array_slice($allEligibleAllocations, $historyOffset, $historyLimit);
 
                 // 6. Fetch Defect / NG Records (Table 3)
                 $stmtDef = $pdo->prepare("
@@ -1044,9 +1017,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     <!-- Ref / Lot -->
                                     <td style="padding: 10px 14px;">
-                                        <span style="font-family: monospace; font-weight: 700; color: #1d4ed8; font-size: 11px;">
-                                            <?= htmlspecialchars($ku['ref_number']) ?>
-                                        </span>
+                                        <div style="display: flex; flex-direction: column; gap: 2px;">
+                                            <span style="font-family: monospace; font-weight: 800; color: #1d4ed8; font-size: 11px;">
+                                                Ref: <?= htmlspecialchars($ku['ref_number']) ?>
+                                            </span>
+                                            <span style="font-family: monospace; font-weight: 600; color: #64748b; font-size: 10px;">
+                                                Lot: <?= htmlspecialchars($ku['lot_number']) ?>
+                                            </span>
+                                        </div>
                                     </td>
 
                                     <!-- Qty Terpakai -->
