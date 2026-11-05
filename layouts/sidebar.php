@@ -43,7 +43,7 @@ function nav_active($keyword, $currentUri) {
     <nav class="flex-1 min-h-0 px-3 py-4 space-y-4 overflow-y-auto overflow-x-hidden text-xs" style="flex:1 1 0%;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;">
         
         <!-- Group 1: Operasional -->
-        <?php if (can_access('dashboard') || can_access('defect_analysis') || can_access('inspection') || can_access('safety_stock') || can_access('daily_report')): ?>
+        <?php if (can_access('dashboard') || can_access('defect_analysis') || can_access('inspection') || can_access('monitoring_oqc') || can_access('safety_stock') || can_access('daily_report')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Operasional
@@ -63,6 +63,16 @@ function nav_active($keyword, $currentUri) {
                 </svg>
                 <span class="sidebar-text truncate">Scan Inspeksi</span>
             </a>
+            <?php if (can_access('monitoring_oqc')): ?>
+            <a href="<?= base_url('modules/monitoring_oqc/index.php') ?>"
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('monitoring_oqc', $currentUri) ?>"
+               title="Checklist SOP & Monitoring 5S">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Monitoring OQC</span>
+            </a>
+            <?php endif; ?>
             <?php endif; ?>
 
             <?php if (can_access('dashboard')): ?>
@@ -98,6 +108,18 @@ function nav_active($keyword, $currentUri) {
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
                 </svg>
                 <span class="sidebar-text truncate">Scan Inspeksi</span>
+            </a>
+            <?php endif; ?>
+
+            <?php if (!$isInspectorRole && can_access('monitoring_oqc')): ?>
+            <!-- Monitoring OQC (SOP 5S) -->
+            <a href="<?= base_url('modules/monitoring_oqc/audit.php') ?>"
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('monitoring_oqc', $currentUri) ?>"
+               title="Monitoring & Audit Kepatuhan 5S">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                </svg>
+                <span class="sidebar-text truncate">Monitoring OQC</span>
             </a>
             <?php endif; ?>
 
@@ -242,11 +264,23 @@ function nav_active($keyword, $currentUri) {
         <?php endif; ?>
 
         <!-- Group 3: Master Data -->
-        <?php if (can_access('master_parts') || can_access('master_models') || can_access('master_customers') || can_access('master_drawings') || can_access('master_defects')): ?>
+        <?php if (can_access('monitoring_master') || can_access('master_parts') || can_access('master_models') || can_access('master_customers') || can_access('master_drawings') || can_access('master_defects')): ?>
         <div>
             <div class="sidebar-group-label px-3 mb-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Master Data
             </div>
+
+            <?php if (can_access('monitoring_master')): ?>
+            <!-- Master Monitoring OQC -->
+            <a href="<?= base_url('modules/monitoring_master/index.php') ?>" 
+               class="sidebar-nav-item flex items-center px-3 py-2 rounded-xl transition-all duration-150 mb-1 <?= nav_active('monitoring_master', $currentUri) ?>"
+               title="Master Template Monitoring OQC (SOP & 5S)">
+                <svg class="w-4 h-4 mr-2.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path>
+                </svg>
+                <span class="sidebar-text truncate">Master Monitoring OQC</span>
+            </a>
+            <?php endif; ?>
 
             <?php if (can_access('master_parts')): ?>
             <!-- Master Data Part -->

@@ -1,12 +1,16 @@
 <?php
+require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/helper.php';
+
+require_menu_access('master_drawings');
+
 $breadcrumbCategory = "MASTER DATA";
 $pageTitle = "Import Massal Berkas Drawing & Dokumen (ZIP)";
 $pageSubtitle = "Unggah ratusan berkas drawing 2D, 3D, dan dokumen kontrol mutu sekaligus dalam 1 berkas ZIP";
 
 require_once __DIR__ . '/../../layouts/header.php';
 require_once __DIR__ . '/../../layouts/sidebar.php';
-
-require_menu_access('master_drawings');
 ?>
 
 <div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300">

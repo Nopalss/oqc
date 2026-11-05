@@ -71,10 +71,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         set_flash('success', 'Selamat datang kembali, ' . htmlspecialchars($userFound['name']) . '!');
 
-                        // Role-based redirect: inspektur/operator langsung ke halaman Scan Inspeksi
+                        // Role-based redirect: inspektur/operator wajib ceklis Tahap Awal 5S terlebih dahulu
                         $roleNorm = strtolower(trim($userFound['role']));
                         if (in_array($roleNorm, ['inspektur', 'inspektor', 'operator'])) {
-                            redirect('modules/inspection/index.php');
+                            $isEarlyDone = is_monitoring_phase_completed($pdo, (int)$userFound['id'], 'early');
+                            if (!$isEarlyDone) {
+                                redirect('modules/monitoring_oqc/index.php?gatekeeper=1');
+                            } else {
+                                redirect('modules/inspection/index.php');
+                            }
                         } else {
                             redirect('index.php');
                         }

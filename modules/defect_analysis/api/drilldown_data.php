@@ -339,11 +339,19 @@ function getTimeframeIntervals($startDate, $endDate, $filterType, $subResolution
         $targetMonth = sprintf('%02d', $m);
         $wIdx = 1;
 
+        $todayStr = date('Y-m-d');
+        $isCurrentMonth = ($y === (int)date('Y') && $m === (int)date('n'));
+
         while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
             $curSat = clone $curSun;
             $curSat->modify('+6 days');
 
             $sStr = $curSun->format('Y-m-d');
+            // Jika bulan berjalan, jangan tampilkan minggu yang belum dimulai
+            if ($isCurrentMonth && $sStr > $todayStr) {
+                break;
+            }
+
             $eStr = $curSat->format('Y-m-d');
             $sDay = $curSun->format('d');
             $eDay = $curSat->format('d');
@@ -1230,11 +1238,19 @@ try {
                 $wIdx = 1;
                 $targetMonth = $firstDayDt->format('m');
 
+                $todayStr = date('Y-m-d');
+                $isCurrentMonth = ((int)$firstDayDt->format('Y') === (int)date('Y') && (int)$firstDayDt->format('n') === (int)date('n'));
+
                 while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
                     $curSat = clone $curSun;
                     $curSat->modify('+6 days'); // Sabtu
 
                     $sStr = $curSun->format('Y-m-d');
+                    // Jika bulan berjalan, jangan tampilkan minggu yang belum dimulai
+                    if ($isCurrentMonth && $sStr > $todayStr) {
+                        break;
+                    }
+
                     $eStr = $curSat->format('Y-m-d');
                     $sLabel = $curSun->format('d');
                     $eLabel = $curSat->format('d');
@@ -1926,11 +1942,19 @@ try {
             $wIdx = 1;
             $targetMonth = $firstDayDt->format('m');
 
+            $todayStr = date('Y-m-d');
+            $isCurrentMonth = ($refYear === (int)date('Y') && $refMonth === (int)date('n'));
+
             while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
                 $curSat = clone $curSun;
                 $curSat->modify('+6 days');
 
                 $sStr = $curSun->format('Y-m-d');
+                // Jika bulan berjalan, jangan tampilkan minggu yang belum dimulai
+                if ($isCurrentMonth && $sStr > $todayStr) {
+                    break;
+                }
+
                 $eStr = $curSat->format('Y-m-d');
                 $sLabel = $curSun->format('d');
                 $eLabel = $curSat->format('d');

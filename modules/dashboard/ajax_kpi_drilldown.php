@@ -567,7 +567,11 @@ try {
                                   LEFT JOIN inspection_ng_records ngr ON ngr.session_lot_id = isl.id AND (ngr.is_cancelled IS NULL OR ngr.is_cancelled = 0)
                                   LEFT JOIN defect_types dt ON ngr.defect_type_id = dt.id
                                   WHERE ss.started_at >= :sd AND ss.started_at < :ed_next
-                                    AND (isl.lot_result = 'rejected' OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced') OR ngr.id IS NOT NULL)
+                                    AND (
+                                        isl.lot_result = 'rejected'
+                                        OR isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced', 'action_closed', 'abolished')
+                                        OR ngr.id IS NOT NULL
+                                    )
                                     AND (ss.approval_notes IS NULL OR ss.approval_notes NOT LIKE '%Direct Close%')
                                     AND (isl.ref_number IS NULL OR (isl.ref_number != 'DIRECT-PASS' AND isl.ref_number NOT LIKE '%DIRECT-PASS%'))
                                     AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Direct Close%' AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))

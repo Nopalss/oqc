@@ -503,6 +503,123 @@ function getCsrfToken() {
         });
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // BATAL SESI INSPEKSI (ROLLBACK LOTS & KANBAN STATUS)
+    // ═══════════════════════════════════════════════════════════════════
+    function confirmCancelSession(sessionId, itemInfo) {
+        var itemDesc = itemInfo ? ' (' + itemInfo + ')' : '';
+        
+        var executeCancel = function(reasonText) {
+            if (typeof Swal !== 'undefined') {
+                Swal.fire({
+                    title: 'Membatalkan Sesi...',
+                    text: 'Sistem sedang menghapus sesi, melepas lot box, dan mengembalikan status item.',
+                    allowOutsideClick: false,
+                    didOpen: function() {
+                        Swal.showLoading();
+                    }
+                });
+            }
+
+            var formData = new FormData();
+            formData.append('session_id', sessionId);
+            formData.append('reason', reasonText || 'Dibatalkan oleh supervisor');
+            formData.append('csrf_token', getCsrfToken());
+
+            fetch(getAppBaseUrl() + '/modules/daily_report/cancel_session.php', {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-Token': getCsrfToken()
+                },
+                body: formData
+            })
+            .then(function(res) {
+                return res.json();
+            })
+            .then(function(res) {
+                if (res && res.success) {
+                    if (typeof Swal !== 'undefined') {
+                        Swal.fire({
+                            icon: 'success',
+                            title: 'Sesi Berhasil Dibatalkan',
+                            text: res.message || 'Sesi telah dibatalkan dan label lot siap diinspeksi kembali.',
+                            confirmButtonColor: '#2563eb'
+                        }).then(function() {
+                            window.location.reload();
+                        });
+                    } else {
+                        alert(res.message || 'Sesi berhasil dibatalkan.');
+                        window.location.reload();
+                    }
+                } else {
+                    var errMsg = (res && res.message) ? res.message : 'Gagal membatalkan sesi inspeksi.';
+                    if (typeof Swal !== 'undefined') {
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Pembatalan Gagal',
+                            text: errMsg,
+                            confirmButtonColor: '#2563eb'
+                        });
+                    } else {
+                        alert(errMsg);
+                    }
+                }
+            })
+            .catch(function(err) {
+                if (typeof Swal !== 'undefined') {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Gangguan Jaringan',
+                        text: 'Tidak dapat menghubungi server. Silakan coba beberapa saat lagi.',
+                        confirmButtonColor: '#2563eb'
+                    });
+                } else {
+                    alert('Tidak dapat menghubungi server.');
+                }
+            });
+        };
+
+        if (typeof Swal === 'undefined') {
+            if (confirm('PERINGATAN: Apakah Anda yakin ingin membatalkan Sesi #' + sessionId + itemDesc + '?\n\nSemua lot box yang sudah di-scan akan dilepas sehingga dapat di-scan ulang, dan status Kanban akan dikembalikan.')) {
+                var reason = prompt('Tuliskan alasan pembatalan sesi (opsional):', 'Salah scan kanban / batal inspeksi');
+                executeCancel(reason);
+            }
+            return;
+        }
+
+        Swal.fire({
+            title: 'Batalkan Sesi Inspeksi?',
+            html: '<div style="text-align: left; font-size: 13px; color: #334155; line-height: 1.5;">' +
+                  'Anda akan membatalkan <b>Sesi #' + sessionId + '</b>' + (itemDesc ? ' untuk <b>' + itemDesc.replace(/[()]/g, '') + '</b>' : '') + '.<br><br>' +
+                  '<div style="background: #fff1f2; border: 1px solid #fecdd3; border-radius: 8px; padding: 10px 12px; color: #9f1239; font-size: 12px;">' +
+                  '<b>Dampak Pembatalan:</b>' +
+                  '<ul style="list-style-type: disc; margin-left: 18px; margin-top: 4px; padding: 0;">' +
+                  '<li>Seluruh <b>label box lot</b> yang terlanjur di-scan akan <b>dilepaskan</b> (bisa di-scan ulang).</li>' +
+                  '<li>Status <b>Kanban / Item</b> akan dikembalikan ke <b>belum diinspeksi (uninspected)</b>.</li>' +
+                  '<li>Sisa kelebihan stok (<b>Safety Stock limpahan</b>) jika ada akan <b>dihapus bersih</b>.</li>' +
+                  '<li>Alokasi Safety Stock gudang yang sempat dipakai akan <b>dipulihkan kembali</b>.</li>' +
+                  '<li>Catatan cacat/sampling sesi ini akan dibersihkan.</li>' +
+                  '</ul>' +
+                  '</div></div>',
+            icon: 'warning',
+            input: 'text',
+            inputLabel: 'Alasan Pembatalan (Opsional)',
+            inputPlaceholder: 'Contoh: Salah ambil kanban / dibatalkan PPIC...',
+            showCancelButton: true,
+            confirmButtonColor: '#e11d48',
+            cancelButtonColor: '#64748b',
+            confirmButtonText: 'Ya, Batalkan Sesi Ini',
+            cancelButtonText: 'Tutup / Kembali',
+            focusCancel: true
+        }).then(function(result) {
+            if (result.isConfirmed) {
+                executeCancel(result.value || 'Dibatalkan oleh supervisor/admin');
+            }
+        });
+    }
+    window.confirmCancelSession = confirmCancelSession;
+
     function confirmApproveAllVisible() {
         const pendingRows = document.querySelectorAll('.row-pending-session');
         const pendingCount = pendingRows.length;

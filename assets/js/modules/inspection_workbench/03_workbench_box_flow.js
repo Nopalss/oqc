@@ -186,7 +186,7 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
     var refNo = lot.ref_number || '';
     var qty = parseInt(lot.qty) || 0;
     var aqlLevel = lot.aql_level || s.aql_level || 'G-II';
-    var splCode = lot.sample_code || 'H';
+    var splCode = lot.sample_code || s.sample_code || '';
     var splSize = parseInt(lot.sample_size) || 0;
     var accNum = parseInt(lot.accept_number) || 0;
     var rejNum = parseInt(lot.reject_number) || 1;
@@ -490,19 +490,24 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
     var ngBorderColor = (ngCount >= rejNum) ? '#fecdd3' : ((ngCount > 0) ? '#fde68a' : '#e2e8f0');
     var ngTitleColor = (ngCount >= rejNum) ? '#9f1239' : ((ngCount > 0) ? '#92400e' : '#64748b');
 
+    var aqlStandardText = '(' + escapeHtml(aqlLevel) + (splCode ? (' · Kode ' + escapeHtml(splCode)) : '') + ')';
+
     var statsGridHtml = 
         '<div style="display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 5px; margin-top: 6px;">' +
-            '<div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 5px 6px; text-align: center;">' +
-                '<span style="display: block; font-size: 8.5px; font-weight: 800; color: #64748b; letter-spacing: 0.03em;">QTY LOT</span>' +
-                '<span style="font-size: 12px; font-weight: 900; color: #0f172a; font-family: monospace;">' + qty.toLocaleString() + ' pcs</span>' +
+            '<div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 6px; text-align: center; display: flex; flex-direction: column; justify-content: space-between;">' +
+                '<span style="display: block; font-size: 9.5px; font-weight: 800; color: #64748b; letter-spacing: 0.03em;">QTY LOT</span>' +
+                '<span style="font-size: 14px; font-weight: 900; color: #0f172a; font-family: monospace;">' + qty.toLocaleString() + ' pcs</span>' +
             '</div>' +
-            '<div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 5px 6px; text-align: center;">' +
-                '<span style="display: block; font-size: 8.5px; font-weight: 800; color: #1e40af; letter-spacing: 0.03em;">SAMPEL CEK</span>' +
-                '<span style="font-size: 12px; font-weight: 900; color: #1d4ed8; font-family: monospace;">' + splSize + ' pcs</span>' +
+            '<div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 8px; padding: 6px 6px; text-align: center; display: flex; flex-direction: column; justify-content: space-between;" title="Standar Uji: AQL ' + escapeHtml(aqlLevel) + (splCode ? (', Kode Sampel ' + escapeHtml(splCode)) : '') + '">' +
+                '<div style="line-height: 1.25;">' +
+                    '<span style="display: block; font-size: 9.5px; font-weight: 800; color: #1e40af; letter-spacing: 0.03em;">SAMPEL CEK</span>' +
+                    '<span style="display: block; font-size: 10.5px; font-weight: 800; color: #1d4ed8; margin-top: 1px;">' + aqlStandardText + '</span>' +
+                '</div>' +
+                '<span style="font-size: 15px; font-weight: 900; color: #1d4ed8; font-family: monospace; display: block; margin-top: 3px;">' + splSize + ' pcs</span>' +
             '</div>' +
-            '<div style="background-color: ' + ngBgColor + '; border: 1px solid ' + ngBorderColor + '; border-radius: 8px; padding: 5px 6px; text-align: center;">' +
-                '<span style="display: block; font-size: 8.5px; font-weight: 800; color: ' + ngTitleColor + '; letter-spacing: 0.03em;">TEMUAN / BATAS</span>' +
-                '<span style="font-size: 12px; font-weight: 900; color: ' + ngValColor + '; font-family: monospace;">' + ngCount + ' / ' + rejNum + ' pcs</span>' +
+            '<div style="background-color: ' + ngBgColor + '; border: 1px solid ' + ngBorderColor + '; border-radius: 8px; padding: 6px 6px; text-align: center; display: flex; flex-direction: column; justify-content: space-between;">' +
+                '<span style="display: block; font-size: 9.5px; font-weight: 800; color: ' + ngTitleColor + '; letter-spacing: 0.03em;">TEMUAN / BATAS</span>' +
+                '<span style="font-size: 14px; font-weight: 900; color: ' + ngValColor + '; font-family: monospace;">' + ngCount + ' / ' + rejNum + ' pcs</span>' +
             '</div>' +
         '</div>';
 
@@ -641,9 +646,9 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                         '<div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">' +
                             '<div style="display: flex; align-items: center; gap: 5px;">' +
                                 '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #0284c7; flex-shrink: 0;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
-                                '<span style="font-size: 9.5px; font-weight: 900; color: #0369a1; text-transform: uppercase;">Catatan Disposisi Admin / Divisi:</span>' +
+                                '<span style="font-size: 9.5px; font-weight: 900; color: #0369a1; text-transform: uppercase;">Catatan Action Admin / Divisi:</span>' +
                             '</div>' +
-                            '<span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 8.5px; font-weight: 800;">Disposisi Selesai</span>' +
+                            '<span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 8.5px; font-weight: 800;">Action Selesai</span>' +
                         '</div>' +
                         '<div style="font-size: 9.5px; color: #0c4a6e; font-weight: 700; line-height: 1.35; background: #ffffff; padding: 5px 8px; border-radius: 6px; border: 1px solid #e0f2fe;">' +
                             '"' + escapeHtml(dispNotes) + '"' +
@@ -654,7 +659,7 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                         '</div>' +
                         '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 5px; padding: 3px 6px; display: flex; align-items: center; gap: 5px; margin-top: 2px;">' +
                             '<span style="background-color: #059669; color: #ffffff; font-size: 8px; font-weight: 900; padding: 1px 5px; border-radius: 3px;">✓ SIAP RE-INSPEKSI</span>' +
-                            '<span style="font-size: 8.5px; font-weight: 700; color: #065f46;">Box telah disortir/didisposisi. Fokus uji ulang pada titik defect sebelumnya.</span>' +
+                            '<span style="font-size: 8.5px; font-weight: 700; color: #065f46;">Box telah disortir/ditindaklanjuti. Fokus uji ulang pada titik defect sebelumnya.</span>' +
                         '</div>' +
                     '</div>';
             } else {
@@ -663,12 +668,12 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                         '<div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">' +
                             '<div style="display: flex; align-items: center; gap: 5px;">' +
                                 '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #d97706; flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
-                                '<span style="font-size: 9.5px; font-weight: 800; color: #92400e;">Status Disposisi & Re-Inspeksi</span>' +
+                                '<span style="font-size: 9.5px; font-weight: 800; color: #92400e;">Status Action & Re-Inspeksi</span>' +
                             '</div>' +
-                            '<span style="background-color: #fef9c3; color: #a16207; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px; font-size: 8px; font-weight: 800;">Pending Disposisi</span>' +
+                            '<span style="background-color: #fef9c3; color: #a16207; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px; font-size: 8px; font-weight: 800;">Pending Action</span>' +
                         '</div>' +
                         '<div style="font-size: 9px; color: #b45309; font-weight: 600; line-height: 1.3;">' +
-                            'Belum ada catatan disposisi resmi dari Admin/Divisi. Lot tetap dapat diperiksa ulang pada sesi ini.' +
+                            'Belum ada catatan action resmi dari Admin/Divisi. Lot tetap dapat diperiksa ulang pada sesi ini.' +
                         '</div>' +
                         '<div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 5px; padding: 3px 6px; display: flex; align-items: center; gap: 5px; margin-top: 2px;">' +
                             '<span style="background-color: #059669; color: #ffffff; font-size: 8px; font-weight: 900; padding: 1px 5px; border-radius: 3px;">✓ BISA RE-INSPEKSI</span>' +
@@ -740,6 +745,7 @@ function switchLotFilterTab(tabName) {
 function handleSessionFinishedModalFlow(data) {
     if (!data || !data.session) return;
     var s = data.session;
+    if (typeof updateWorkbenchLiveBadge === 'function') { updateWorkbenchLiveBadge(s); }
     if (s.status !== 'passed') return;
     if (typeof isReadOnlyView !== 'undefined' && isReadOnlyView) return;
 
@@ -758,6 +764,7 @@ function renderWorkbenchLotFlow(data) {
     if (!data || !data.session) return;
     window.lastWorkbenchSessionData = data;
     var s = data.session;
+    if (typeof updateWorkbenchLiveBadge === 'function') { updateWorkbenchLiveBadge(s); }
     var lots = data.session_lots || [];
     var ngRecordsByLot = data.ng_records_by_lot || {};
 

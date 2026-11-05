@@ -1,10 +1,7 @@
 <?php
-$breadcrumbCategory = "MASTER DATA";
-$pageTitle = "Laporan Hasil Import Berkas ZIP";
-$pageSubtitle = "Ringkasan ekstraksi berkas drawing dan dokumen mutu serta kelengkapan dokumen per Part Code";
-
-require_once __DIR__ . '/../../layouts/header.php';
-require_once __DIR__ . '/../../layouts/sidebar.php';
+require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/helper.php';
 
 require_menu_access('master_drawings');
 
@@ -13,6 +10,13 @@ if (!$report) {
     set_flash('info', 'Tidak ada data laporan import ZIP terbaru.');
     redirect('modules/master_drawings/index.php');
 }
+
+$breadcrumbCategory = "MASTER DATA";
+$pageTitle = "Laporan Hasil Import Berkas ZIP";
+$pageSubtitle = "Ringkasan ekstraksi berkas drawing dan dokumen mutu serta kelengkapan dokumen per Part Code";
+
+require_once __DIR__ . '/../../layouts/header.php';
+require_once __DIR__ . '/../../layouts/sidebar.php';
 
 $parts = $report['parts'] ?? [];
 $totalParts = count($parts);

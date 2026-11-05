@@ -213,6 +213,13 @@ if ($activeTab === 'lot_details' || $activeTab === 'my_inspections') {
     $activeTab = 'my_lots';
 }
 
+$viewMode = isset($_GET['view']) ? trim(sanitize($_GET['view'])) : '';
+$safetyStockRecommendations = [];
+$partSafetyStockMap         = [];
+$pagedRecommendations       = [];
+$totalSsItems               = 0;
+$totalSsPages               = 1;
+
 // Filter & Parameters
 // -------------------------------------------------------------------------
 // Helper to parse full QR code scan strings (Z1<part_code>|Z2<lot>|Z3<qty>|Z4<line>|Z5<ref_no>)
@@ -426,13 +433,7 @@ if (!in_array($scopeFilter, ['all', 'today', 'pending_yesterday'], true)) {
 if (isset($_GET['batch_id'])) {
     $batchFilter = trim(sanitize($_GET['batch_id']));
 } else {
-    if (!empty($scopeFilter) && $scopeFilter === 'pending_yesterday') {
-        $batchFilter = 'all';
-    } elseif (!empty($todayBatches)) {
-        $batchFilter = (string)$todayBatches[0]['id'];
-    } else {
-        $batchFilter = 'all';
-    }
+    $batchFilter = 'all';
 }
 
 if (empty($scopeFilter)) {
@@ -1058,6 +1059,11 @@ if ($pdo) {
                 ];
             }
 
+            // Anti-Session Lock: Release session write lock after badge caching so concurrent browser requests never wait
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+
             // Build Table Filters for Kanban (Bersih dari carry-over clause sisa hari lampau agar urutan baris murni)
             $tableWhere = [
                 "1=1",
@@ -1296,6 +1302,209 @@ if ($pdo) {
                 }
             }
 
+            // =====================================================================
+            // REKOMENDASI SAFETY STOCK (FIFO) UNTUK TAB KANBAN
+            // =====================================================================
+            try {
+                // Ambil seluruh box/lot safety stock yang berstatus passed dan belum terpakai (Single indexed query, < 25ms)
+                $stSsLots = $pdo->query("
+                    SELECT 
+                        isl.id AS lot_id,
+                        isl.inspection_session_id,
+                        isl.lot_number,
+                        isl.ref_number,
+                        COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty,
+                        ss.started_at,
+                        isl.created_at,
+                        UPPER(TRIM(COALESCE(did.part_code, ki_ss.item_code, ''))) AS part_code
+                    FROM inspection_session_lots isl
+                    JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+                    LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                    LEFT JOIN kanban_items ki_ss ON ki_ss.id = ss.kanban_item_id
+                    WHERE ss.inspection_type = 'safety_stock'
+                      AND ss.status = 'passed'
+                      AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
+                      AND (isl.lot_status IS NULL OR isl.lot_status != 'action_closed')
+                      AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
+                    ORDER BY COALESCE(ss.started_at, isl.created_at) ASC, isl.id ASC
+                ");
+                $allSsLots = $stSsLots->fetchAll(PDO::FETCH_ASSOC);
+
+                $ssLotsPool = [];
+                foreach ($allSsLots as $sl) {
+                    $pCode = $sl['part_code'];
+                    if (empty($pCode)) continue;
+                    if (!isset($ssLotsPool[$pCode])) {
+                        $ssLotsPool[$pCode] = [];
+                        $partSafetyStockMap[$pCode] = 0;
+                    }
+                    $ssLotsPool[$pCode][] = [
+                        'lot_id'                => $sl['lot_id'],
+                        'inspection_session_id' => $sl['inspection_session_id'],
+                        'lot_number'            => $sl['lot_number'],
+                        'ref_number'            => $sl['ref_number'],
+                        'original_qty'          => (int)$sl['qty'],
+                        'remaining_qty'         => (int)$sl['qty'],
+                        'started_at'            => $sl['started_at'],
+                        'created_at'            => $sl['created_at'],
+                    ];
+                    $partSafetyStockMap[$pCode] += (int)$sl['qty'];
+                }
+
+                // Ambil kandidat Kanban untuk target tanggal terpilih ($selectedDate) dan batch ($batchFilter)
+                $ssTargetWhere = [
+                    "k.status != 'completed'",
+                    "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+                    "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+                    "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')",
+                    "(k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))"
+                ];
+                $ssTargetParams = [];
+
+                if ($scopeFilter === 'pending_yesterday') {
+                    $ssTargetWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :ss_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                    $ssTargetParams[':ss_py_date'] = $selectedDate;
+                } else {
+                    $ssTargetWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :ss_sel_date";
+                    $ssTargetParams[':ss_sel_date'] = $selectedDate;
+                }
+
+                if ($scopeFilter !== 'pending_yesterday' && $batchFilter !== 'all' && (int)$batchFilter > 0) {
+                    $ssTargetWhere[] = "k.batch_id = :ss_batch_id";
+                    $ssTargetParams[':ss_batch_id'] = (int)$batchFilter;
+                }
+
+                if ($search !== '') {
+                    $ssTargetWhere[] = "(k.kanban_no LIKE :ss_s1 OR k.item_code LIKE :ss_s2 OR k.item_description LIKE :ss_s3 OR k.customer LIKE :ss_s4)";
+                    $ssTargetParams[':ss_s1'] = '%' . $search . '%';
+                    $ssTargetParams[':ss_s2'] = '%' . $search . '%';
+                    $ssTargetParams[':ss_s3'] = '%' . $search . '%';
+                    $ssTargetParams[':ss_s4'] = '%' . $search . '%';
+                }
+
+                $ssTargetWhereStr = implode(' AND ', $ssTargetWhere);
+
+                $stmtSsItems = $pdo->prepare("
+                    SELECT k.*, 
+                           b.document_number as doc_no, b.vendor, b.imported_at as batch_imported_at, b.import_method,
+                           mp.part_name as master_part_name,
+                           COALESCE((
+                               SELECT SUM(
+                                   CASE 
+                                       WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                           GREATEST(0, COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                     FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0))
+                                       WHEN s2.status = 'passed' THEN
+                                           s2.total_scanned_qty
+                                       ELSE 0
+                                   END
+                               )
+                               FROM inspection_sessions s2
+                               WHERE s2.kanban_item_id = k.id
+                           ), 0) AS total_passed_qty
+                    FROM kanban_items k
+                    LEFT JOIN kanban_batches b ON b.id = k.batch_id
+                    LEFT JOIN master_parts mp ON mp.part_code = k.item_code
+                    WHERE {$ssTargetWhereStr}
+                    ORDER BY k.id ASC
+                ");
+                $stmtSsItems->execute($ssTargetParams);
+                $allSsKanbanCandidates = $stmtSsItems->fetchAll(PDO::FETCH_ASSOC);
+
+                // Dynamic FIFO Depletion Pool Allocation:
+                // Setiap box yang dialokasikan ke suatu Kanban langsung dipotong dari pool sehingga
+                // Kanban berikutnya tidak akan pernah memanggil lot/box yang sama jika sudah habis!
+                foreach ($allSsKanbanCandidates as $ck) {
+                    $pCode = strtoupper(trim($ck['item_code']));
+                    if (empty($ssLotsPool[$pCode])) continue;
+
+                    $currentPool = &$ssLotsPool[$pCode];
+                    $poolRemainingQty = 0;
+                    foreach ($currentPool as $pItem) {
+                        $poolRemainingQty += $pItem['remaining_qty'];
+                    }
+                    if ($poolRemainingQty <= 0) {
+                        continue;
+                    }
+
+                    $demand = (int)$ck['qty'];
+                    $passed = (int)$ck['total_passed_qty'];
+                    $needed = max(0, $demand - $passed);
+
+                    // Jika Kanban sudah selesai (kuota passed >= demand) atau status completed, lewati (jangan tawarkan SS)
+                    if ($needed <= 0 || ($ck['status'] ?? '') === 'completed') {
+                        continue;
+                    }
+
+                    $targetCalc = $needed;
+
+                    $remDemand = $targetCalc;
+                    $allocatedBoxes = [];
+                    $uniqueLotNumbers = [];
+                    $totalAllocatedThisKanban = 0;
+
+                    foreach ($currentPool as &$l) {
+                        if ($remDemand <= 0) break;
+                        if ($l['remaining_qty'] <= 0) continue;
+
+                        $take = min($l['remaining_qty'], $remDemand);
+                        $isSplit = ($take < $l['remaining_qty']) || ($l['remaining_qty'] < $l['original_qty']);
+
+                        $uniqueLotNumbers[$l['lot_number']] = true;
+                        $allocatedBoxes[] = [
+                            'lot_number' => $l['lot_number'],
+                            'ref_number' => $l['ref_number'],
+                            'take_qty'   => $take,
+                            'box_qty'    => $l['original_qty'],
+                            'is_split'   => ($take < $l['original_qty']),
+                            'date'       => $l['started_at'] ?: $l['created_at']
+                        ];
+
+                        $l['remaining_qty'] -= $take;
+                        $remDemand -= $take;
+                        $totalAllocatedThisKanban += $take;
+                    }
+                    unset($l);
+
+                    if (!empty($allocatedBoxes)) {
+                        $fulfillType = ($totalAllocatedThisKanban >= $targetCalc) ? 'full' : 'partial';
+                        $fulfillPct  = ($targetCalc > 0) ? min(100, round(($totalAllocatedThisKanban / $targetCalc) * 100)) : 0;
+
+                        $safetyStockRecommendations[] = [
+                            'item_id'      => $ck['id'],
+                            'kanban_no'    => $ck['kanban_no'],
+                            'customer'     => $ck['customer'] ?? 'PT. Indonesia Epson Industry',
+                            'item_code'    => $pCode,
+                            'item_name'    => !empty($ck['item_description']) ? $ck['item_description'] : (!empty($ck['master_part_name']) ? $ck['master_part_name'] : '-'),
+                            'demand'       => $demand,
+                            'passed_qty'   => $passed,
+                            'needed_qty'   => $needed,
+                            'status'       => $ck['status'] ?? 'uninspected',
+                            'imported_at'  => $ck['batch_imported_at'] ?: $ck['created_at'],
+                            'ss_total'     => $totalAllocatedThisKanban,
+                            'fulfill_type' => $fulfillType,
+                            'fulfill_pct'  => $fulfillPct,
+                            'box_count'    => count($allocatedBoxes),
+                            'lot_count'    => count($uniqueLotNumbers),
+                            'boxes'        => $allocatedBoxes
+                        ];
+                    }
+                }
+
+                $totalSsItems = count($safetyStockRecommendations);
+                $totalSsPages = max(1, ceil($totalSsItems / $limit));
+
+                if ($viewMode === 'safety_stock') {
+                    $totalItems = $totalSsItems;
+                    $totalPages = $totalSsPages;
+                    if ($page > $totalPages) $page = $totalPages;
+                    $offset = ($page - 1) * $limit;
+                    $pagedRecommendations = array_slice($safetyStockRecommendations, $offset, $limit);
+                }
+            } catch (Exception $eSs) {
+                // Fallback aman
+            }
+
         // =====================================================================
         // TAB 2: SAFETY STOCK (CEK FISIK MURNI DARI GUDANG)
         // =====================================================================
@@ -1410,6 +1619,11 @@ if ($pdo) {
                     'my_inspections' => $myInspectionsTabCount,
                     'my_lots'        => $myLotsTabCount
                 ];
+            }
+
+            // Anti-Session Lock: Release session write lock after badge caching so concurrent browser requests never wait
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
             }
 
             // Build Table Filters for Safety Stock
@@ -1829,6 +2043,11 @@ if ($pdo) {
                     'my_inspections' => $myInspectionsTabCount,
                     'my_lots'        => $myLotsTabCount
                 ];
+            }
+
+            // Anti-Session Lock: Release session write lock after badge caching so concurrent browser requests never wait
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
             }
 
             // Build Table Filters for My Inspections
@@ -2737,6 +2956,11 @@ if ($pdo) {
                     'my_inspections' => $myInspectionsTabCount,
                     'my_lots'        => $myLotsTabCount
                 ];
+            }
+
+            // Anti-Session Lock: Release session write lock after badge caching so concurrent browser requests never wait
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
             }
 
             // Pagination

@@ -1,3 +1,24 @@
+<style>
+@keyframes live-ping-anim {
+    0% { transform: scale(1); opacity: 0.85; }
+    50% { transform: scale(1.6); opacity: 0.3; }
+    100% { transform: scale(2.2); opacity: 0; }
+}
+.live-dot-ping {
+    animation: live-ping-anim 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.workbench-live-pill-live {
+    background-color: #fff1f2 !important;
+    border-color: #fecdd3 !important;
+    color: #e11d48 !important;
+}
+.workbench-live-pill-done {
+    background-color: #ecfdf5 !important;
+    border-color: #a7f3d0 !important;
+    color: #047857 !important;
+}
+</style>
+
     <!-- Top Bar Navigation Header -->
     <header style="flex-shrink: 0; min-height: 52px;" class="bg-white border-b border-slate-200/80 px-4 py-2 flex items-center justify-between z-20 shadow-xs">
         <div class="flex items-center space-x-3 min-w-0">
@@ -82,6 +103,32 @@
                 <span class="text-[11px] font-extrabold text-indigo-900" id="header-device-line-name">-</span>
                 <span class="text-[9px] text-indigo-500 font-normal underline">(ganti)</span>
             </button>
+
+            <!-- Live Inspection Status Pill (Opsi B: Samping Line) -->
+            <?php
+            $isLiveInit = ($session && ($session['status'] ?? '') === 'in_progress');
+            $isDoneInit = ($session && in_array(($session['status'] ?? ''), ['passed', 'rejected', 'completed'], true));
+            $liveClassInit = 'hidden';
+            if ($isLiveInit) {
+                $liveClassInit = 'flex workbench-live-pill-live';
+            } elseif ($isDoneInit) {
+                $liveClassInit = 'flex workbench-live-pill-done';
+            }
+            ?>
+            <div id="workbench-live-badge" 
+                 class="<?= $liveClassInit ?> items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition-all shadow-2xs select-none"
+                 data-started-at="<?= htmlspecialchars($session['started_at'] ?? '') ?>"
+                 data-closed-at="<?= htmlspecialchars($session['closed_at'] ?? '') ?>"
+                 data-status="<?= htmlspecialchars($session['status'] ?? '') ?>"
+                 title="Status Pengerjaan Inspeksi">
+                <span id="workbench-live-dot-wrap" class="relative flex h-2 w-2 flex-shrink-0">
+                    <span id="workbench-live-dot-ping" class="<?= $isLiveInit ? 'live-dot-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75' : 'hidden' ?>"></span>
+                    <span id="workbench-live-dot-core" class="relative inline-flex rounded-full h-2 w-2 <?= $isLiveInit ? 'bg-rose-500' : 'bg-emerald-500' ?>"></span>
+                </span>
+                <span id="workbench-live-text" class="text-[11px] font-black uppercase tracking-wider">
+                    <?= $isLiveInit ? 'LIVE' : 'SELESAI' ?>
+                </span>
+            </div>
 
             <?php
             $badgeUser = $currentUser;

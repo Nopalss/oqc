@@ -114,8 +114,19 @@ $aqlPdfUrl = ($aqlDoc && !empty($aqlDoc['file_path'])) ? (base_url($aqlDoc['file
         </div>
 
         <!-- Right Side: Version Selector & Zoom Controls -->
-        <div class="flex items-center space-x-2 flex-shrink-0">
+        <div class="flex items-center space-x-1.5 flex-shrink-0">
             
+            <!-- Quick Link: Upload / Kelola Berkas Dokumen (Icon only, no text, no +) -->
+            <a id="btn-toolbar-upload-doc" 
+               href="<?= base_url('modules/master_drawings/upload.php?part_code=' . urlencode($currPartCode)) ?>" 
+               target="_blank" 
+               class="p-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 hover:border-blue-300 rounded-lg transition-all shadow-2xs flex items-center justify-center cursor-pointer flex-shrink-0" 
+               title="Kelola & Upload Berkas Dokumen untuk part ini">
+                <svg class="w-4 h-4 text-blue-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                </svg>
+            </a>
+
             <!-- Version Selector Dropdown (Dynamic, shown when viewing PI, Q-Point, PAC, Standar Packing, or MI) -->
             <div id="doc-version-selector-container" class="hidden items-center space-x-1.5 bg-slate-100 border border-slate-300 rounded-lg px-2 py-0.5">
                 <label for="doc-version-select" class="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">Versi:</label>
@@ -134,9 +145,6 @@ $aqlPdfUrl = ($aqlDoc && !empty($aqlDoc['file_path'])) ? (base_url($aqlDoc['file
                 </button>
                 <button type="button" id="btn-fullscreen-toggle" onclick="toggleDrawingFullscreen()" class="p-1 hover:bg-white rounded-md text-slate-600 hover:text-slate-900 transition-colors" title="Layar Penuh (Fullscreen)">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-                </button>
-                <button type="button" onclick="resetZoom()" class="p-1 hover:bg-white rounded-md text-slate-600 hover:text-slate-900 transition-colors" title="Reset Zoom (100%)">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                 </button>
                 <button type="button" onclick="reloadDocViewer()" class="p-1 hover:bg-white rounded-md text-slate-600 hover:text-blue-600 transition-colors" title="Cek Berkas Terbaru (Tanpa Refresh Halaman)">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>

@@ -422,7 +422,7 @@
                                 </div>
                                 <div>
                                     <label class="block font-bold text-slate-700 text-[9.5px]">Lot Number <span class="text-rose-500">*</span></label>
-                                    <input type="text" id="scan-lot-number" value="" placeholder="Nomor Lot..." class="form-input py-1 px-2 text-xs font-mono font-bold uppercase w-full box-border" autocomplete="off">
+                                    <input type="text" id="scan-lot-number" value="064" placeholder="Nomor Lot..." class="form-input py-1 px-2 text-xs font-mono font-bold uppercase w-full box-border" autocomplete="off">
                                 </div>
                                 <div>
                                     <label class="block font-bold text-slate-700 text-[9.5px]">Qty Box <span class="text-rose-500">*</span></label>

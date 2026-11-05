@@ -87,7 +87,7 @@ if ($filterType === 'all_years') {
     $endDate   = date('Y-m-t', strtotime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth)));
     $presetFilter = 'month_year';
     $trendSubtext = 'per tanggal (' . ($monthNames[$selectedMonth] ?? $selectedMonth) . ' ' . $selectedYear . ')';
-} elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
+} elseif ($filterType === 'custom' || (empty($_GET['preset']) && empty($filterType) && !empty($_GET['start_date']) && !empty($_GET['end_date']))) {
     $startDate    = sanitize($_GET['start_date'] ?? date('Y-m-01'));
     $endDate      = sanitize($_GET['end_date'] ?? date('Y-m-d'));
     $presetFilter = 'custom';
@@ -487,20 +487,101 @@ try {
         return ($defectTypeTotals[$b] ?? 0) <=> ($defectTypeTotals[$a] ?? 0);
     });
 
-    // ── Akumulasi Data Mingguan untuk Grafik Batang (Stacked Weekly W1-W4) ──
-    $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
+    // ── Akumulasi Data untuk Grafik Batang Stacked (Bulanan saat filter Tahunan, Mingguan W1-W5 saat Bulanan) ──
+    $isTahunanStacked = ($presetFilter === 'tahunan');
+    $weeklyBucketsDef = [];
+
+    if ($isTahunanStacked) {
+        // Mode Tahunan: 6 Bulan ke Belakang dari bulan berjalan (Sunday Anchor)
+        $mNamesShort = [
+            1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+            7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+        ];
+        $curMonthKey = sprintf('%04d-%02d', $selectedYear, $selectedMonth);
+        $currentDateObj = new DateTime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth));
+        $candidateMonths = [];
+
+        for ($i = 5; $i >= 0; $i--) {
+            $cursor = clone $currentDateObj;
+            if ($i > 0) {
+                $cursor->modify("-{$i} months");
+            }
+            $cYear  = (int)$cursor->format('Y');
+            $cMonth = (int)$cursor->format('n');
+            $mKey   = $cursor->format('Y-m');
+
+            $cycleStart = getWorkCycleMonthStartDate($cYear, $cMonth);
+            $nextMonthDt = (clone $cursor)->modify('+1 month');
+            $nextCycleStart = getWorkCycleMonthStartDate((int)$nextMonthDt->format('Y'), (int)$nextMonthDt->format('n'));
+            $cycleEnd = date('Y-m-d', strtotime($nextCycleStart . ' -1 day'));
+
+            $shortLabel = $mNamesShort[$cMonth] ?? $cursor->format('M');
+            $candidateMonths[$mKey] = [
+                'year'        => $cYear,
+                'month'       => $cMonth,
+                'shortLabel'  => $shortLabel,
+                'label'       => $shortLabel . ' ' . $cYear,
+                'start_date'  => $cycleStart,
+                'end_date'    => $cycleEnd,
+                'is_current'  => ($mKey === $curMonthKey)
+            ];
+        }
+
+        // Saring: Hanya tampilkan bulan yang memiliki aktivitas data, KECUALI bulan saat ini (wajib tampil)
+        foreach ($candidateMonths as $mKey => $mInfo) {
+            $hasMonthData = false;
+            $mStart = $mInfo['start_date'];
+            $mEnd   = $mInfo['end_date'];
+
+            foreach ($trendMap as $dStr => $tData) {
+                // Cek berdasarkan rentang tanggal siklus kerja bulan tersebut (Sunday Anchor)
+                $isMatch = ($isTahunanStacked && strlen($dStr) === 7) 
+                    ? ($dStr === $mKey) 
+                    : ($dStr >= $mStart && $dStr <= $mEnd);
+                if ($isMatch) {
+                    if (($tData['sample'] ?? 0) > 0 || ($tData['ng'] ?? 0) > 0) {
+                        $hasMonthData = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!$hasMonthData) {
+                foreach ($rawDdsRows as $dr) {
+                    $dDate = (string)$dr['date_key'];
+                    $isMatch = ($isTahunanStacked && strlen($dDate) === 7) 
+                        ? ($dDate === $mKey) 
+                        : ($dDate >= $mStart && $dDate <= $mEnd);
+                    if ($isMatch) {
+                        if ((int)$dr['total_defect'] > 0) {
+                            $hasMonthData = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if ($hasMonthData || $mInfo['is_current']) {
+                $weeklyBucketsDef[$mKey] = $mInfo;
+            }
+        }
+    } else {
+        // Mode Default: Mingguan (Sunday Anchor W1-W5)
+        $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
+    }
+
     $stackedChartLabels = [];
-    $weeklyDateMap = []; // [W1 => ['start' => ..., 'end' => ..., 'label' => ...]]
+    $weeklyDateMap = []; // [Key => ['start' => ..., 'end' => ..., 'label' => ...]]
     foreach ($weeklyBucketsDef as $wKey => $wInfo) {
         $stackedChartLabels[] = $wInfo['shortLabel'];
         $weeklyDateMap[$wKey] = $wInfo;
     }
 
-    // Hitung total sample & total defect per jenis per minggu
+    // Hitung total sample & total defect per jenis per bucket
     $weeklySampleTotals = [];
     $weeklyNgTotals     = [];
-    $weeklyDefectQty    = []; // [WKey => [defect_name => qty]]
-    $weeklyDefectParts  = []; // [WKey => [defect_name => [part_meta...]]]
+    $weeklyDefectQty    = []; // [Key => [defect_name => qty]]
+    $weeklyDefectParts  = []; // [Key => [defect_name => [part_meta...]]]
 
     foreach ($weeklyBucketsDef as $wKey => $wInfo) {
         $wStart = $wInfo['start_date'];
@@ -509,7 +590,11 @@ try {
         $wNg = 0;
 
         foreach ($trendMap as $dStr => $tData) {
-            if ($dStr >= $wStart && $dStr <= $wEnd) {
+            $isMatch = ($isTahunanStacked && strlen($dStr) === 7)
+                ? ($dStr === $wKey)
+                : ($dStr >= $wStart && $dStr <= $wEnd);
+
+            if ($isMatch) {
                 $wSample += (int)($tData['sample'] ?? 0);
                 $wNg     += (int)($tData['ng'] ?? 0);
             }
@@ -521,7 +606,11 @@ try {
 
         foreach ($rawDdsRows as $dr) {
             $dDate = (string)$dr['date_key'];
-            if ($dDate >= $wStart && $dDate <= $wEnd) {
+            $isMatch = ($isTahunanStacked && strlen($dDate) === 7)
+                ? ($dDate === $wKey)
+                : ($dDate >= $wStart && $dDate <= $wEnd);
+
+            if ($isMatch) {
                 $dnm = (string)$dr['defect_name'];
                 $qty = (int)$dr['total_defect'];
                 $weeklyDefectQty[$wKey][$dnm] = ($weeklyDefectQty[$wKey][$dnm] ?? 0) + $qty;
@@ -530,7 +619,11 @@ try {
 
         foreach ($rawDdsPartRows as $pr) {
             $dDate = (string)$pr['date_key'];
-            if ($dDate >= $wStart && $dDate <= $wEnd) {
+            $isMatch = ($isTahunanStacked && strlen($dDate) === 7)
+                ? ($dDate === $wKey)
+                : ($dDate >= $wStart && $dDate <= $wEnd);
+
+            if ($isMatch) {
                 $dnm = (string)$pr['defect_name'];
                 $weeklyDefectParts[$wKey][$dnm][] = [
                     'code' => $pr['part_code'],

@@ -109,8 +109,58 @@ if (in_array($cUser['role'], ['admin', 'supervisor', 'chief', 'manager', 'supera
     </div>
 </header>
 
+<?php
+$navbarUser = current_user();
+$isNavbarInspector = in_array(strtolower(trim($navbarUser['role'] ?? '')), ['inspektur', 'inspektor', 'operator']);
+$finalCheckPending = false;
+if ($isNavbarInspector) {
+    try {
+        $pdoNav = getDB();
+        if ($pdoNav) {
+            $finalCheckPending = !is_monitoring_phase_completed($pdoNav, (int)$navbarUser['id'], 'final');
+        }
+    } catch (Exception $e) {
+        $finalCheckPending = false;
+    }
+}
+?>
 <script>
 function confirmLogout(logoutUrl) {
+    const isPendingFinal = <?= $finalCheckPending ? 'true' : 'false' ?>;
+
+    if (isPendingFinal) {
+        if (typeof Swal !== 'undefined') {
+            Swal.fire({
+                title: 'Checklist Penutupan Shift',
+                html: 'Anda belum menyelesaikan checklist <b>Tahap Akhir (5S & Kerapihan Workstation)</b>.<br><br>Ingin menyelesaikan checklist penutupan shift sekarang?',
+                icon: 'question',
+                showCancelButton: true,
+                showDenyButton: true,
+                confirmButtonColor: '#2563eb',
+                denyButtonColor: '#e11d48',
+                cancelButtonColor: '#64748b',
+                confirmButtonText: 'Isi Checklist 5S',
+                denyButtonText: 'Tetap Logout',
+                cancelButtonText: 'Batal'
+            }).then(function(result) {
+                if (result.isConfirmed) {
+                    window.location.href = '<?= base_url('modules/monitoring_oqc/logout_check.php') ?>';
+                } else if (result.isDenied) {
+                    window.location.href = logoutUrl;
+                }
+            });
+            return;
+        } else {
+            if (confirm('Anda belum menyelesaikan checklist Tahap Akhir (5S Penutupan Shift).\nKlik OK untuk mengisi checklist 5S terlebih dahulu, atau Cancel untuk tetap keluar.')) {
+                window.location.href = '<?= base_url('modules/monitoring_oqc/logout_check.php') ?>';
+                return;
+            } else {
+                window.location.href = logoutUrl;
+                return;
+            }
+        }
+    }
+
     if (typeof Swal !== 'undefined') {
         Swal.fire({
             title: 'Konfirmasi Logout',

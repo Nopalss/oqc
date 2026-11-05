@@ -1,10 +1,7 @@
 <?php
-$breadcrumbCategory = "MASTER DATA";
-$pageTitle = "Master Data Drawing & Dokumen Mutu";
-$pageSubtitle = "Kelola berkas acuan gambar teknik 2D/3D serta dokumen mutu (PI, Q-Point, PAC, Standar Packing) per Part Code";
-
-require_once __DIR__ . '/../../layouts/header.php';
-require_once __DIR__ . '/../../layouts/sidebar.php';
+require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
@@ -293,6 +290,13 @@ if ($pdo) {
         $totalPages = 1;
     }
 }
+
+$breadcrumbCategory = "MASTER DATA";
+$pageTitle = "Master Data Drawing & Dokumen Mutu";
+$pageSubtitle = "Kelola berkas acuan gambar teknik 2D/3D serta dokumen mutu (PI, Q-Point, PAC, Standar Packing) per Part Code";
+
+require_once __DIR__ . '/../../layouts/header.php';
+require_once __DIR__ . '/../../layouts/sidebar.php';
 ?>
 
 <div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300">

@@ -1,13 +1,13 @@
 <?php
-$breadcrumbCategory = "MASTER DATA";
-$pageTitle = "Upload / Update Drawing (2D & 3D)";
-$pageSubtitle = "Unggah file gambar 2D (PDF) atau 3D (.STP) untuk part pilihan";
-
-require_once __DIR__ . '/../../layouts/header.php';
-require_once __DIR__ . '/../../layouts/sidebar.php';
+require_once __DIR__ . '/../../config/app.php';
+require_once __DIR__ . '/../../config/database.php';
+require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/../../config/document_helper.php';
 
-require_menu_access('master_drawings');
+// Izinkan akses jika pengguna memiliki hak akses menu master_drawings ATAU menu inspection
+if (!can_access('master_drawings') && !can_access('inspection')) {
+    require_menu_access('master_drawings');
+}
 
 $part_id = (int)($_GET['part_id'] ?? 0);
 $part_code = trim((string)($_GET['part_code'] ?? ''));
@@ -187,8 +187,14 @@ function render_uploaded_versions_box($versionsData, $fallbackPath, $partId, $cs
     <?php
     return ob_get_clean();
 }
-?>
 
+$breadcrumbCategory = "MASTER DATA";
+$pageTitle = "Upload / Update Drawing (2D & 3D)";
+$pageSubtitle = "Unggah file gambar 2D (PDF) atau 3D (.STP) untuk part pilihan";
+
+require_once __DIR__ . '/../../layouts/header.php';
+require_once __DIR__ . '/../../layouts/sidebar.php';
+?>
 
 <div id="main-content-wrapper" class="flex-1 md:pl-64 flex flex-col min-h-screen transition-all duration-300">
     

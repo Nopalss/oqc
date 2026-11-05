@@ -19,6 +19,10 @@ require_menu_access('daily_report');
 
 $pdo = getDB();
 
+$currentUser = current_user();
+$userRole = strtolower($currentUser['role'] ?? '');
+$canCancelSession = in_array($userRole, ['supervisor', 'chief', 'admin', 'leader']);
+
 $presetFilter  = sanitize($_GET['preset']     ?? 'hari_ini');
 $search        = sanitize($_GET['search']     ?? '');
 $startDate     = sanitize($_GET['start_date'] ?? '');
@@ -1679,6 +1683,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                         class="hover:bg-blue-700 shadow-xs">
                                                     Setujui Sesi
                                                 </button>
+                                                <?php if ($canCancelSession): ?>
+                                                    <?php 
+                                                        $itemLabel = ($sess['kanban_no'] !== '-' ? 'Kanban #' . $sess['kanban_no'] : 'Part ' . ($sess['part_code'] ?: '-'));
+                                                    ?>
+                                                    <button type="button" onclick="confirmCancelSession(<?= (int)$sess['session_id'] ?>, '<?= htmlspecialchars(addslashes($itemLabel)) ?>')"
+                                                            style="background: transparent; border: none; font-size: 10px; font-weight: 700; color: #e11d48; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; margin-top: 1px; padding: 2px 5px; border-radius: 4px; transition: all 0.15s;"
+                                                            class="hover:bg-rose-50 hover:text-rose-700" title="Batalkan sesi inspeksi dan kembalikan status item & lot">
+                                                        <svg style="width: 10px; height: 10px; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                                        <span>Batal Sesi</span>
+                                                    </button>
+                                                <?php endif; ?>
                                             </div>
                                         <?php endif; ?>
                                     </td>
@@ -2178,6 +2193,6 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         activeTab: '<?= htmlspecialchars($activeTab) ?>'
     };
     </script>
-    <script src="<?= base_url('assets/js/modules/daily_report.js?v=' . APP_VERSION) ?>"></script>
+    <script src="<?= base_url('assets/js/modules/daily_report.js?v=' . (file_exists(__DIR__ . '/../../assets/js/modules/daily_report.js') ? filemtime(__DIR__ . '/../../assets/js/modules/daily_report.js') : APP_VERSION)) ?>"></script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

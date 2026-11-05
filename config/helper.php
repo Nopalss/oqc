@@ -43,7 +43,12 @@ function clean_qty($data) {
  */
 function redirect($path) {
     $target = (strpos($path, 'http://') === 0 || strpos($path, 'https://') === 0) ? $path : base_url($path);
-    header("Location: " . $target);
+    if (!headers_sent()) {
+        header("Location: " . $target);
+        exit;
+    }
+    echo "<script>window.location.replace(" . json_encode($target) . ");</script>";
+    echo "<noscript><meta http-equiv=\"refresh\" content=\"0;url=" . htmlspecialchars($target, ENT_QUOTES, 'UTF-8') . "\"></noscript>";
     exit;
 }
 
@@ -475,6 +480,7 @@ function get_system_menus() {
             'dashboard'       => ['label' => 'Dashboard Laporan', 'desc' => 'Melihat ringkasan metrik dan grafik performa OQC'],
             'defect_analysis' => ['label' => 'Analisis Defect', 'desc' => 'Leaderboard dan tren cacat visual produk'],
             'inspection'      => ['label' => 'Scan Inspeksi', 'desc' => 'Proses scan label dan pencatatan hasil inspeksi'],
+            'monitoring_oqc'  => ['label' => 'Monitoring OQC', 'desc' => 'Monitoring kepatuhan 5S dan SOP kesiapan inspektur'],
             'safety_stock'    => ['label' => 'Safety Stock', 'desc' => 'Monitoring stok barang hasil realisasi inspeksi'],
             'daily_report'    => ['label' => 'Laporan Harian', 'desc' => 'Rekapitulasi laporan inspeksi harian dan export excel']
         ],
@@ -484,6 +490,7 @@ function get_system_menus() {
             'standard_oqc' => ['label' => 'Standard OQC', 'desc' => 'Dokumen SOP, Petunjuk Kerja (WI), dan Prosedur Standar']
         ],
         'Master Data' => [
+            'monitoring_master' => ['label' => 'Master Monitoring OQC', 'desc' => 'Kelola template tahap & checklist 5S inspektur'],
             'master_parts'     => ['label' => 'Master Data Part', 'desc' => 'Pengelolaan data part number (FR-4)'],
             'master_models'    => ['label' => 'Master Data Model', 'desc' => 'Pengelolaan data jenis/tipe model produk'],
             'master_customers' => ['label' => 'Master Data Customer', 'desc' => 'Pengelolaan data pelanggan/tujuan delivery'],

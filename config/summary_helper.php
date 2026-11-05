@@ -50,7 +50,7 @@ if (!function_exists('syncDailySummaryForDate')) {
                 // 1. Fetch all finished inspection sessions for this operational date
                 // Memakai pre-filter index range (sd_min & sd_max) agar tidak full table scan
                 $sqlSess = "SELECT ss.id, ss.started_at, ss.closed_at, ss.inspection_type, ss.sample_size, ss.total_scanned_qty, ss.use_safety_stock_qty, ss.auto_fulfilled_by_session_id, ss.batch_sample_size, ss.status,
-                                   ss.ng_count, ss.part_id, mp.model_id, mp.aql_level,
+                                   ss.ng_count, ss.part_id, ss.reinspection_notes, mp.model_id, mp.aql_level,
                                    COALESCE(NULLIF(TRIM(ki.customer), ''), 'INTERNAL') AS customer_name
                             FROM inspection_sessions ss
                             LEFT JOIN kanban_items ki ON ss.kanban_item_id = ki.id
@@ -203,10 +203,10 @@ if (!function_exists('syncDailySummaryForDate')) {
                             $summaryBuckets[$key]['total_lots']++;
                             $lotSampleSizeSum += (int)($lot['sample_size'] ?? 0);
 
-                            $isNg = ($lot['lot_result'] !== 'passed')
-                                 && (($lot['lot_result'] === 'rejected')
-                                     || in_array($lot['lot_status'], ['ng_found', 'ng_quarantine', 'replaced'])
-                                     || ((int)$lot['active_ng_cnt'] > 0));
+                            // Definisi lot yang mengalami NG / penolakan mutu fisik (Identik 1:1 dengan query modal drilldown)
+                            $isNg = ($lot['lot_result'] === 'rejected')
+                                 || in_array($lot['lot_status'], ['ng_found', 'ng_quarantine', 'replaced', 'action_closed', 'abolished'])
+                                 || ((int)($lot['active_ng_cnt'] ?? 0) > 0);
 
                             $lotIsNgMap[(int)$lot['id']] = $isNg;
 
@@ -217,13 +217,13 @@ if (!function_exists('syncDailySummaryForDate')) {
                             }
 
                             // Hitung Beban Kerja Fisik untuk Putaran Re-Inspeksi (Sortir & Uji Ulang)
+                            // Catatan: Unit rejected_lots TIDAK ditambah di sini agar 1 lot fisik unik tidak terhitung ganda (double-count)
                             $lid = (int)$lot['id'];
                             $reinspectCount = $reinspectByLot[$lid] ?? 0;
 
                             if ($reinspectCount > 0) {
                                 for ($r = 0; $r < $reinspectCount; $r++) {
                                     $summaryBuckets[$key]['total_lots']++;
-                                    $summaryBuckets[$key]['rejected_lots']++;
                                     $lotSampleSizeSum    += (int)($lot['sample_size'] ?? 0);
                                     $reinspectSamplesSum += (int)($lot['sample_size'] ?? 0);
                                 }
@@ -633,21 +633,28 @@ if (!function_exists('getWorkCycleWeeklyBuckets')) {
      *
      * @param int $year
      * @param int $month
+     * @param bool $onlyUntilCurrentWeek Jika true (default), minggu di masa depan pada bulan berjalan tidak akan dibuat.
      * @return array [ 'W1' => ['label' => '...', 'shortLabel' => 'W1', 'start_date' => 'YYYY-MM-DD', 'end_date' => 'YYYY-MM-DD'], ... ]
      */
-    function getWorkCycleWeeklyBuckets(int $year, int $month): array {
+    function getWorkCycleWeeklyBuckets(int $year, int $month, bool $onlyUntilCurrentWeek = true): array {
         $firstDayDt = new DateTime(sprintf('%04d-%02d-01', $year, $month));
         $w1SunStr   = getWorkCycleMonthStartDate($year, $month);
         $curSun     = new DateTime($w1SunStr);
         $wIdx       = 1;
         $targetMonth = $firstDayDt->format('m');
         $buckets    = [];
+        $todayStr   = date('Y-m-d');
+        $isCurrentMonthYear = ($year === (int)date('Y') && $month === (int)date('n'));
 
         while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+            $sStr = $curSun->format('Y-m-d');
+            // Jika bulan yang dipilih adalah bulan berjalan, jangan buat minggu yang tanggal mulainya masih di masa depan
+            if ($onlyUntilCurrentWeek && $isCurrentMonthYear && $sStr > $todayStr) {
+                break;
+            }
+
             $curSat = clone $curSun;
             $curSat->modify('+6 days');
-
-            $sStr = $curSun->format('Y-m-d');
             $eStr = $curSat->format('Y-m-d');
             $sLabel = $curSun->format('d');
             $eLabel = $curSat->format('d');
@@ -1031,12 +1038,19 @@ if (!function_exists('buildDashboardMultiHorizonTrend')) {
         $curSun = clone $w1Sun;
         $wIdx = 1;
         $targetMonth = $firstDayDt->format('m');
+        $todayStr = date('Y-m-d');
+        $isCurrentMonthYear = ($refYear === (int)date('Y') && $refMonth === (int)date('n'));
 
         while ($curSun->format('m') === $targetMonth && $wIdx <= 6) {
+            $sStr = $curSun->format('Y-m-d');
+            // Jika bulan yang dipilih adalah bulan berjalan, jangan tampilkan minggu di masa depan
+            if ($isCurrentMonthYear && $sStr > $todayStr) {
+                break;
+            }
+
             $curSat = clone $curSun;
             $curSat->modify('+6 days');
 
-            $sStr = $curSun->format('Y-m-d');
             $eStr = $curSat->format('Y-m-d');
             $sLabel = $curSun->format('d');
             $eLabel = $curSat->format('d');

@@ -1,6 +1,207 @@
+<?php if ($viewMode === 'safety_stock'): ?>
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <!-- TABEL REKOMENDASI SAFETY STOCK (FIFO)                           -->
+    <!-- ═══════════════════════════════════════════════════════════════ -->
+    <div class="p-0">
+        <!-- Subheader Rekomendasi -->
+        <div class="px-4 py-3 flex items-center justify-between flex-wrap gap-2" style="background: linear-gradient(to right, #f5f3ff, #faf5ff); border-bottom: 1px solid #ede9fe;">
+            <div class="flex items-center gap-2.5">
+                <span class="inline-flex p-2 rounded-lg text-white shadow-xs" style="background-color: #7c3aed;">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                    </svg>
+                </span>
+                <div>
+                    <h2 class="text-xs font-black uppercase tracking-wider flex items-center gap-1.5" style="color: #4c1d95;">
+                        <span>Rekomendasi Pemotongan Safety Stock (FIFO) &ndash; <?= date('d M Y', strtotime($selectedDate)) ?></span>
+                    </h2>
+                    <p class="text-[11px] font-medium mt-0.5" style="color: #6d28d9;">
+                        Daftar order Kanban yang part-nya siap potong dari rak Safety Stock gudang. Diurutkan secara First-In, First-Out (box tertua).
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-[11px] font-bold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-2xs">
+                    Total <b><?= count($safetyStockRecommendations) ?></b> Kanban Siap Dipotong
+                </span>
+                <?php
+                    $backParams = [
+                        'tab'           => 'kanban',
+                        'period'        => $period,
+                        'selected_date' => $selectedDate,
+                        'batch_id'      => $batchFilter,
+                        'scope'         => $scopeFilter,
+                        'order_by'      => $orderFilter,
+                    ];
+                    if (!empty($search)) $backParams['search'] = $search;
+                ?>
+                <a href="?<?= http_build_query($backParams) ?>" 
+                   class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold transition-all shadow-2xs">
+                    <svg class="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                    </svg>
+                    <span>Kembali ke Jadwal Kanban</span>
+                </a>
+            </div>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left text-xs text-slate-700" style="border-collapse: collapse; min-width: 980px;">
+                <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase tracking-wider text-[10px]">
+                    <tr>
+                        <th class="px-3 py-2.5 text-center" style="width: 45px;">No</th>
+                        <th class="px-3 py-2.5" style="width: 210px;">Kanban & Customer</th>
+                        <th class="px-3 py-2.5" style="width: 220px;">Part (Kode & Nama)</th>
+                        <th class="px-3 py-2.5 text-left" style="width: 170px;">Kebutuhan vs Stok SS</th>
+                        <th class="px-3 py-2.5">Rekomendasi Box & Lot Gudang (FIFO)</th>
+                        <th class="px-3 py-2.5 text-center" style="width: 130px;">Aksi Inspeksi</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    <?php if (empty($pagedRecommendations)): ?>
+                        <tr>
+                            <td colspan="6" class="px-4 py-12 text-center text-slate-400">
+                                <div class="flex flex-col items-center justify-center">
+                                    <svg class="w-12 h-12 text-slate-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                                    </svg>
+                                    <span class="font-bold text-slate-600 text-sm">Tidak Ada Rekomendasi Safety Stock</span>
+                                    <span class="text-xs text-slate-400 mt-1 max-w-md">
+                                        Seluruh part pada batch atau tanggal ini belum memiliki stok pengaman yang passed di gudang, atau stok pengaman telah habis dialokasikan.
+                                    </span>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php else: ?>
+                        <?php foreach ($pagedRecommendations as $rIdx => $rec): 
+                            $rowNum = $offset + $rIdx + 1;
+                        ?>
+                            <tr class="hover:bg-violet-50/20 transition-colors">
+                                <td class="px-3 py-3 text-center font-bold text-slate-500 text-xs">
+                                    <?= $rowNum ?>
+                                </td>
+
+                                <!-- Kanban & Customer -->
+                                <td class="px-3 py-3">
+                                    <div class="font-mono font-black text-slate-900 text-xs">
+                                        #<?= htmlspecialchars($rec['kanban_no']) ?>
+                                    </div>
+                                    <div class="text-[11px] text-slate-500 font-medium truncate max-w-[190px]" title="<?= htmlspecialchars($rec['customer']) ?>">
+                                        <?= htmlspecialchars($rec['customer']) ?>
+                                    </div>
+                                    <div class="mt-1 text-[10px] text-slate-400">
+                                        Tgl: <?= !empty($rec['imported_at']) ? date('d/m/Y H:i', strtotime($rec['imported_at'])) : '-' ?>
+                                    </div>
+                                </td>
+
+                                <!-- Part Code & Name -->
+                                <td class="px-3 py-3">
+                                    <span class="font-mono font-extrabold text-blue-700 text-xs block">
+                                        <?= htmlspecialchars($rec['item_code']) ?>
+                                    </span>
+                                    <span class="text-[11px] text-slate-700 font-medium block leading-tight mt-0.5">
+                                        <?= htmlspecialchars($rec['item_name']) ?>
+                                    </span>
+                                </td>
+
+                                <!-- Kebutuhan vs Stok SS -->
+                                <td class="px-3 py-3">
+                                    <div class="text-xs">
+                                        <div class="text-slate-500 text-[10px] font-semibold uppercase">Kebutuhan Order:</div>
+                                        <div class="font-mono font-black text-slate-800 text-xs">
+                                            <?= number_format($rec['needed_qty']) ?> pcs
+                                            <?php if ($rec['passed_qty'] > 0): ?>
+                                                <span class="text-[10px] text-slate-500 font-normal block">(Total: <?= number_format($rec['demand']) ?>, Sudah Passed: <?= number_format($rec['passed_qty']) ?>)</span>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                    <div class="text-xs mt-1.5 pt-1.5 border-t border-slate-100">
+                                        <div class="text-slate-500 text-[10px] font-semibold uppercase">Stok SS Ready:</div>
+                                        <div class="font-mono font-black text-xs" style="color: #4338ca;">
+                                            <?= number_format($rec['ss_total']) ?> pcs
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <?php if ($rec['fulfill_type'] === 'full'): ?>
+                                            <span style="background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px;">
+                                                <span>🟢</span> 100% CUKUP DARI SS
+                                            </span>
+                                        <?php else: ?>
+                                            <span style="background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px;">
+                                                <span>🟡</span> PARSIAL (<?= $rec['fulfill_pct'] ?>%)
+                                            </span>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+
+                                <!-- Rekomendasi Box & Lot Gudang (FIFO) -->
+                                <td class="px-3 py-3">
+                                    <div class="text-[11px] font-bold text-slate-600 mb-1.5 flex items-center justify-between">
+                                        <span>Ambil <b><?= $rec['box_count'] ?> Box</b> (<?= $rec['lot_count'] ?> Lot) urutan FIFO:</span>
+                                    </div>
+                                    <div class="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                        <?php foreach ($rec['boxes'] as $bIdx => $b): ?>
+                                            <div class="p-2 rounded-lg border text-xs flex items-center justify-between flex-wrap gap-1.5" style="background-color: #faf5ff; border-color: #e9d5ff;">
+                                                <div class="flex items-center gap-2">
+                                                    <span class="w-5 h-5 rounded-full flex items-center justify-center font-black text-[10px] text-white flex-shrink-0" style="background-color: #7c3aed;">
+                                                        <?= $bIdx + 1 ?>
+                                                    </span>
+                                                    <div>
+                                                        <div class="font-mono font-bold text-slate-900 flex items-center gap-1.5">
+                                                            <span>Lot: <b><?= htmlspecialchars($b['lot_number']) ?></b></span>
+                                                            <?php if (!empty($b['ref_number']) && $b['ref_number'] !== '-'): ?>
+                                                                <span class="text-slate-400 font-normal">|</span>
+                                                                <span class="text-slate-600 font-semibold text-[11px]">Ref: <?= htmlspecialchars($b['ref_number']) ?></span>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                        <div class="text-[10px] text-slate-500">
+                                                            Masuk: <?= !empty($b['date']) ? date('d/m/Y H:i', strtotime($b['date'])) : '-' ?>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="text-right">
+                                                    <span class="font-mono font-black text-sm" style="color: #6d28d9;">
+                                                        <?= number_format($b['take_qty']) ?> <span class="text-[10px] font-semibold text-slate-600">pcs</span>
+                                                    </span>
+                                                    <?php if ($b['is_split']): ?>
+                                                        <div class="text-[9.5px] font-bold text-amber-700 bg-amber-100/80 px-1.5 py-0.2 rounded border border-amber-300/80 inline-block">
+                                                            Split Box (Isi: <?= number_format($b['box_qty']) ?>)
+                                                        </div>
+                                                    <?php else: ?>
+                                                        <div class="text-[9.5px] font-bold text-emerald-700 bg-emerald-100/80 px-1.5 py-0.2 rounded border border-emerald-300/80 inline-block">
+                                                            Box Utuh
+                                                        </div>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </td>
+
+                                <!-- Aksi Inspeksi -->
+                                <td class="px-3 py-3 text-center whitespace-nowrap">
+                                    <a href="<?= base_url('modules/inspection/session.php?kanban_item_id=' . $rec['item_id']) ?>" 
+                                       class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg font-bold text-xs text-white shadow-xs hover:opacity-95 transition-all"
+                                       style="background-color: #2563eb;"
+                                       title="Buka workbench inspeksi untuk Kanban ini">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg>
+                                        <span>Mulai Inspeksi</span>
+                                    </a>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+<?php else: ?>
 <!-- ═══════════════════════════════════════════════════════════════ -->
-                <!-- TABEL JADWAL KANBAN DELIVERY                                    -->
-                <!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TABEL JADWAL KANBAN DELIVERY                                    -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
                 <div class="w-full">
                     <table class="w-full text-left text-xs text-slate-700 table-fixed" style="border-collapse: collapse;">
                         <colgroup>
@@ -534,6 +735,20 @@
                                                     </span>
                                                 </div>
                                             <?php endif; ?>
+                                            <?php 
+                                                $pCodeUpper = strtoupper(trim($k['item_code']));
+                                                $ssAvailQty = $partSafetyStockMap[$pCodeUpper] ?? 0;
+                                            ?>
+                                            <?php if ($ssAvailQty > 0 && !$isCompleted && $remainingQuotaToClose > 0): ?>
+                                                <div class="mt-1">
+                                                    <a href="?tab=kanban&view=safety_stock&selected_date=<?= urlencode($selectedDate) ?>&batch_id=<?= urlencode($batchFilter) ?>" 
+                                                       class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors shadow-2xs" 
+                                                       style="background-color: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe;"
+                                                       title="Part ini memiliki stok pengaman ready di rak gudang (Klik untuk lihat rekomendasi FIFO)">
+                                                        <span>📦 Ready SS: <?= number_format($ssAvailQty) ?> pcs</span>
+                                                    </a>
+                                                </div>
+                                            <?php endif; ?>
                                         </td>
 
                                         <!-- Jadwal & ETA -->
@@ -953,6 +1168,7 @@
                         </tbody>
                     </table>
                 </div>
+<?php endif; // End viewMode check ?>
 
             <!-- ═══════════════════════════════════════════════════════════════ -->
             <!-- PAGINATION BAR                                                -->
@@ -960,7 +1176,7 @@
             <?php if ($totalPages > 1): ?>
                 <div class="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600 flex-wrap gap-2">
                     <div>
-                        Menampilkan <b><?= min($totalItems, $offset + 1) ?></b> s/d <b><?= min($totalItems, $offset + ($activeTab === 'safety_stock' ? count($ssKanbans) : ($activeTab === 'my_inspections' ? count($mySessions) : ($activeTab === 'my_lots' ? count($myLots) : count($kanbans))))) ?></b> dari total <b><?= $totalItems ?></b> <?= ($activeTab === 'safety_stock') ? 'Item Safety Stock' : (($activeTab === 'my_inspections') ? 'Sesi Riwayat Saya' : (($activeTab === 'my_lots') ? 'Lot / Box Saya' : 'Kanban')) ?>
+                        Menampilkan <b><?= min($totalItems, $offset + 1) ?></b> s/d <b><?= min($totalItems, $offset + ($viewMode === 'safety_stock' ? count($pagedRecommendations) : ($activeTab === 'safety_stock' ? count($ssKanbans) : ($activeTab === 'my_inspections' ? count($mySessions) : ($activeTab === 'my_lots' ? count($myLots) : count($kanbans)))))) ?></b> dari total <b><?= $totalItems ?></b> <?= ($viewMode === 'safety_stock') ? 'Rekomendasi Safety Stock' : (($activeTab === 'safety_stock') ? 'Item Safety Stock' : (($activeTab === 'my_inspections') ? 'Sesi Riwayat Saya' : (($activeTab === 'my_lots') ? 'Lot / Box Saya' : 'Kanban'))) ?>
                     </div>
                     <div class="inline-flex space-x-1">
                         <?php 

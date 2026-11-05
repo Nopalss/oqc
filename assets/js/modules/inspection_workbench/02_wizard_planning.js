@@ -271,7 +271,7 @@ function resetScanModalState() {
 
     // 3. Reset form input fields
     if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = '';
-    if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '';
+    if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '064';
     if (document.getElementById('scan-qty-box')) document.getElementById('scan-qty-box').value = '';
     if (document.getElementById('scan-ref-number')) document.getElementById('scan-ref-number').value = '';
     if (document.getElementById('scan-qr-raw')) document.getElementById('scan-qr-raw').value = '';
@@ -1642,7 +1642,7 @@ function startDirectSafetyStockScan(presetPartCode, presetLotNum, presetRefNum) 
     document.getElementById('selected-plan-qty').textContent = 'Multi-Lot (Akumulasi Stok Bebas)';
 
     document.getElementById('scan-part-code').value = presetPartCode || '';
-    document.getElementById('scan-lot-number').value = presetLotNum || '';
+    document.getElementById('scan-lot-number').value = presetLotNum || '064';
     document.getElementById('scan-label-qty').value = '';
     document.getElementById('scan-ref-number').value = presetRefNum || '';
 
@@ -2114,6 +2114,7 @@ function loadWorkbenchSessionData(sessionId, onLoadedCallback) {
             var s = data.session;
             var ngRecords = data.ng_records || [];
             var custName = s.customer || 'PT. Indonesia Epson Industry';
+            if (typeof updateWorkbenchLiveBadge === 'function') { updateWorkbenchLiveBadge(s); }
 
 
 

@@ -33,8 +33,14 @@ $totalPages = 1;
 
 // Specific parameter for 'today' mode: batch selection filter ('all' or specific batch id)
 $selectedBatch = sanitize($_GET['batch_id'] ?? 'all');
-$todayBatches = [];
-$todayItems = [];
+$viewMode      = sanitize($_GET['view'] ?? '');
+$todayBatches  = [];
+$todayItems    = [];
+$safetyStockRecommendations = [];
+$partSafetyStockMap         = [];
+$pagedRecommendations      = [];
+$totalSsItems               = 0;
+$totalSsPages               = 1;
 
 // Fetch Customers List for Filter Dropdown
 $customersList = [];
@@ -258,6 +264,195 @@ if ($pdo) {
             $stmtItems->bindValue(':offset', (int)$offset, PDO::PARAM_INT);
             $stmtItems->execute();
             $todayItems = $stmtItems->fetchAll(PDO::FETCH_ASSOC);
+
+            // =====================================================================
+            // 2C. FETCH SAFETY STOCK AVAILABLE LOTS & KALKULASI FIFO UNTUK KANBAN
+            // =====================================================================
+            try {
+                // Ambil seluruh box/lot safety stock yang berstatus passed dan belum terpakai
+                $stSsLots = $pdo->query("
+                    SELECT 
+                        isl.id AS lot_id,
+                        isl.inspection_session_id,
+                        isl.lot_number,
+                        isl.ref_number,
+                        COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty,
+                        ss.started_at,
+                        isl.created_at,
+                        UPPER(TRIM(COALESCE(did.part_code, ki_ss.item_code, ''))) AS part_code
+                    FROM inspection_session_lots isl
+                    JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+                    LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                    LEFT JOIN kanban_items ki_ss ON ki_ss.id = ss.kanban_item_id
+                    WHERE ss.inspection_type = 'safety_stock'
+                      AND ss.status = 'passed'
+                      AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
+                      AND (isl.lot_status IS NULL OR isl.lot_status != 'action_closed')
+                      AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
+                    ORDER BY COALESCE(ss.started_at, isl.created_at) ASC, isl.id ASC
+                ");
+                $allSsLots = $stSsLots->fetchAll(PDO::FETCH_ASSOC);
+
+                $ssLotsPool = [];
+                foreach ($allSsLots as $sl) {
+                    $pCode = $sl['part_code'];
+                    if (empty($pCode)) continue;
+                    if (!isset($ssLotsPool[$pCode])) {
+                        $ssLotsPool[$pCode] = [];
+                        $partSafetyStockMap[$pCode] = 0;
+                    }
+                    $ssLotsPool[$pCode][] = [
+                        'lot_id'                => $sl['lot_id'],
+                        'inspection_session_id' => $sl['inspection_session_id'],
+                        'lot_number'            => $sl['lot_number'],
+                        'ref_number'            => $sl['ref_number'],
+                        'original_qty'          => (int)$sl['qty'],
+                        'remaining_qty'         => (int)$sl['qty'],
+                        'started_at'            => $sl['started_at'],
+                        'created_at'            => $sl['created_at'],
+                    ];
+                    $partSafetyStockMap[$pCode] += (int)$sl['qty'];
+                }
+
+                // Ambil seluruh item kanban kandidat untuk kalkulasi safety stock
+                $ssTargetWhere = [
+                    "ki.status != 'completed'",
+                    "b.plan_type = 'kanban'",
+                    "DATE(b.imported_at) = CURDATE()",
+                    "(ki.plan_type IS NULL OR ki.plan_type = 'kanban')",
+                    "(ki.check_type IS NULL OR ki.check_type != 'Safety Stock')",
+                    "(ki.kanban_no IS NULL OR ki.kanban_no NOT LIKE 'SS-%')"
+                ];
+                $ssTargetParams = [];
+                if (!empty($selectedCustomer)) {
+                    $ssTargetWhere[] = "ki.customer = :ss_cust";
+                    $ssTargetParams[':ss_cust'] = $selectedCustomer;
+                }
+                if ($selectedBatch !== 'all') {
+                    $ssTargetWhere[] = "ki.batch_id = :ss_bid";
+                    $ssTargetParams[':ss_bid'] = (int)$selectedBatch;
+                }
+                $ssTargetWhereStr = implode(' AND ', $ssTargetWhere);
+
+                $stmtSsItems = $pdo->prepare("
+                    SELECT ki.*, 
+                           b.document_number, b.vendor, b.imported_at, b.import_method,
+                           mp.part_name as master_part_name,
+                           COALESCE(
+                               (SELECT SUM(
+                                   CASE 
+                                       WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                           COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                     FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0) - COALESCE(s2.excess_qty, 0)
+                                       WHEN s2.status = 'passed' THEN (s2.total_scanned_qty - COALESCE(s2.excess_qty, 0))
+                                       ELSE 0
+                                   END
+                               )
+                               FROM inspection_sessions s2
+                               WHERE s2.kanban_item_id = ki.id), 0
+                           ) AS passed_qty
+                    FROM kanban_items ki
+                    JOIN kanban_batches b ON b.id = ki.batch_id
+                    LEFT JOIN master_parts mp ON mp.part_code = ki.item_code
+                    WHERE {$ssTargetWhereStr}
+                    ORDER BY ki.id ASC
+                ");
+                $stmtSsItems->execute($ssTargetParams);
+                $allSsKanbanCandidates = $stmtSsItems->fetchAll(PDO::FETCH_ASSOC);
+
+                // Dynamic FIFO Depletion Pool Allocation:
+                // Setiap box yang dialokasikan ke suatu Kanban langsung dipotong dari pool sehingga
+                // Kanban berikutnya tidak akan pernah memanggil lot/box yang sama jika sudah habis!
+                foreach ($allSsKanbanCandidates as $ck) {
+                    $pCode = strtoupper(trim($ck['item_code']));
+                    if (empty($ssLotsPool[$pCode])) continue;
+
+                    // Hitung sisa stok di pool untuk part ini
+                    $currentPool = &$ssLotsPool[$pCode];
+                    $poolRemainingQty = 0;
+                    foreach ($currentPool as $pItem) {
+                        $poolRemainingQty += $pItem['remaining_qty'];
+                    }
+                    if ($poolRemainingQty <= 0) {
+                        continue; // Stok Safety Stock part ini sudah habis terpakai Kanban sebelumnya
+                    }
+
+                    $demand = (int)$ck['qty'];
+                    $passed = (int)$ck['passed_qty'];
+                    $needed = max(0, $demand - $passed);
+
+                    // Jika Kanban sudah selesai (kuota passed >= demand) atau status completed, lewati (jangan tawarkan SS)
+                    if ($needed <= 0 || ($ck['status'] ?? '') === 'completed') {
+                        continue;
+                    }
+
+                    $targetCalc = $needed;
+
+                    $remDemand = $targetCalc;
+                    $allocatedBoxes = [];
+                    $uniqueLotNumbers = [];
+                    $totalAllocatedThisKanban = 0;
+
+                    foreach ($currentPool as &$l) {
+                        if ($remDemand <= 0) break;
+                        if ($l['remaining_qty'] <= 0) continue;
+
+                        $take = min($l['remaining_qty'], $remDemand);
+                        $isSplit = ($take < $l['remaining_qty']) || ($l['remaining_qty'] < $l['original_qty']);
+
+                        $uniqueLotNumbers[$l['lot_number']] = true;
+                        $allocatedBoxes[] = [
+                            'lot_number' => $l['lot_number'],
+                            'ref_number' => $l['ref_number'],
+                            'take_qty'   => $take,
+                            'box_qty'    => $l['original_qty'],
+                            'is_split'   => ($take < $l['original_qty']),
+                            'date'       => $l['started_at'] ?: $l['created_at']
+                        ];
+
+                        $l['remaining_qty'] -= $take;
+                        $remDemand -= $take;
+                        $totalAllocatedThisKanban += $take;
+                    }
+                    unset($l); // putuskan referensi loop
+
+                    if (!empty($allocatedBoxes)) {
+                        $fulfillType = ($totalAllocatedThisKanban >= $targetCalc) ? 'full' : 'partial';
+                        $fulfillPct  = ($targetCalc > 0) ? min(100, round(($totalAllocatedThisKanban / $targetCalc) * 100)) : 0;
+
+                        $safetyStockRecommendations[] = [
+                            'item_id'      => $ck['id'],
+                            'kanban_no'    => $ck['kanban_no'],
+                            'customer'     => $ck['customer'] ?? 'PT. Indonesia Epson Industry',
+                            'item_code'    => $pCode,
+                            'item_name'    => !empty($ck['item_description']) ? $ck['item_description'] : (!empty($ck['master_part_name']) ? $ck['master_part_name'] : '-'),
+                            'demand'       => $demand,
+                            'passed_qty'   => $passed,
+                            'needed_qty'   => $needed,
+                            'status'       => $ck['status'] ?? 'uninspected',
+                            'imported_at'  => $ck['imported_at'],
+                            'ss_total'     => $totalAllocatedThisKanban,
+                            'fulfill_type' => $fulfillType,
+                            'fulfill_pct'  => $fulfillPct,
+                            'box_count'    => count($allocatedBoxes),
+                            'lot_count'    => count($uniqueLotNumbers),
+                            'boxes'        => $allocatedBoxes
+                        ];
+                    }
+                }
+
+                $totalSsItems = count($safetyStockRecommendations);
+                $totalSsPages = max(1, ceil($totalSsItems / $limit));
+                if ($viewMode === 'safety_stock') {
+                    $totalItems = $totalSsItems;
+                    $totalPages = $totalSsPages;
+                    if ($page > $totalPages) $page = $totalPages;
+                    $offset = ($page - 1) * $limit;
+                    $pagedRecommendations = array_slice($safetyStockRecommendations, $offset, $limit);
+                }
+            } catch (Exception $eSs) {
+                // Silently fallback if error
+            }
 
         } else {
             // =====================================================================
@@ -549,28 +744,78 @@ $monthsList = [
                     <?php else: ?>
                         <!-- Pill Tiap Batch -->
                         <?php foreach ($todayBatches as $tb): 
-                            $isActiveBatch = ((string)$selectedBatch === (string)$tb['id']);
+                            $isActiveBatch = ($viewMode !== 'safety_stock' && (string)$selectedBatch === (string)$tb['id']);
                             $timeStr = date('H:i', strtotime($tb['imported_at']));
                             $cCount = (int)$tb['completed_count'];
                             $iCount = (int)$tb['item_count'];
+                            $isBatchCompleted = ($iCount > 0 && $cCount >= $iCount);
                             $batchLabel = 'Batch ' . $batchNum++ . ' (' . $timeStr . ')';
+
+                            if ($isActiveBatch) {
+                                $btnStyle = 'background-color: #2563eb; color: #ffffff; border: 1px solid #1d4ed8; box-shadow: 0 2px 6px rgba(37,99,235,0.3);';
+                                $badgeStyle = 'background-color: rgba(255,255,255,0.22); color: #ffffff; border: 1px solid rgba(255,255,255,0.35);';
+                            } else {
+                                $btnStyle = 'background-color: #f8fafc; color: #334155; border: 1px solid #cbd5e1;';
+                                if ($isBatchCompleted) {
+                                    $badgeStyle = 'background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0;';
+                                } else {
+                                    $badgeStyle = 'background-color: #ffffff; color: #334155; border: 1px solid #e2e8f0;';
+                                }
+                            }
                         ?>
                             <a href="<?= base_url('modules/kanban/index.php?period=today&batch_id=' . $tb['id'] . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '') . ($limit != 50 ? '&limit=' . $limit : '')) ?>"
-                               class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all <?= $isActiveBatch ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200/80' ?>">
+                               class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                               style="<?= $btnStyle ?>">
                                 <span><?= htmlspecialchars($batchLabel) ?></span>
-                                <span class="px-1.5 py-0.5 rounded text-[10px] font-black <?= $isActiveBatch ? 'bg-white/20 text-white' : 'bg-white text-slate-800 border border-slate-200' ?>">
+                                <span class="px-2 py-0.5 rounded text-[10px] font-extrabold" style="<?= $badgeStyle ?>">
                                     <?= $cCount ?>/<?= $iCount ?> Selesai
                                 </span>
                             </a>
                         <?php endforeach; ?>
 
                         <!-- Pill Semua Batch Tanggal Ini -->
-                        <?php $isAllActive = ($selectedBatch === 'all'); ?>
+                        <?php 
+                            $isAllActive = ($viewMode !== 'safety_stock' && $selectedBatch === 'all'); 
+                            if ($isAllActive) {
+                                $allBtnStyle = 'background-color: #1d4ed8; color: #ffffff; border: 1px solid #1e40af; box-shadow: 0 2px 6px rgba(29,78,216,0.35);';
+                                $allBadgeStyle = 'background-color: rgba(255,255,255,0.22); color: #ffffff; border: 1px solid rgba(255,255,255,0.35);';
+                            } else {
+                                $allBtnStyle = 'background-color: #f8fafc; color: #334155; border: 1px solid #cbd5e1;';
+                                $allBadgeStyle = 'background-color: #ffffff; color: #334155; border: 1px solid #e2e8f0;';
+                            }
+                        ?>
                         <a href="<?= base_url('modules/kanban/index.php?period=today&batch_id=all' . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '') . ($limit != 50 ? '&limit=' . $limit : '')) ?>"
-                           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all <?= $isAllActive ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200/80' ?>">
+                           class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                           style="<?= $allBtnStyle ?>">
                             <span>Semua Batch Tanggal Ini</span>
-                            <span class="px-1.5 py-0.5 rounded text-[10px] font-black <?= $isAllActive ? 'bg-white/20 text-white' : 'bg-white text-slate-800 border border-slate-200' ?>">
+                            <span class="px-2 py-0.5 rounded text-[10px] font-extrabold" style="<?= $allBadgeStyle ?>">
                                 <?= $totalTodayParts ?> Part
+                            </span>
+                        </a>
+
+                        <!-- Pill Rekomendasi Safety Stock (FIFO) -->
+                        <?php 
+                            $isSsActive = ($viewMode === 'safety_stock'); 
+                            if ($isSsActive) {
+                                $ssBtnStyle = 'background-color: #7c3aed; color: #ffffff; border: 1px solid #6d28d9; box-shadow: 0 2px 6px rgba(124,58,237,0.35);';
+                                $ssBadgeStyle = 'background-color: rgba(255,255,255,0.25); color: #ffffff; border: 1px solid rgba(255,255,255,0.4);';
+                                $ssIconColor = '#ffffff';
+                            } else {
+                                $ssBtnStyle = 'background-color: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe;';
+                                $ssBadgeStyle = 'background-color: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd;';
+                                $ssIconColor = '#7c3aed';
+                            }
+                        ?>
+                        <a href="<?= base_url('modules/kanban/index.php?period=today&view=safety_stock' . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '') . ($selectedBatch !== 'all' ? '&batch_id=' . urlencode($selectedBatch) : '') . ($limit != 50 ? '&limit=' . $limit : '')) ?>"
+                           class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                           style="<?= $ssBtnStyle ?>"
+                           title="Lihat daftar Kanban yang bisa dipotong menggunakan Safety Stock di gudang (urutan FIFO)">
+                            <svg class="w-3.5 h-3.5" style="color: <?= $ssIconColor ?>;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                            </svg>
+                            <span>Rekomendasi Safety Stock (FIFO)</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-black" style="<?= $ssBadgeStyle ?>">
+                                <?= count($safetyStockRecommendations) ?> Kanban Ready
                             </span>
                         </a>
                     <?php endif; ?>
@@ -640,7 +885,195 @@ $monthsList = [
                 }
             </style>
 
-            <div class="card p-0 overflow-hidden bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+            <?php if ($viewMode === 'safety_stock'): ?>
+                <!-- ===================================================================== -->
+                <!-- TABEL REKOMENDASI SAFETY STOCK (FIFO)                                 -->
+                <!-- ===================================================================== -->
+                <div class="card p-0 overflow-hidden bg-white rounded-xl shadow-2xs" style="border: 1px solid #c7d2fe;">
+                    <div class="px-4 py-3.5 flex items-center justify-between flex-wrap gap-2" style="background: linear-gradient(to right, #eef2ff, #f8fafc); border-bottom: 1px solid #e0e7ff;">
+                        <div class="flex items-center gap-2.5">
+                            <span class="inline-flex p-2 rounded-lg text-white shadow-xs" style="background-color: #4f46e5;">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                                </svg>
+                            </span>
+                            <div>
+                                <h2 class="text-xs font-black uppercase tracking-wider flex items-center gap-1.5" style="color: #1e1b4b;">
+                                    <span>Rekomendasi Safety Stock (FIFO) &ndash; <?= date('d M Y') ?></span>
+                                </h2>
+                                <p class="text-[11px] font-medium mt-0.5" style="color: #4338ca;">
+                                    Daftar order Kanban yang part-nya tersedia di rak stok pengaman gudang. Box diurutkan secara First-In, First-Out (tanggal masuk tertua).
+                                </p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-[11px] font-bold text-slate-600 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-2xs">
+                                Menampilkan <b><?= count($pagedRecommendations) ?></b> dari <b><?= number_format($totalSsItems) ?></b> Kanban Siap Pakai
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-xs text-slate-700" style="border-collapse: collapse; min-width: 980px;">
+                            <thead class="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase tracking-wider text-[10px]">
+                                <tr>
+                                    <th class="text-center px-2 py-3" style="width: 45px;">No</th>
+                                    <th class="px-3 py-3" style="width: 170px;">Kanban & Customer</th>
+                                    <th class="px-3 py-3" style="width: 200px;">Part (Kode & Nama)</th>
+                                    <th class="px-3 py-3" style="width: 170px;">Kebutuhan vs Stok Rak</th>
+                                    <th class="px-3 py-3">Rekomendasi Box Fisik yang Harus Diambil (Urut FIFO)</th>
+                                    <th class="px-3 py-3 text-center" style="width: 120px;">Status Kanban</th>
+                                    <th class="px-3 py-3 text-right" style="width: 70px;">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                <?php if (empty($pagedRecommendations)): ?>
+                                    <tr>
+                                        <td colspan="7" class="px-4 py-12 text-center text-slate-400">
+                                            <div class="flex flex-col items-center justify-center">
+                                                <svg class="w-10 h-10 text-slate-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                                                </svg>
+                                                <span class="font-bold text-slate-600 text-sm">Tidak Ada Kanban yang Memiliki Safety Stock</span>
+                                                <span class="text-xs text-slate-400 mt-1">Seluruh part pada batch atau tanggal ini belum memiliki stok pengaman passed di gudang.</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php else: ?>
+                                    <?php foreach ($pagedRecommendations as $idx => $rec): 
+                                        $rNum = $offset + $idx + 1;
+                                    ?>
+                                        <tr class="hover:bg-slate-50/70 transition-colors" style="vertical-align: top;">
+                                            <td class="text-center px-2 py-3 font-semibold text-slate-400 font-mono text-xs">
+                                                <?= $rNum ?>
+                                            </td>
+                                            
+                                            <!-- Kanban & Customer -->
+                                            <td class="px-3 py-3">
+                                                <div class="font-mono font-black text-slate-900 text-xs">
+                                                    #<?= htmlspecialchars($rec['kanban_no']) ?>
+                                                </div>
+                                                <div class="text-[11px] text-slate-500 font-medium truncate max-w-[160px]" title="<?= htmlspecialchars($rec['customer']) ?>">
+                                                    <?= htmlspecialchars($rec['customer']) ?>
+                                                </div>
+                                                <?php if (!empty($rec['imported_at'])): ?>
+                                                    <div class="text-[10px] text-slate-400 font-semibold mt-0.5">
+                                                        Import: <?= date('H:i', strtotime($rec['imported_at'])) ?> WIB
+                                                    </div>
+                                                <?php endif; ?>
+                                            </td>
+
+                                            <!-- Part -->
+                                            <td class="px-3 py-3">
+                                                <span class="font-mono font-extrabold text-blue-700 text-xs block">
+                                                    <?= htmlspecialchars($rec['item_code']) ?>
+                                                </span>
+                                                <span class="text-[11px] text-slate-700 font-semibold block leading-tight mt-0.5">
+                                                    <?= htmlspecialchars($rec['item_name']) ?>
+                                                </span>
+                                            </td>
+
+                                            <!-- Kebutuhan vs Stok SS -->
+                                            <td class="px-3 py-3">
+                                                <div class="text-xs">
+                                                    <div class="text-slate-500 text-[10px] font-semibold uppercase">Kebutuhan Order:</div>
+                                                    <div class="font-mono font-black text-slate-800 text-xs">
+                                                        <?= number_format($rec['needed_qty']) ?> pcs
+                                                        <?php if ($rec['passed_qty'] > 0): ?>
+                                                            <span class="text-[10px] text-slate-500 font-normal block">(Total: <?= number_format($rec['demand']) ?>, Sudah Passed: <?= number_format($rec['passed_qty']) ?>)</span>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                </div>
+                                                <div class="text-xs mt-1.5 pt-1.5 border-t border-slate-100">
+                                                    <div class="text-slate-500 text-[10px] font-semibold uppercase">Stok SS Ready:</div>
+                                                    <div class="font-mono font-black text-xs" style="color: #4338ca;">
+                                                        <?= number_format($rec['ss_total']) ?> pcs
+                                                    </div>
+                                                </div>
+                                                <div class="mt-2">
+                                                    <?php if ($rec['fulfill_type'] === 'full'): ?>
+                                                        <span style="background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px;">
+                                                            <span>🟢</span> 100% CUKUP DARI SS
+                                                        </span>
+                                                    <?php else: ?>
+                                                        <span style="background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px;">
+                                                            <span>🟡</span> PARSIAL (<?= $rec['fulfill_pct'] ?>%)
+                                                        </span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </td>
+
+                                            <!-- Rekomendasi Box Fisik FIFO -->
+                                            <td class="px-3 py-3">
+                                                <div style="font-size: 11px; font-weight: 800; color: #334155; margin-bottom: 6px;">
+                                                    Ambil <b><?= $rec['box_count'] ?> Box Fisik</b> (dari <?= $rec['lot_count'] ?> Lot Berbeda):
+                                                </div>
+                                                <div class="space-y-1.5">
+                                                    <?php foreach ($rec['boxes'] as $bIdx => $bx): ?>
+                                                        <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-left: 3px solid #4f46e5; border-radius: 6px; padding: 6px 10px; font-size: 11px;">
+                                                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;">
+                                                                <span style="font-weight: 800; color: #1e293b;">
+                                                                    <span style="background-color: #4f46e5; color: #ffffff; padding: 1px 5px; border-radius: 4px; font-size: 9px; font-weight: 900; margin-right: 4px;">Box #<?= $bIdx + 1 ?></span>
+                                                                    Lot: <span style="font-family: monospace; color: #0f172a;"><?= htmlspecialchars($bx['lot_number']) ?></span>
+                                                                </span>
+                                                                <span style="font-weight: 800; <?= $bx['is_split'] ? 'color: #d97706;' : 'color: #16a34a;' ?>">
+                                                                    <?= $bx['is_split'] ? '✂️ Ambil ' . number_format($bx['take_qty']) . ' dari ' . number_format($bx['box_qty']) . ' pcs' : '📦 Ambil ' . number_format($bx['take_qty']) . ' pcs (Utuh)' ?>
+                                                                </span>
+                                                            </div>
+                                                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 3px; font-size: 10px; color: #64748b;">
+                                                                <span>Ref Barcode: <b style="font-family: monospace; color: #334155;"><?= htmlspecialchars($bx['ref_number']) ?></b></span>
+                                                                <span>Masuk SS: <b><?= date('d M Y H:i', strtotime($bx['date'])) ?></b></span>
+                                                            </div>
+                                                        </div>
+                                                    <?php endforeach; ?>
+                                                </div>
+                                            </td>
+
+                                            <!-- Status Kanban -->
+                                            <td class="px-3 py-3 text-center whitespace-nowrap">
+                                                <?php if ($rec['status'] === 'completed'): ?>
+                                                    <span style="background-color: #16a34a; color: #ffffff; font-weight: 800; font-size: 10px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3px;">
+                                                        Selesai
+                                                    </span>
+                                                <?php elseif ($rec['status'] === 'in_progress'): ?>
+                                                    <span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3px;">
+                                                        Sedang Dikerjakan
+                                                    </span>
+                                                <?php elseif ($rec['status'] === 'partial'): ?>
+                                                    <span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3px;">
+                                                        Parsial
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; font-weight: 800; font-size: 10px; padding: 3px 9px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3px;">
+                                                        Belum Mulai
+                                                    </span>
+                                                <?php endif; ?>
+                                            </td>
+
+                                            <!-- Aksi -->
+                                            <td class="px-3 py-3 text-right whitespace-nowrap">
+                                                <div class="inline-flex items-center justify-end gap-1">
+                                                    <a href="<?= base_url('modules/kanban/edit.php?id=' . $rec['item_id']) ?>" 
+                                                       class="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-colors" title="Edit Data Kanban">
+                                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                                                        </svg>
+                                                    </a>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination Footer -->
+                    <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
+                </div>
+            <?php else: ?>
+                <!-- TABEL BREAKDOWN ITEM KANBAN HARI INI (GAYA WORKBOARD INSPEKSI) -->
+                <div class="card p-0 overflow-hidden bg-white border border-slate-200/80 rounded-xl shadow-2xs">
                 <div class="px-4 py-3 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2">
                     <div class="flex items-center gap-2">
                         <span class="inline-flex p-1 rounded-md bg-blue-100 text-blue-700">
@@ -774,6 +1207,20 @@ $monthsList = [
                                                     <span class="px-1.5 py-0.2 rounded text-[8.5px] font-bold bg-amber-50 text-amber-800 border border-amber-200 inline-block leading-tight">
                                                         100% Cek
                                                     </span>
+                                                </div>
+                                            <?php endif; ?>
+                                            <?php 
+                                                $pCodeUpper = strtoupper(trim($it['item_code']));
+                                                $ssAvailQty = $partSafetyStockMap[$pCodeUpper] ?? 0;
+                                            ?>
+                                            <?php if ($ssAvailQty > 0 && !$isCompleted): ?>
+                                                <div class="mt-1">
+                                                    <a href="<?= base_url('modules/kanban/index.php?period=today&view=safety_stock' . (!empty($selectedCustomer) ? '&customer=' . urlencode($selectedCustomer) : '')) ?>" 
+                                                       class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors shadow-2xs" 
+                                                       style="background-color: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe;"
+                                                       title="Part ini memiliki stok pengaman ready di rak gudang (Klik untuk lihat rekomendasi FIFO)">
+                                                        <span>📦 Ready SS: <?= number_format($ssAvailQty) ?> pcs</span>
+                                                    </a>
                                                 </div>
                                             <?php endif; ?>
                                         </td>
@@ -911,6 +1358,7 @@ $monthsList = [
                 <!-- Pagination Footer -->
                 <?= render_pagination($page, $totalPages, $totalItems, $limit) ?>
             </div>
+            <?php endif; ?>
 
         <?php else: ?>
             <!-- ===================================================================== -->

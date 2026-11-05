@@ -97,7 +97,7 @@ if ($filterType === 'all_years') {
     $presetFilter = 'month_year';
     $filterTitleDesc = "Bulan " . ($monthNames[$selectedMonth] ?? $selectedMonth) . " " . $selectedYear . " (Siklus: " . date('d M', strtotime($startDate)) . " – " . date('d M Y', strtotime($endDate)) . ")";
     $trendSubtext = 'per tanggal (' . ($monthNames[$selectedMonth] ?? $selectedMonth) . ' ' . $selectedYear . ')';
-} elseif ($filterType === 'custom' || (!empty($_GET['start_date']) && !empty($_GET['end_date']))) {
+} elseif ($filterType === 'custom' || (empty($_GET['preset']) && empty($filterType) && !empty($_GET['start_date']) && !empty($_GET['end_date']))) {
     $startDate    = sanitize($_GET['start_date'] ?? date('Y-m-01'));
     $endDate      = sanitize($_GET['end_date'] ?? date('Y-m-d'));
     $presetFilter = 'custom';
@@ -593,20 +593,101 @@ if ($pdo) {
             $grandTotSample += (int)($trendMap[$dk]['sample'] ?? 0);
         }
 
-        // ── Akumulasi Data Mingguan untuk Grafik Batang (Stacked Weekly W1-W4) ──
-        $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
+        // ── Akumulasi Data untuk Grafik Batang Stacked (Bulanan saat filter Tahunan, Mingguan W1-W5 saat Bulanan) ──
+        $isTahunanStacked = ($presetFilter === 'tahunan');
+        $weeklyBucketsDef = [];
+
+        if ($isTahunanStacked) {
+            // Mode Tahunan: 6 Bulan ke Belakang dari bulan berjalan (Sunday Anchor)
+            $mNamesShort = [
+                1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr', 5 => 'Mei', 6 => 'Jun',
+                7 => 'Jul', 8 => 'Agu', 9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+            ];
+            $curMonthKey = sprintf('%04d-%02d', $selectedYear, $selectedMonth);
+            $currentDateObj = new DateTime(sprintf('%04d-%02d-01', $selectedYear, $selectedMonth));
+            $candidateMonths = [];
+
+            for ($i = 5; $i >= 0; $i--) {
+                $cursor = clone $currentDateObj;
+                if ($i > 0) {
+                    $cursor->modify("-{$i} months");
+                }
+                $cYear  = (int)$cursor->format('Y');
+                $cMonth = (int)$cursor->format('n');
+                $mKey   = $cursor->format('Y-m');
+
+                $cycleStart = getWorkCycleMonthStartDate($cYear, $cMonth);
+                $nextMonthDt = (clone $cursor)->modify('+1 month');
+                $nextCycleStart = getWorkCycleMonthStartDate((int)$nextMonthDt->format('Y'), (int)$nextMonthDt->format('n'));
+                $cycleEnd = date('Y-m-d', strtotime($nextCycleStart . ' -1 day'));
+
+                $shortLabel = $mNamesShort[$cMonth] ?? $cursor->format('M');
+                $candidateMonths[$mKey] = [
+                    'year'        => $cYear,
+                    'month'       => $cMonth,
+                    'shortLabel'  => $shortLabel,
+                    'label'       => $shortLabel . ' ' . $cYear,
+                    'start_date'  => $cycleStart,
+                    'end_date'    => $cycleEnd,
+                    'is_current'  => ($mKey === $curMonthKey)
+                ];
+            }
+
+            // Saring: Hanya tampilkan bulan yang memiliki aktivitas data, KECUALI bulan saat ini (wajib tampil)
+            foreach ($candidateMonths as $mKey => $mInfo) {
+                $hasMonthData = false;
+                $mStart = $mInfo['start_date'];
+                $mEnd   = $mInfo['end_date'];
+
+                foreach ($trendMap as $dStr => $tData) {
+                    // Cek berdasarkan rentang tanggal siklus kerja bulan tersebut (Sunday Anchor)
+                    $isMatch = ($isTahunanStacked && strlen($dStr) === 7) 
+                        ? ($dStr === $mKey) 
+                        : ($dStr >= $mStart && $dStr <= $mEnd);
+                    if ($isMatch) {
+                        if (($tData['sample'] ?? 0) > 0 || ($tData['ng'] ?? 0) > 0) {
+                            $hasMonthData = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!$hasMonthData) {
+                    foreach ($rawDdsRows as $dr) {
+                        $dDate = (string)$dr['date_key'];
+                        $isMatch = ($isTahunanStacked && strlen($dDate) === 7) 
+                            ? ($dDate === $mKey) 
+                            : ($dDate >= $mStart && $dDate <= $mEnd);
+                        if ($isMatch) {
+                            if ((int)$dr['total_defect'] > 0) {
+                                $hasMonthData = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if ($hasMonthData || $mInfo['is_current']) {
+                    $weeklyBucketsDef[$mKey] = $mInfo;
+                }
+            }
+        } else {
+            // Mode Default: Mingguan (Sunday Anchor W1-W5)
+            $weeklyBucketsDef = getWorkCycleWeeklyBuckets($selectedYear, $selectedMonth);
+        }
+
         $stackedChartLabels = [];
-        $weeklyDateMap = []; // [W1 => ['start' => ..., 'end' => ..., 'label' => ...]]
+        $weeklyDateMap = []; // [Key => ['start' => ..., 'end' => ..., 'label' => ...]]
         foreach ($weeklyBucketsDef as $wKey => $wInfo) {
             $stackedChartLabels[] = $wInfo['shortLabel'];
             $weeklyDateMap[$wKey] = $wInfo;
         }
 
-        // Hitung total sample & total defect per jenis per minggu
+        // Hitung total sample & total defect per jenis per bucket
         $weeklySampleTotals = [];
         $weeklyNgTotals     = [];
-        $weeklyDefectQty    = []; // [WKey => [defect_name => qty]]
-        $weeklyDefectParts  = []; // [WKey => [defect_name => [part_meta...]]]
+        $weeklyDefectQty    = []; // [Key => [defect_name => qty]]
+        $weeklyDefectParts  = []; // [Key => [defect_name => [part_meta...]]]
 
         foreach ($weeklyBucketsDef as $wKey => $wInfo) {
             $wStart = $wInfo['start_date'];
@@ -615,7 +696,11 @@ if ($pdo) {
             $wNg = 0;
 
             foreach ($trendMap as $dStr => $tData) {
-                if ($dStr >= $wStart && $dStr <= $wEnd) {
+                $isMatch = ($isTahunanStacked && strlen($dStr) === 7)
+                    ? ($dStr === $wKey)
+                    : ($dStr >= $wStart && $dStr <= $wEnd);
+
+                if ($isMatch) {
                     $wSample += (int)($tData['sample'] ?? 0);
                     $wNg     += (int)($tData['ng'] ?? 0);
                 }
@@ -627,7 +712,11 @@ if ($pdo) {
 
             foreach ($rawDdsRows as $dr) {
                 $dDate = (string)$dr['date_key'];
-                if ($dDate >= $wStart && $dDate <= $wEnd) {
+                $isMatch = ($isTahunanStacked && strlen($dDate) === 7)
+                    ? ($dDate === $wKey)
+                    : ($dDate >= $wStart && $dDate <= $wEnd);
+
+                if ($isMatch) {
                     $dnm = (string)$dr['defect_name'];
                     $qty = (int)$dr['total_defect'];
                     $weeklyDefectQty[$wKey][$dnm] = ($weeklyDefectQty[$wKey][$dnm] ?? 0) + $qty;
@@ -636,7 +725,11 @@ if ($pdo) {
 
             foreach ($rawDdsPartRows as $pr) {
                 $dDate = (string)$pr['date_key'];
-                if ($dDate >= $wStart && $dDate <= $wEnd) {
+                $isMatch = ($isTahunanStacked && strlen($dDate) === 7)
+                    ? ($dDate === $wKey)
+                    : ($dDate >= $wStart && $dDate <= $wEnd);
+
+                if ($isMatch) {
                     $dnm = (string)$pr['defect_name'];
                     $weeklyDefectParts[$wKey][$dnm][] = [
                         'code' => $pr['part_code'],
@@ -1147,7 +1240,8 @@ $initialDashboardVersion = md5(implode('|', [
                                        . ($selectedCustomer !== '' ? '&customer=' . urlencode($selectedCustomer) : '')
                                        . ($selectedUnit !== 'pcs' ? '&unit=' . urlencode($selectedUnit) : '')
                                        . ($selectedSampleBasis !== 'lot' ? '&sample_basis=' . urlencode($selectedSampleBasis) : '')
-                                       . ($selectedResult !== 'rejected' ? '&result=' . urlencode($selectedResult) : '');
+                                       . ($selectedResult !== 'rejected' ? '&result=' . urlencode($selectedResult) : '')
+                                       . ($selectedDefectRank !== 3 ? '&defect_rank=' . $selectedDefectRank : '');
                         ?>
                             <a href="<?= $presetUrl ?>"
                                style="padding:4px 11px;border-radius:6px;font-size:11px;font-weight:700;text-decoration:none;transition:all 0.2s;
@@ -1486,10 +1580,24 @@ $initialDashboardVersion = md5(implode('|', [
                 <div style="flex-shrink:0;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
                     <div>
                         <div style="font-size:13px;font-weight:800;color:#1e293b;display:flex;align-items:center;gap:6px;">
-                            <span><?= $isPassedMode ? "Tren Hasil Mutu Harian" : "Tren Defect Harian" ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
+                            <?php
+                            $cardDefectTitle = "Tren Defect Harian";
+                            $cardSubPeriodText = "hari";
+                            if ($isTahunanStacked) {
+                                $cardDefectTitle = "Tren Defect Bulanan";
+                                $cardSubPeriodText = "bulan";
+                            } elseif ($presetFilter === 'bulanan' || $presetFilter === 'month_year') {
+                                $cardDefectTitle = "Tren Defect Mingguan";
+                                $cardSubPeriodText = "minggu";
+                            }
+                            if ($isPassedMode) {
+                                $cardDefectTitle = str_replace("Defect", "Hasil Mutu", $cardDefectTitle);
+                            }
+                            ?>
+                            <span id="defectCardMainTitle"><?= htmlspecialchars($cardDefectTitle) ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
                         </div>
-                        <div style="font-size:10px;color:#94a3b8;margin-top:2px;">
-                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <?= $selectedDefectRank ?> besar/minggu (Tabel Harian)
+                        <div style="font-size:10px;color:#94a3b8;margin-top:2px;" id="defectCardSubTitle">
+                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <span id="defectRankDisplayText"><?= $selectedDefectRank ?></span> besar/<?= $cardSubPeriodText ?> (Tabel <?= $isTahunanStacked ? 'Bulanan' : 'Harian' ?>)
                         </div>
                     </div>
 
@@ -1511,9 +1619,14 @@ $initialDashboardVersion = md5(implode('|', [
                         <div style="display:flex;align-items:center;gap:2px;background:#f1f5f9;padding:2px;border-radius:8px;border:1px solid #e2e8f0;" title="Pilih Jumlah Peringkat Teratas">
                             <?php foreach ([1, 3] as $rNum): 
                                 $isRActive = ($selectedDefectRank === $rNum);
-                                $defectRankUrl = '?' . http_build_query(array_merge($_GET, ['defect_rank' => $rNum]));
+                                $currParams = $_GET;
+                                $currParams['preset'] = $presetFilter;
+                                $currParams['defect_rank'] = $rNum;
+                                $defectRankUrl = '?' . http_build_query($currParams);
                             ?>
                                 <a href="<?= htmlspecialchars($defectRankUrl) ?>"
+                                   id="btnDefectRank_<?= $rNum ?>"
+                                   onclick="if (typeof switchDefectRank === 'function') { switchDefectRank(<?= $rNum ?>, event); }"
                                    style="padding:2px 7px;border-radius:5px;font-size:10px;font-weight:800;text-decoration:none;transition:all 0.2s;
                                           background:<?= $isRActive ? '#2563eb' : 'transparent' ?>;
                                           color:<?= $isRActive ? '#ffffff' : '#64748b' ?>;
@@ -1587,7 +1700,14 @@ $initialDashboardVersion = md5(implode('|', [
                                         <th style="padding:6px 10px;width:130px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:4;" title="<?= $isPassedMode ? 'Status Hasil Mutu' : 'Jenis Cacat / Defect' ?>">
                                             <?= $isPassedMode ? 'STATUS HASIL' : 'JENIS NG' ?>
                                         </th>
-                                        <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;">TOTAL</th>
+                                        <?php 
+                                        $colTotalTitle = $isTahunanStacked 
+                                            ? ('JAN – ' . strtoupper($mNamesShort[$selectedMonth] ?? date('M')) . ' ' . $selectedYear)
+                                            : 'TOTAL';
+                                        ?>
+                                        <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;" title="<?= $isTahunanStacked ? 'Akumulasi total dari awal tahun s/d bulan ini (Sunday Anchor)' : 'Total periode terpilih' ?>">
+                                            <?= htmlspecialchars($colTotalTitle) ?>
+                                        </th>
                                         <?php foreach ($activeDefectPeriodKeys as $dk): ?>
                                             <th style="padding:6px 8px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;">
                                                 <?= htmlspecialchars($stackedPeriodLabels[$dk] ?? $dk) ?>
@@ -1692,7 +1812,9 @@ $initialDashboardVersion = md5(implode('|', [
                                 </tbody>
                                 <tfoot>
                                     <tr style="background:#f8fafc;font-weight:800;border-top:2px solid #cbd5e1;position:sticky;bottom:0;z-index:2;">
-                                        <td style="padding:6px 10px;width:130px;max-width:130px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">TOTAL</td>
+                                        <td style="padding:6px 10px;width:130px;max-width:130px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                            <?= $isTahunanStacked ? 'TOTAL (YTD)' : 'TOTAL' ?>
+                                        </td>
                                         <?php 
                                         $grandSumPcs = 0;
                                         $colSums = [];

@@ -9,7 +9,10 @@ require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 require_once __DIR__ . '/../../config/document_helper.php';
 
-require_menu_access('master_drawings');
+// Izinkan akses jika pengguna memiliki hak akses menu master_drawings ATAU menu inspection
+if (!can_access('master_drawings') && !can_access('inspection')) {
+    require_menu_access('master_drawings');
+}
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     redirect('modules/master_drawings/index.php');

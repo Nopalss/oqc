@@ -163,7 +163,11 @@ function syncUploadRedirectButtons(partCode) {
     var btn2d = document.getElementById('btn-upload-redirect-2d');
     var btn3d = document.getElementById('btn-upload-redirect-3d');
     var btnCustom = document.getElementById('btn-upload-redirect-custom');
+    var btnToolbar = document.getElementById('btn-toolbar-upload-doc');
     
+    if (btnToolbar) {
+        btnToolbar.href = uploadUrl;
+    }
     if (btn2d) {
         btn2d.href = uploadUrl;
         btn2d.style.display = 'inline-flex';
@@ -455,7 +459,10 @@ function loadCustomDocumentViewer(docType, targetVersion) {
     var btnCustomUpload = document.getElementById('btn-upload-redirect-custom');
     var btnCustomText = document.getElementById('btn-upload-redirect-text');
     if (btnCustomUpload && partCode) {
-        btnCustomUpload.href = (window.APP_BASE_URL || '') + '/modules/master_drawings/upload.php?part_code=' + encodeURIComponent(partCode);
+        var upUrl = (window.APP_BASE_URL || '') + '/modules/master_drawings/upload.php?part_code=' + encodeURIComponent(partCode);
+        btnCustomUpload.href = upUrl;
+        var btnToolbarUp = document.getElementById('btn-toolbar-upload-doc');
+        if (btnToolbarUp) btnToolbarUp.href = upUrl;
     }
     if (btnCustomText) {
         btnCustomText.textContent = '+ Upload Berkas ' + (docInfo ? docInfo.label : docType.toUpperCase());

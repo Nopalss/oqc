@@ -109,7 +109,8 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </label>
                     <input type="text" id="scan_lot_input" 
                            placeholder="Scan Barcode / Paste payload QR lot di sini..." 
-                           class="form-input text-xs font-mono font-bold" autofocus autocomplete="off">
+                           class="form-input text-xs font-mono font-bold focus:ring-2 focus:ring-blue-500 focus:border-blue-500" 
+                           autofocus autocomplete="off" autocorrect="off" spellcheck="false">
                 </div>
                 <div class="sm:col-span-3">
                     <label class="form-label font-bold text-slate-700">Tanggal Lot Default</label>
@@ -237,6 +238,29 @@ var kanbanId = <?= (int)$kanban['id'] ?>;
 var remainingTargetQty = <?= (int)$remainingQty ?>;
 var rowCounterIdx = 0;
 var pendingNgRowId = null;
+
+// Helper fokus otomatis khusus scanner tanpa mengganggu interaksi form lain
+function focusScanner(force) {
+    var scanInp = document.getElementById('scan_lot_input');
+    if (!scanInp) return;
+    
+    // Jangan bajak fokus jika user sedang sengaja mengetik/klik di input, textarea, atau select lain
+    if (!force) {
+        var active = document.activeElement;
+        if (active && active !== scanInp && active !== document.body) {
+            var tag = active.tagName ? active.tagName.toUpperCase() : '';
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+                return;
+            }
+        }
+    }
+    
+    setTimeout(function() {
+        if (scanInp && document.activeElement !== scanInp) {
+            scanInp.focus();
+        }
+    }, 60);
+}
 
 // Format Lot standar persis seperti di modules/did/create.php
 function generateLotNumber(dateStr) {
@@ -511,6 +535,8 @@ function checkRowLotStatus(idx) {
                         icon: 'error',
                         title: 'Safety Stock Habis',
                         text: data.ss_details || 'Sisa kuota safety stock ini adalah 0 pcs. Box tidak dapat digunakan!'
+                    }).then(function() {
+                        focusScanner(true);
                     });
                     var currentRows = document.querySelectorAll('#lots-rows-body tr');
                     if (currentRows.length > 1) {
@@ -592,6 +618,8 @@ function checkRowLotStatus(idx) {
                     html: modalHtml,
                     confirmButtonColor: '#e11d48',
                     confirmButtonText: 'Tutup & Ganti Label'
+                }).then(function() {
+                    focusScanner(true);
                 });
                 var currentRows = document.querySelectorAll('#lots-rows-body tr');
                 if (currentRows.length > 1) {
@@ -641,6 +669,7 @@ function acceptNgConfirmation() {
         }
     }
     cancelNgConfirmation();
+    focusScanner(true);
 }
 
 function cancelNgConfirmation() {
@@ -654,6 +683,7 @@ function cancelNgConfirmation() {
     }
     pendingNgRowId = null;
     document.getElementById('modalConfirmNg').style.display = 'none';
+    focusScanner(true);
 }
 
 // Scanner Input Handler dengan parsing Z1..Z5
@@ -678,10 +708,13 @@ function parseScan(raw) {
 }
 
 document.getElementById('scan_lot_input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' || e.keyCode === 13) {
         e.preventDefault();
         var val = this.value.trim();
-        if (!val) return;
+        if (!val) {
+            focusScanner(true);
+            return;
+        }
         var parsed = parseScan(val);
         this.value = '';
 
@@ -691,6 +724,8 @@ document.getElementById('scan_lot_input').addEventListener('keydown', function(e
                 icon: 'warning',
                 title: 'Part Code Tidak Sesuai',
                 html: '<div class="text-left text-xs"><p>Part Code di label barcode: <b>' + escapeHtml(parsed.part) + '</b></p><p>Part target Kanban ini: <b>' + escapeHtml(currentPartCode) + '</b></p></div>'
+            }).then(function() {
+                focusScanner(true);
             });
             return;
         }
@@ -750,6 +785,9 @@ document.getElementById('scan_lot_input').addEventListener('keydown', function(e
                 is_scan: true
             });
         }
+
+        // Kembalikan fokus ke kolom scanner untuk scan lot berikutnya
+        focusScanner(true);
     }
 });
 
@@ -875,9 +913,10 @@ function escapeHtml(text) {
     return text.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-// Inisialisasi awal 1 baris
+// Inisialisasi awal 1 baris & auto-focus scanner
 document.addEventListener('DOMContentLoaded', function() {
     addLotRow();
+    focusScanner(true);
 });
 </script>
 

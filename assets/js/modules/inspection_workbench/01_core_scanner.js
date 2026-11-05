@@ -80,6 +80,60 @@ window.addEventListener('keydown', function(e) {
     }
 });
 
+// =========================================================================
+// LIVE WORKBENCH STATUS PILL (Ultra-lightweight: ~0 KB RAM, 0% CPU, No Stopwatch)
+// =========================================================================
+function updateWorkbenchLiveBadge(sessionData) {
+    var badge = document.getElementById('workbench-live-badge');
+    var dotPing = document.getElementById('workbench-live-dot-ping');
+    var dotCore = document.getElementById('workbench-live-dot-core');
+    var liveText = document.getElementById('workbench-live-text');
+    if (!badge || !liveText) return;
+
+    if (!sessionData || !sessionData.id || sessionData.status === 'cancelled') {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+        return;
+    }
+
+    var status = sessionData.status || 'in_progress';
+
+    badge.classList.remove('hidden');
+    badge.classList.add('flex');
+
+    if (status === 'in_progress') {
+        // Sedang Berjalan: LIVE (dot merah berdenyut)
+        badge.className = 'flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition-all shadow-2xs select-none workbench-live-pill-live';
+        if (dotPing) {
+            dotPing.className = 'live-dot-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75';
+            dotPing.classList.remove('hidden');
+        }
+        if (dotCore) dotCore.className = 'relative inline-flex rounded-full h-2 w-2 bg-rose-500';
+        liveText.textContent = 'LIVE';
+    } else {
+        // Sesi Selesai (Passed, Rejected, Completed): SELESAI (dot hijau tenang)
+        badge.className = 'flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-bold border transition-all shadow-2xs select-none workbench-live-pill-done';
+        if (dotPing) dotPing.classList.add('hidden');
+        if (dotCore) dotCore.className = 'relative inline-flex rounded-full h-2 w-2 bg-emerald-500';
+        liveText.textContent = 'SELESAI';
+    }
+}
+
+// Inisialisasi awal saat halaman dimuat
+document.addEventListener('DOMContentLoaded', function() {
+    if (window.OQC_CONFIG && window.OQC_CONFIG.sessionData) {
+        updateWorkbenchLiveBadge(window.OQC_CONFIG.sessionData);
+    } else {
+        var elBadge = document.getElementById('workbench-live-badge');
+        if (elBadge && elBadge.getAttribute('data-status')) {
+            updateWorkbenchLiveBadge({
+                id: window.OQC_CONFIG.sessionId || 1,
+                status: elBadge.getAttribute('data-status') || 'in_progress'
+            });
+        }
+    }
+});
+
 
 
 var scannedLabelsList = [];
@@ -263,7 +317,7 @@ function parseBarcodeQRInput(val, forceProcess) {
             });
             // Rollback & bersihkan field form seketika
             if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = selectedPlanningPartCode;
-            if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '';
+            if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '064';
             if (document.getElementById('scan-label-qty')) document.getElementById('scan-label-qty').value = '';
             if (document.getElementById('scan-ref-number')) document.getElementById('scan-ref-number').value = '';
             if (document.getElementById('scan-remarks')) document.getElementById('scan-remarks').value = '';
@@ -360,7 +414,7 @@ function handleManualAddLabel() {
         raw: 'MANUAL|Z1' + pCode + '|Z2' + lNum + '|Z3' + qty
     });
 
-    document.getElementById('scan-lot-number').value = '';
+    document.getElementById('scan-lot-number').value = '064';
     document.getElementById('scan-label-qty').value = '';
     document.getElementById('scan-ref-number').value = '';
     document.getElementById('scan-remarks').value = '';
@@ -797,7 +851,7 @@ function showLiveScanAlert(type, title, message, extraData) {
                 defectsHtml = '<div style="font-size: 10.5px; color: #92400e; font-style: italic; padding: 2px 4px;">• Defect Eks-NG / Perbaikan Tercatat</div>';
             }
 
-            // Catatan Disposisi Admin / Divisi jika ada
+            // Catatan Action Admin / Divisi jika ada
             var disp = info.disposition || null;
             var dispositionHtml = '';
             if (disp && disp.has_disposition && disp.notes) {
@@ -806,9 +860,9 @@ function showLiveScanAlert(type, title, message, extraData) {
                         '<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px;">' +
                             '<span style="font-size: 9.5px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.03em; display: inline-flex; align-items: center; gap: 4px;">' +
                                 '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' +
-                                'CATATAN DISPOSISI ADMIN / DIVISI:' +
+                                'CATATAN ACTION ADMIN / DIVISI:' +
                             '</span>' +
-                            '<span style="font-size: 8.5px; font-weight: 800; color: #0284c7; background: #e0f2fe; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px;">Disposisi Selesai</span>' +
+                            '<span style="font-size: 8.5px; font-weight: 800; color: #0284c7; background: #e0f2fe; border: 1px solid #bae6fd; padding: 1px 6px; border-radius: 4px;">Action Selesai</span>' +
                         '</div>' +
                         '<div style="font-size: 11px; font-weight: 700; color: #0c4a6e; line-height: 1.35; background: #ffffff; border: 1px solid #e0f2fe; border-radius: 5px; padding: 5px 8px;">' +
                             '"' + escapeHtml(disp.notes) + '"' +
@@ -822,9 +876,9 @@ function showLiveScanAlert(type, title, message, extraData) {
                 dispositionHtml = 
                     '<div style="background-color: #fefce8; border: 1px solid #fef08a; border-radius: 6px; padding: 4px 8px; margin-top: 5px; display: flex; align-items: center; justify-content: space-between;">' +
                         '<span style="font-size: 9.5px; font-weight: 700; color: #854d0e;">' +
-                            'ℹ <b>STATUS DISPOSISI:</b> Belum ada catatan disposisi resmi dari Admin / Divisi terkait.' +
+                            'ℹ <b>STATUS ACTION:</b> Belum ada catatan action resmi dari Admin / Divisi terkait.' +
                         '</span>' +
-                        '<span style="font-size: 8.5px; font-weight: 800; color: #a16207; background: #fef9c3; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px;">Pending Disposisi</span>' +
+                        '<span style="font-size: 8.5px; font-weight: 800; color: #a16207; background: #fef9c3; border: 1px solid #fef08a; padding: 1px 5px; border-radius: 3px;">Pending Action</span>' +
                     '</div>';
             }
 
@@ -958,7 +1012,7 @@ function addScannedLabelFromObj(lbl) {
         showLiveScanAlert('rejected', 'PART CODE TIDAK COCOK', 'Label part code <b>"' + escapeHtml(lbl.Z1) + '"</b> tidak sesuai dengan part planning aktif <b>"' + escapeHtml(selectedPlanningPartCode) + '"</b>.');
         // Rollback & bersihkan field form
         if (document.getElementById('scan-part-code')) document.getElementById('scan-part-code').value = selectedPlanningPartCode;
-        if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '';
+        if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '064';
         if (document.getElementById('scan-label-qty')) document.getElementById('scan-label-qty').value = '';
         if (document.getElementById('scan-ref-number')) document.getElementById('scan-ref-number').value = '';
         if (document.getElementById('scan-remarks')) document.getElementById('scan-remarks').value = '';
@@ -1029,7 +1083,14 @@ function addScannedLabelFromObj(lbl) {
                             clearScanFormInputs();
                         }
                     });
-                    showLiveScanAlert('rejected', 'LABEL TELAH DI-ABOLISH', 'Box Ref <b>' + escapeHtml(lbl.Z5 || '') + '</b> telah dinyatakan <b>ABOLISH / SCRAP</b> permanen.');
+                    var abolishMsgHtml = 
+                        '<div>Box Ref <b>' + escapeHtml(lbl.Z5 || det.ref_number || '') + '</b> telah dinyatakan <b>ABOLISH / SCRAP</b> permanen.</div>' +
+                        '<div style="margin-top: 6px; background-color: #ffffff; border: 1px solid #fecdd3; border-radius: 6px; padding: 6px 9px; font-size: 11px; text-align: left;">' +
+                        '  <div style="font-size: 9.5px; font-weight: 800; color: #475569; text-transform: uppercase; margin-bottom: 2px;">Alasan / Catatan Penutupan:</div>' +
+                        '  <div style="font-size: 11.5px; font-weight: 700; color: #991b1b; font-style: italic;">"' + escapeHtml(abNotes) + '"</div>' +
+                        '  <div style="font-size: 9px; color: #64748b; margin-top: 3px;">Ditutup oleh: <b>' + escapeHtml(abUser) + '</b> · ' + escapeHtml(abDate) + '</div>' +
+                        '</div>';
+                    showLiveScanAlert('rejected', 'LABEL TELAH DI-ABOLISH', abolishMsgHtml);
                     clearScanFormInputs();
                     return;
                 }
@@ -1405,7 +1466,7 @@ function proceedAddLabelToList(lbl) {
 
 function clearScanFormInputs() {
     if (document.getElementById('scan-qr-raw')) document.getElementById('scan-qr-raw').value = '';
-    if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '';
+    if (document.getElementById('scan-lot-number')) document.getElementById('scan-lot-number').value = '064';
     if (document.getElementById('scan-label-qty')) document.getElementById('scan-label-qty').value = '';
     if (document.getElementById('scan-ref-number')) document.getElementById('scan-ref-number').value = '';
     if (document.getElementById('scan-remarks')) document.getElementById('scan-remarks').value = '';

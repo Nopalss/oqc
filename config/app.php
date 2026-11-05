@@ -40,3 +40,7 @@ define('BASE_URL', rtrim($protocol . $host . $basePath, '/'));
 
 // Timezone Setup
 date_default_timezone_set('Asia/Jakarta');
+
+// Include Monitoring Helper
+require_once __DIR__ . '/monitoring_helper.php';
+

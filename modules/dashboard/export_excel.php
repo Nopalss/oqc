@@ -104,7 +104,7 @@ if ($filterType === 'all_years') {
     $endDate   = date('Y-m-t', strtotime($startDate));
     $presetFilter = 'month_year';
     $filterTitleDesc = "Bulan " . ($monthNames[$selectedMonth] ?? $selectedMonth) . " " . $selectedYear;
-} elseif ($filterType === 'custom' || (!empty($_REQUEST['start_date']) && !empty($_REQUEST['end_date']))) {
+} elseif ($filterType === 'custom' || (empty($_REQUEST['preset']) && empty($filterType) && !empty($_REQUEST['start_date']) && !empty($_REQUEST['end_date']))) {
     $startDate    = sanitize($_REQUEST['start_date'] ?? date('Y-m-01'));
     $endDate      = sanitize($_REQUEST['end_date'] ?? date('Y-m-d'));
     $presetFilter = 'custom';

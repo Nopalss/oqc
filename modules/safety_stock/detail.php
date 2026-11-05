@@ -121,16 +121,20 @@ if ($pdo) {
             $partInfo = $stPart->fetch(PDO::FETCH_ASSOC);
 
             if ($partInfo) {
-                // 2. High-Performance Aggregate Metrics (Direct B-Tree Index Scan based on latest box state)
-                $stMetrics = $pdo->prepare("
+                // 2. High-Performance Aggregate Metrics (Direct B-Tree Index Scan)
+                $stInitial = $pdo->prepare("
                     SELECT 
-                        COUNT(DISTINCT latest_isl.ref_key) AS total_boxes,
-                        COALESCE(SUM(latest_isl.qty), 0) AS total_initial,
-                        COALESCE(SUM(CASE WHEN ss.auto_fulfilled_by_session_id > 0 THEN latest_isl.qty ELSE 0 END), 0) AS total_used,
+                        COALESCE(SUM(CASE 
+                            WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock Sisa Excess Kanban%') 
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END), 0) AS total_initial,
                         COALESCE(SUM(CASE 
                             WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
                                  AND ss.status = 'passed' 
-                            THEN latest_isl.qty ELSE 0 END), 0) AS available_stock,
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END), 0) AS available_stock,
                         COALESCE(SUM(CASE 
                             WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
                                  AND ss.status = 'in_progress' 
@@ -139,41 +143,35 @@ if ($pdo) {
                             WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
                                  AND ss.status = 'rejected' 
                             THEN 1 ELSE 0 END), 0) AS rejected_count
-                    FROM (
-                        SELECT isl.id, isl.inspection_session_id, isl.qty,
-                               CONCAT(COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('NOREF-', isl.id)), '_', COALESCE(TRIM(isl.lot_number), 'NOLOT')) AS ref_key
-                        FROM inspection_session_lots isl
-                        JOIN inspection_sessions ss2 ON ss2.id = isl.inspection_session_id
-                        LEFT JOIN daily_inspection_data did2 ON did2.id = ss2.did_id
-                        LEFT JOIN kanban_items ki2 ON ki2.id = ss2.kanban_item_id
-                        WHERE ss2.inspection_type = 'safety_stock'
-                          AND (did2.part_code = :p1 OR ki2.item_code = :p2)
-                          AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                          AND isl.id IN (
-                              SELECT MAX(isl3.id)
-                              FROM inspection_session_lots isl3
-                              JOIN inspection_sessions ss3 ON ss3.id = isl3.inspection_session_id
-                              LEFT JOIN daily_inspection_data did3 ON did3.id = ss3.did_id
-                              LEFT JOIN kanban_items ki3 ON ki3.id = ss3.kanban_item_id
-                              WHERE ss3.inspection_type = 'safety_stock'
-                                AND (did3.part_code = :p3 OR ki3.item_code = :p4)
-                                AND (isl3.lot_status IS NULL OR isl3.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                              GROUP BY CONCAT(COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('NOREF-', isl3.id)), '_', COALESCE(TRIM(isl3.lot_number), 'NOLOT'))
-                          )
-                    ) latest_isl
-                    JOIN inspection_sessions ss ON ss.id = latest_isl.inspection_session_id
+                    FROM inspection_sessions ss
+                    LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                    LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+                    WHERE ss.inspection_type = 'safety_stock'
+                      AND (did.part_code = :p1 OR ki.item_code = :p2)
                 ");
-                $stMetrics->execute([
-                    ':p1' => $partCodeParam,
-                    ':p2' => $partCodeParam,
-                    ':p3' => $partCodeParam,
-                    ':p4' => $partCodeParam
-                ]);
-                $metrics = $stMetrics->fetch(PDO::FETCH_ASSOC);
+                $stInitial->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
+                $metrics = $stInitial->fetch(PDO::FETCH_ASSOC);
+
+                // Fetch Kanban Used Qty for this part
+                $stUsed = $pdo->prepare("
+                    SELECT COALESCE(SUM(ki_k.qty), 0) AS total_used
+                    FROM (
+                        SELECT DISTINCT s_ss.auto_fulfilled_by_session_id AS kanban_session_id
+                        FROM inspection_sessions s_ss
+                        LEFT JOIN daily_inspection_data did_s ON did_s.id = s_ss.did_id
+                        LEFT JOIN kanban_items ki_s ON ki_s.id = s_ss.kanban_item_id
+                        WHERE s_ss.inspection_type = 'safety_stock'
+                          AND s_ss.auto_fulfilled_by_session_id > 0
+                          AND (did_s.part_code = :p1 OR ki_s.item_code = :p2)
+                    ) u_sess
+                    JOIN inspection_sessions s_k ON s_k.id = u_sess.kanban_session_id
+                    JOIN kanban_items ki_k ON ki_k.id = s_k.kanban_item_id
+                ");
+                $stUsed->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
+                $totalUsedQty = (int)$stUsed->fetchColumn();
 
                 $totalInitialStock = (int)($metrics['total_initial'] ?? 0);
-                $totalUsedQty      = (int)($metrics['total_used'] ?? 0);
-                $availableStock    = (int)($metrics['available_stock'] ?? 0);
+                $availableStock    = max(0, $totalInitialStock - $totalUsedQty);
                 $hasInProgress     = ((int)($metrics['in_progress_count'] ?? 0) > 0);
                 $hasRejected       = ((int)($metrics['rejected_count'] ?? 0) > 0);
 

@@ -79,9 +79,17 @@
     var currentDashboardVersion = (window.OQC_DASH_CONFIG && window.OQC_DASH_CONFIG.currentDashboardVersion) || '';
     var filterParams = (window.OQC_DASH_CONFIG && window.OQC_DASH_CONFIG.filterParams) ? window.OQC_DASH_CONFIG.filterParams : {};
 
-    // ── LocalStorage Caching Engine (Stale-While-Revalidate) ───────────────────
+    // ── LocalStorage Caching Engine (Single-Slot Overwrite Pattern) ───────────
+    // Menggunakan 1 key statis tunggal sehingga data selalu ditimpa (overwrite),
+    // mencegah penumpukan sampah cache dan menjaga konsumsi RAM/Storage tetap sangat ringan.
+    var DASHBOARD_CACHE_SLOT = 'oqc_dash_cache_active';
+
     function getDashboardCacheKey() {
-        return 'oqc_dash_cache_v3_' + [
+        return DASHBOARD_CACHE_SLOT;
+    }
+
+    function getDashboardFilterSignature() {
+        return [
             filterParams.customer || 'all',
             filterParams.unit || 'pcs',
             filterParams.sample_basis || 'lot',
@@ -99,18 +107,18 @@
 
     function purgeOldDashboardVersions() {
         try {
-            var currentPrefix = 'oqc_dash_cache_v3_';
             var now = Date.now();
             for (var i = localStorage.length - 1; i >= 0; i--) {
                 var k = localStorage.key(i);
                 if (k && k.indexOf('oqc_dash_cache_') === 0) {
-                    // Hapus jika bukan versi v3 aktif, atau jika cache v3 sudah kedaluwarsa (> 24 jam)
-                    if (k.indexOf(currentPrefix) !== 0) {
+                    // Sapu bersih seluruh key sampah multi-slot lama (v1, v2, v3, v4, dll.)
+                    if (k !== DASHBOARD_CACHE_SLOT) {
                         localStorage.removeItem(k);
                     } else {
+                        // Jika slot aktif sudah lebih dari 2 jam, hapus agar fresh
                         try {
                             var item = JSON.parse(localStorage.getItem(k));
-                            if (item && item.time && (now - item.time > 24 * 3600 * 1000)) {
+                            if (item && item.time && (now - item.time > 2 * 3600 * 1000)) {
                                 localStorage.removeItem(k);
                             }
                         } catch (e) {
@@ -125,15 +133,17 @@
     function saveDashboardCache(data) {
         if (!data || data.status !== 'success') return;
         try {
-            // Bersihkan versi lama sebelum menyimpan cache baru
+            // Bersihkan sisa-sisa key lama jika ada
             purgeOldDashboardVersions();
 
             var key = getDashboardCacheKey();
             var payload = {
                 v: data.version || currentDashboardVersion,
+                sig: getDashboardFilterSignature(),
                 time: Date.now(),
                 data: data
             };
+            // Selalu MENIMPA (overwrite) slot tunggal
             localStorage.setItem(key, JSON.stringify(payload));
         } catch (err) {
             console.warn('[OQC Cache] LocalStorage quota exceeded or error:', err);
@@ -157,8 +167,11 @@
             var raw = localStorage.getItem(key);
             if (!raw) return null;
             var parsed = JSON.parse(raw);
+            // Validasi: pastikan signature filter cache sama persis dengan filter halaman saat ini
             if (parsed && parsed.data && parsed.data.status === 'success') {
-                return parsed;
+                if (parsed.sig === getDashboardFilterSignature()) {
+                    return parsed;
+                }
             }
         } catch (e) {}
         return null;
@@ -879,7 +892,22 @@
         // Urutkan legend dari total terbanyak
         activeItems.sort(function(a, b) { return b.total - a.total; });
 
-        if (activeItems.length === 0) return;
+        if (activeItems.length === 0) {
+            var zeroNotice = document.createElement('div');
+            zeroNotice.style.display = 'inline-flex';
+            zeroNotice.style.alignItems = 'center';
+            zeroNotice.style.gap = '5px';
+            zeroNotice.style.padding = '3px 10px';
+            zeroNotice.style.background = '#ecfdf5';
+            zeroNotice.style.border = '1px solid #a7f3d0';
+            zeroNotice.style.borderRadius = '6px';
+            zeroNotice.style.fontSize = '10px';
+            zeroNotice.style.color = '#047857';
+            zeroNotice.style.fontWeight = '700';
+            zeroNotice.innerHTML = '<svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg> Zero Defect (0 NG / 100% Passed)';
+            container.appendChild(zeroNotice);
+            return;
+        }
 
         activeItems.forEach(function(item) {
             var chip = document.createElement('div');
@@ -1056,6 +1084,7 @@
             var newDatasets = (unit === 'ppm') ? ((window.OQC_DASH_CONFIG && window.OQC_DASH_CONFIG.stackedDatasetsPpm) || []) : ((window.OQC_DASH_CONFIG && window.OQC_DASH_CONFIG.stackedDatasetsPcs) || []);
             defectStackedChartInstance.data.datasets = newDatasets;
             defectStackedChartInstance.update();
+            renderDefectStackedLegend(newDatasets);
         }
 
         // Update Table Cells
@@ -1127,6 +1156,70 @@
             }
         }
     }
+
+    // ── Instant Switch Peringkat Defect (1 vs 3) via AJAX ───────────────────
+    function switchDefectRank(rankNum, event) {
+        if (event && event.preventDefault) {
+            event.preventDefault();
+        }
+        rankNum = (rankNum === 1) ? 1 : 3;
+        filterParams.defect_rank = rankNum;
+
+        // Pastikan preset sinkron dari URL jika ada
+        try {
+            var currUrl = new URL(window.location.href);
+            var urlPreset = currUrl.searchParams.get('preset');
+            if (urlPreset) {
+                filterParams.preset = urlPreset;
+                if (filterParams.filter_type === 'custom') {
+                    filterParams.filter_type = '';
+                }
+            }
+        } catch (e) {}
+
+        // Update Pill Visuals
+        [1, 3].forEach(function(r) {
+            var btn = document.getElementById('btnDefectRank_' + r);
+            if (btn) {
+                if (r === rankNum) {
+                    btn.style.background = '#2563eb';
+                    btn.style.color = '#ffffff';
+                    btn.style.boxShadow = '0 1px 2px rgba(37,99,235,0.25)';
+                } else {
+                    btn.style.background = 'transparent';
+                    btn.style.color = '#64748b';
+                    btn.style.boxShadow = 'none';
+                }
+            }
+        });
+
+        var rankDisplay = document.getElementById('defectRankDisplayText');
+        if (rankDisplay) {
+            rankDisplay.textContent = rankNum;
+        }
+
+        // Sinkronkan URL di Address Bar tanpa reload penuh
+        try {
+            var url = new URL(window.location.href);
+            url.searchParams.set('defect_rank', rankNum);
+            if (!url.searchParams.get('preset') && filterParams.preset) {
+                url.searchParams.set('preset', filterParams.preset);
+            }
+            window.history.replaceState({}, '', url.toString());
+        } catch (e) {}
+
+        // Bersihkan cache lama untuk rank ini agar langsung ditimpa respon baru
+        try {
+            var cacheKey = getDashboardCacheKey();
+            localStorage.removeItem(cacheKey);
+        } catch (e) {}
+
+        // Fetch Data Terbaru via AJAX Live Sync (force refresh)
+        if (typeof fetchLatestDashboardData === 'function') {
+            fetchLatestDashboardData(true);
+        }
+    }
+    window.switchDefectRank = switchDefectRank;
 
     if (window.OQC_DASH_CONFIG && window.OQC_DASH_CONFIG.stackedLabels && window.OQC_DASH_CONFIG.stackedLabels.length > 0) {
         initDefectStackedChart();
@@ -2674,6 +2767,12 @@
                     lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fef3c7;color:#b45309;border:1px solid #fde68a;">Replaced (Diganti)</span>';
                 } else if (r.lot_status === 'ng_quarantine') {
                     lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fee2e2;color:#b91c1c;border:1px solid #fecdd3;">Karantina NG</span>';
+                } else if (r.lot_status === 'reinspected' || (r.lot_result === 'passed' && r.active_ng_cnt > 0)) {
+                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#e0e7ff;color:#4338ca;border:1px solid #c7d2fe;">Re-inspeksi (Passed)</span>';
+                } else if (r.lot_status === 'action_closed') {
+                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;">Tindakan Selesai</span>';
+                } else if (r.lot_status === 'abolished') {
+                    lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#fef2f2;color:#991b1b;border:1px solid #f87171;">Dimusnahkan (Scrap)</span>';
                 } else {
                     lotStatusBadge = '<span style="display:inline-block;padding:2px 7px;font-size:9.5px;font-weight:800;border-radius:5px;background:#ffe4e6;color:#e11d48;border:1px solid #fecdd3;">Reject</span>';
                 }
@@ -2984,6 +3083,12 @@
         if (spinIcon) spinIcon.classList.add('animate-spin');
 
         var q = new URLSearchParams(filterParams);
+        if (filterParams.preset && filterParams.preset !== 'custom') {
+            q.set('preset', filterParams.preset);
+            if (q.get('filter_type') === 'custom') {
+                q.delete('filter_type');
+            }
+        }
         q.set('sub_resolution', currentSubResolution || 'weekly');
         if (isForce) {
             q.set('force', '1');
@@ -3069,13 +3174,31 @@
             initTrendChart(currentChartType, currentMetricScale, true);
         }
 
-        // 4. Update Stacked Defect Timeline Chart (tanpa animasi kedip)
-        if (d.stacked && defectStackedChartInstance) {
-            defectStackedChartInstance.data.labels = d.stacked.labels;
-            defectStackedChartInstance.data.datasets = (currentDefectMetricUnit === 'ppm') ? d.stacked.datasets_ppm : d.stacked.datasets_pcs;
-            defectStackedChartInstance.update('none');
-            if (typeof renderDefectStackedLegend === 'function') {
-                renderDefectStackedLegend(defectStackedChartInstance.data.datasets);
+        // 4. Update Stacked Defect Timeline Chart & Sync Global Memory Config
+        if (d.stacked) {
+            if (window.OQC_DASH_CONFIG) {
+                if (Array.isArray(d.stacked.labels) && d.stacked.labels.length > 0) {
+                    window.OQC_DASH_CONFIG.stackedLabels = d.stacked.labels;
+                }
+                if (d.stacked.datasets_ppm) {
+                    window.OQC_DASH_CONFIG.stackedDatasetsPpm = d.stacked.datasets_ppm;
+                }
+                if (d.stacked.datasets_pcs) {
+                    window.OQC_DASH_CONFIG.stackedDatasetsPcs = d.stacked.datasets_pcs;
+                }
+            }
+
+            if (defectStackedChartInstance) {
+                if (Array.isArray(d.stacked.labels) && d.stacked.labels.length > 0) {
+                    defectStackedChartInstance.data.labels = d.stacked.labels;
+                }
+                defectStackedChartInstance.data.datasets = (currentDefectMetricUnit === 'ppm') ? d.stacked.datasets_ppm : d.stacked.datasets_pcs;
+                defectStackedChartInstance.update('none');
+                if (typeof renderDefectStackedLegend === 'function') {
+                    renderDefectStackedLegend(defectStackedChartInstance.data.datasets);
+                }
+            } else if (typeof initDefectStackedChart === 'function') {
+                initDefectStackedChart();
             }
         }
 

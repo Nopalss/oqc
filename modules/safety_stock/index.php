@@ -2,6 +2,7 @@
 /**
  * Modul Safety Stock - Monitoring Realisasi Safety Stock
  * Halaman pemantauan data barang Safety Stock / Internal Stock berbasis Per Part.
+ * Dirancang ramah pengguna awam/operasional dengan 4 Kartu KPI Transparan dan 3 Tab Navigasi.
  */
 $breadcrumbCategory = "OPERASIONAL";
 $pageTitle = "Monitoring Safety Stock";
@@ -15,14 +16,49 @@ require_menu_access('safety_stock');
 
 $pdo = getDB();
 
-// Default Filter Values
-$startDate    = sanitize($_GET['start_date'] ?? date('Y-m-01'));
-$endDate      = sanitize($_GET['end_date'] ?? date('Y-m-d'));
+// ── 1. Parameter Filter & Tab ────────────────────────────────────────────────
+$period       = sanitize($_GET['period'] ?? '');
+$startDate    = sanitize($_GET['start_date'] ?? '');
+$endDate      = sanitize($_GET['end_date'] ?? '');
 $search       = sanitize($_GET['search'] ?? '');
-$customer     = sanitize($_GET['customer'] ?? '');
 $statusFilter = sanitize($_GET['status'] ?? '');
+$activeTab    = sanitize($_GET['tab'] ?? 'stok');
+if (!in_array($activeTab, ['stok', 'sisa', 'riwayat'])) {
+    $activeTab = 'stok';
+}
+$mutasiFilter = sanitize($_GET['mutasi'] ?? 'semua');
+if (!in_array($mutasiFilter, ['semua', 'normal', 'sisa', 'keluar'])) {
+    $mutasiFilter = 'semua';
+}
 
-// Dynamic Pagination Limit
+// Menentukan periode jika kosong
+if (empty($period)) {
+    if (!empty($startDate) || !empty($endDate)) {
+        $period = 'custom';
+    } else {
+        $period = 'semua';
+    }
+}
+
+// Preset mapping filter tanggal cepat
+if ($period === 'hari_ini') {
+    $startDate = date('Y-m-d');
+    $endDate   = date('Y-m-d');
+} elseif ($period === 'mingguan') {
+    $startDate = date('Y-m-d', strtotime('monday this week'));
+    $endDate   = date('Y-m-d');
+} elseif ($period === 'bulanan') {
+    $startDate = date('Y-m-01');
+    $endDate   = date('Y-m-d');
+} elseif ($period === 'tahunan') {
+    $startDate = date('Y-01-01');
+    $endDate   = date('Y-m-d');
+} elseif ($period === 'semua') {
+    $startDate = '';
+    $endDate   = '';
+}
+
+// Dynamic Limit & Page
 $limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 10;
 if (!in_array($limit, [5, 10, 25, 50, 100])) {
     $limit = 10;
@@ -30,39 +66,121 @@ if (!in_array($limit, [5, 10, 25, 50, 100])) {
 $page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1;
 if ($page < 1) $page = 1;
 
+/**
+ * Helper: Ekstrak Qty Box Asli (Sebelum Dipotong) & Kuantiti Pemotongan Kanban
+ * Digunakan untuk transparansi audit bagi user operasional & lapangan.
+ */
+if (!function_exists('parseSisaBoxOrigin')) {
+    function parseSisaBoxOrigin($qrRaw, $sisaQty, $kRemark = '', $lRemark = '') {
+        $origBoxQty   = 0;
+        $usedQty      = 0;
+        $isSplit      = false;
+        $originSessId = null;
+
+        // 1. Ekstrak Z3 dari QR raw scanner
+        if (!empty($qrRaw)) {
+            $parts = explode('|', $qrRaw);
+            foreach ($parts as $p) {
+                $p = trim($p);
+                if (str_starts_with($p, 'Z3')) {
+                    $v = (int)substr($p, 2);
+                    if ($v > 0) {
+                        $origBoxQty = $v;
+                        break;
+                    }
+                }
+            }
+        }
+
+        $combined = $kRemark . ' ' . $lRemark;
+
+        // 2. Ekstrak jika ada catatan teks "setelah diambil X pcs"
+        if (preg_match('/setelah diambil (\d+) pcs/i', $combined, $m)) {
+            $usedQty = (int)$m[1];
+            if ($origBoxQty <= 0) {
+                $origBoxQty = $sisaQty + $usedQty;
+            }
+        }
+
+        // 3. Ekstrak ID Sesi Asal Kanban
+        if (preg_match('/dari Sesi #(\d+)/i', $combined, $mSess)) {
+            $originSessId = (int)$mSess[1];
+        } elseif (preg_match('/AUTO-SS-SESS-(\d+)/i', $combined, $mSess)) {
+            $originSessId = (int)$mSess[1];
+        }
+
+        // 4. Hitung kuantiti yang terpakai jika box asli > sisa
+        if ($origBoxQty > 0 && $origBoxQty > $sisaQty) {
+            $isSplit = true;
+            if ($usedQty <= 0) {
+                $usedQty = $origBoxQty - $sisaQty;
+            }
+        } elseif ($origBoxQty > 0 && $sisaQty >= $origBoxQty) {
+            $isSplit = false;
+        }
+
+        return [
+            'orig_box_qty'   => $origBoxQty,
+            'used_qty'       => $usedQty,
+            'is_split'       => $isSplit,
+            'origin_sess_id' => $originSessId
+        ];
+    }
+}
+
+// ── 2. Struktur Data Ringkasan (KPI) ─────────────────────────────────────────
 $summary = [
-    'total_parts'     => 0,
-    'total_boxes'     => 0,
-    'total_initial'   => 0,
-    'total_used'      => 0,
-    'total_available' => 0
+    'total_parts'          => 0,
+    // 1. Masuk Normal (IN)
+    'normal_in_lots'       => 0,
+    'normal_in_qty'        => 0,
+    // 2. Masuk Sisa Scan Kanban (IN)
+    'sisa_in_lots'         => 0,
+    'sisa_in_qty'          => 0,
+    // 3. Keluar Terpakai Kanban (OUT)
+    'total_used_lots'      => 0,
+    'total_used_qty'       => 0,
+    // 4. Sisa di Gudang Saat Ini (READY)
+    'total_available_lots' => 0,
+    'total_available_qty'  => 0,
+    // Hitungan Khusus Tab Sisa
+    'sisa_events_count'    => 0,
+    'total_activities'     => 0
 ];
 
-$items = [];
-$totalItems = 0;
-$totalPages = 1;
-$customersList = [];
-$boxMap = [];
+$allParts     = [];
+$items        = [];
+$totalItems   = 0;
+$totalPages   = 1;
+
+$sisaItems        = [];
+$totalSisaItems   = 0;
+$totalSisaPages   = 1;
+
+$riwayatItems      = [];
+$totalRiwayatItems = 0;
+$totalRiwayatPages = 1;
 
 if ($pdo) {
     try {
-        // Fetch Master Customers for dropdown filter
-        $stCust = $pdo->query("SELECT DISTINCT name FROM master_customers WHERE UPPER(name) NOT LIKE '%SAFETY STOCK%' AND UPPER(name) NOT LIKE '%INTERNAL STOCK%' ORDER BY name ASC");
-        $customersList = $stCust->fetchAll(PDO::FETCH_COLUMN);
-
-        // Build WHERE clause strictly for Safety Stock inspection sessions
+        // ── A. Membangun Kondisi WHERE Dasar ─────────────────────────────────
         $where = ["ss.inspection_type = 'safety_stock'"];
         $params = [];
 
-        // Apply Date Range Filter if set
         if (!empty($startDate) && !empty($endDate)) {
-            $where[] = "DATE(COALESCE(ss.started_at, did.created_at)) BETWEEN :sd AND :ed";
-            $params[':sd'] = $startDate;
-            $params[':ed'] = $endDate;
+            $where[] = "(
+                DATE(COALESCE(ss.started_at, did.created_at)) BETWEEN :sd AND :ed
+                OR
+                (ss.auto_fulfilled_by_session_id > 0 AND DATE(s_kanban.started_at) BETWEEN :sd2 AND :ed2)
+            )";
+            $params[':sd']  = $startDate;
+            $params[':ed']  = $endDate;
+            $params[':sd2'] = $startDate;
+            $params[':ed2'] = $endDate;
         }
 
         if (!empty($search)) {
-            // Deteksi & Parsing Barcode QR Label Scanner (Format: Z1partCode|Z2lotNumber|Z3qty|Z4line|Z5refNumber)
+            // Deteksi & Parsing Barcode QR Label Scanner
             $qrPart = '';
             $qrLot  = '';
             $qrRef  = '';
@@ -123,35 +241,164 @@ if ($pdo) {
             }
         }
 
-        if (!empty($customer)) {
-            $where[] = "(ki.customer = :customer OR UPPER(:cust_chk) = 'INTERNAL SAFETY STOCK')";
-            $params[':customer'] = $customer;
-            $params[':cust_chk'] = $customer;
-        }
-
         $whereStr = implode(" AND ", $where);
 
-        // Grouped SQL Query to fetch Safety Stock grouped strictly by Part Code
+        // ── B. Query Pemakaian Memotong Kanban per Part ──────────────────────
+        $kanbanUsageWhere = [
+            "s_ss.inspection_type = 'safety_stock'",
+            "s_ss.auto_fulfilled_by_session_id > 0"
+        ];
+        $kanbanUsageParams = [];
+        if (!empty($startDate) && !empty($endDate)) {
+            $kanbanUsageWhere[] = "DATE(s_k.started_at) BETWEEN :ku_sd AND :ku_ed";
+            $kanbanUsageParams[':ku_sd'] = $startDate;
+            $kanbanUsageParams[':ku_ed'] = $endDate;
+        }
+        $kanbanUsageWhereStr = implode(" AND ", $kanbanUsageWhere);
+
+        $stKanbanUsage = $pdo->prepare("
+            SELECT 
+                UPPER(TRIM(COALESCE(did.part_code, ki.item_code, ''))) AS pcode,
+                SUM(COALESCE(s_ss.total_scanned_qty, 0)) AS total_kanban_used_qty,
+                COUNT(DISTINCT s_k.id) AS total_kanban_orders
+            FROM inspection_sessions s_ss
+            JOIN inspection_sessions s_k ON s_k.id = s_ss.auto_fulfilled_by_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = s_ss.kanban_item_id
+            WHERE {$kanbanUsageWhereStr}
+            GROUP BY UPPER(TRIM(COALESCE(did.part_code, ki.item_code, '')))
+        ");
+        $stKanbanUsage->execute($kanbanUsageParams);
+        $kanbanUsageMap = [];
+        while ($uRow = $stKanbanUsage->fetch(PDO::FETCH_ASSOC)) {
+            $kanbanUsageMap[$uRow['pcode']] = $uRow;
+        }
+
+        // ── C. Hitung Box Fisik per Part (Membedakan Normal vs Sisa) ──────────
+        $boxesWhere = [
+            "ss.inspection_type = 'safety_stock'",
+            "(isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))",
+            "(isl.lot_result IS NULL OR isl.lot_result != 'rejected')"
+        ];
+        $boxesParams = [];
+        if (!empty($startDate) && !empty($endDate)) {
+            $boxesWhere[] = "(
+                DATE(COALESCE(ss.started_at, did.created_at)) BETWEEN :b_sd AND :b_ed
+                OR
+                (ss.auto_fulfilled_by_session_id > 0 AND DATE(s_kanban.started_at) BETWEEN :b_sd2 AND :b_ed2)
+            )";
+            $boxesParams[':b_sd']  = $startDate;
+            $boxesParams[':b_ed']  = $endDate;
+            $boxesParams[':b_sd2'] = $startDate;
+            $boxesParams[':b_ed2'] = $endDate;
+        }
+        $boxesWhereStr = implode(" AND ", $boxesWhere);
+
+        $stmtBoxes = $pdo->prepare("
+            SELECT 
+                UPPER(TRIM(COALESCE(did.part_code, ki.item_code, ''))) AS pcode,
+                COUNT(CASE 
+                    WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%')
+                         AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))
+                    THEN isl.id 
+                    ELSE NULL 
+                END) AS normal_boxes,
+                COUNT(CASE 
+                    WHEN (ki.remark LIKE '%Auto Safety Stock%' OR isl.remarks LIKE '%Sisa Kelebihan Kanban%' OR isl.remarks LIKE '%Sisa Split Safety Stock%')
+                    THEN isl.id 
+                    ELSE NULL 
+                END) AS sisa_boxes,
+                COUNT(isl.id) AS total_boxes,
+                COUNT(CASE 
+                    WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
+                         AND ss.status = 'passed'
+                    THEN isl.id 
+                    ELSE NULL 
+                END) AS active_boxes
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN inspection_sessions s_kanban ON s_kanban.id = ss.auto_fulfilled_by_session_id
+            WHERE {$boxesWhereStr}
+            GROUP BY UPPER(TRIM(COALESCE(did.part_code, ki.item_code, '')))
+        ");
+        $stmtBoxes->execute($boxesParams);
+        $boxMap = [];
+        while ($bRow = $stmtBoxes->fetch(PDO::FETCH_ASSOC)) {
+            $boxMap[$bRow['pcode']] = $bRow;
+        }
+
+        // ── D. Hitung Lot Terpakai Kanban per Part ───────────────────────────
+        $usedWhere = [
+            "ss.inspection_type = 'safety_stock'",
+            "ss.auto_fulfilled_by_session_id > 0"
+        ];
+        $usedParams = [];
+        if (!empty($startDate) && !empty($endDate)) {
+            $usedWhere[] = "DATE(s_kanban.started_at) BETWEEN :u_sd AND :u_ed";
+            $usedParams[':u_sd'] = $startDate;
+            $usedParams[':u_ed'] = $endDate;
+        }
+        $usedWhereStr = implode(" AND ", $usedWhere);
+
+        $stUsedLots = $pdo->prepare("
+            SELECT 
+                UPPER(TRIM(COALESCE(did.part_code, ki.item_code, ''))) AS pcode,
+                COUNT(DISTINCT CONCAT(COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('NOREF-', isl.id)), '_', COALESCE(TRIM(isl.lot_number), 'NOLOT'))) AS used_lots
+            FROM inspection_session_lots isl
+            JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN inspection_sessions s_kanban ON s_kanban.id = ss.auto_fulfilled_by_session_id
+            WHERE {$usedWhereStr}
+            GROUP BY UPPER(TRIM(COALESCE(did.part_code, ki.item_code, '')))
+        ");
+        $stUsedLots->execute($usedParams);
+        $usedLotsMap = [];
+        while ($uRow = $stUsedLots->fetch(PDO::FETCH_ASSOC)) {
+            $usedLotsMap[$uRow['pcode']] = (int)$uRow['used_lots'];
+        }
+
+        // ── E. Query Utama Stok Dikelompokkan per Part ────────────────────────
         $groupedSql = "SELECT 
                         UPPER(COALESCE(did.part_code, ki.item_code, '-')) AS part_code,
                         MIN(COALESCE(did.part_name, ki.item_description, 'Part Safety Stock')) AS part_name,
                         MIN(COALESCE(ki.customer, 'INTERNAL SAFETY STOCK')) AS customer,
                         MAX(ss.started_at) AS last_started_at,
                         MAX(ss.id) AS max_session_id,
-                        COUNT(DISTINCT ss.id) AS session_count,
-                        SUM(ss.total_scanned_qty) AS total_initial_qty,
-                        SUM(CASE WHEN ss.auto_fulfilled_by_session_id > 0 THEN ss.total_scanned_qty ELSE 0 END) AS total_used_qty,
-                        SUM(CASE WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' THEN ss.total_scanned_qty ELSE 0 END) AS available_qty,
+                        -- Masuk Normal
+                        SUM(CASE 
+                            WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%') 
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END) AS normal_in_qty,
+                        -- Masuk Sisa Kanban
+                        SUM(CASE 
+                            WHEN (ki.remark LIKE '%Auto Safety Stock%' OR ss.id IN (
+                                SELECT isl_sub.inspection_session_id FROM inspection_session_lots isl_sub 
+                                WHERE isl_sub.remarks LIKE '%Sisa Kelebihan Kanban%'
+                            ))
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END) AS sisa_in_qty,
+                        -- Sisa yang belum memotong kanban & passed
+                        SUM(CASE 
+                            WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' 
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END) AS available_qty_raw,
                         CASE 
                             WHEN SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) > 0 THEN 'in_progress'
                             WHEN SUM(CASE WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' THEN ss.total_scanned_qty ELSE 0 END) > 0 THEN 'available'
                             WHEN SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) > 0 THEN 'rejected'
                             ELSE 'exhausted'
                         END AS part_status,
-                        COUNT(DISTINCT COALESCE(NULLIF(did.lot_number, ''), ki.kanban_no)) AS lot_count
+                        COUNT(DISTINCT ss.id) AS session_count
                        FROM inspection_sessions ss
                        LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
                        LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+                       LEFT JOIN inspection_sessions s_kanban ON s_kanban.id = ss.auto_fulfilled_by_session_id
                        WHERE {$whereStr}
                        GROUP BY UPPER(COALESCE(did.part_code, ki.item_code, '-'))
                        ORDER BY 
@@ -166,76 +413,309 @@ if ($pdo) {
         $stAll->execute($params);
         $allParts = $stAll->fetchAll(PDO::FETCH_ASSOC);
 
-        // Fetch distinct Box counts per Part Code based on latest physical scanned box records (latest per ref_number)
-        $stmtBoxes = $pdo->query("
+        // Hitung Kuantiti Realistis & Akumulasi untuk Setiap Part
+        foreach ($allParts as &$p) {
+            $pCode      = strtoupper(trim($p['part_code']));
+            $normalIn   = (int)$p['normal_in_qty'];
+            $sisaIn     = (int)$p['sisa_in_qty'];
+            $totalIn    = $normalIn + $sisaIn;
+            $usedQty    = (int)($kanbanUsageMap[$pCode]['total_kanban_used_qty'] ?? 0);
+            $availQty   = max(0, $totalIn - $usedQty);
+
+            $p['normal_in_qty']  = $normalIn;
+            $p['sisa_in_qty']    = $sisaIn;
+            $p['total_in_qty']   = $totalIn;
+            $p['total_used_qty'] = $usedQty;
+            $p['available_qty']  = $availQty;
+            $p['part_status']    = ($availQty > 0) ? 'available' : (($usedQty > 0) ? 'exhausted' : 'available');
+        }
+        unset($p);
+
+        // ── F. TAB 2: DATA KHUSUS SISA SCAN KANBAN (EXCESS) ──────────────────
+        // Mengambil seluruh kejadian sisa scan Kanban untuk menjawab: berapa kali, apa saja, kapan saja
+        $sisaWhere = [
+            "ss.inspection_type = 'safety_stock'",
+            "(ki.remark LIKE '%Auto Safety Stock%' OR isl.remarks LIKE '%Sisa Kelebihan Kanban%')"
+        ];
+        $sisaParams = [];
+
+        if (!empty($startDate) && !empty($endDate)) {
+            $sisaWhere[] = "DATE(COALESCE(ss.started_at, isl.created_at)) BETWEEN :sisa_sd AND :sisa_ed";
+            $sisaParams[':sisa_sd'] = $startDate;
+            $sisaParams[':sisa_ed'] = $endDate;
+        }
+
+        if (!empty($search)) {
+            $sisaWhere[] = "(
+                did.part_code LIKE :ss1 
+                OR did.part_name LIKE :ss2 
+                OR ki.item_code LIKE :ss3 
+                OR isl.lot_number LIKE :ss4 
+                OR isl.ref_number LIKE :ss5
+            )";
+            $like = '%' . $search . '%';
+            $sisaParams[':ss1'] = $like;
+            $sisaParams[':ss2'] = $like;
+            $sisaParams[':ss3'] = $like;
+            $sisaParams[':ss4'] = $like;
+            $sisaParams[':ss5'] = $like;
+        }
+
+        $sisaWhereStr = implode(" AND ", $sisaWhere);
+        $sqlSisa = "
             SELECT 
-                UPPER(TRIM(COALESCE(did.part_code, ki.item_code, ''))) AS pcode,
-                COUNT(DISTINCT latest_isl.ref_key) AS total_boxes,
-                COUNT(DISTINCT CASE 
-                    WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
-                    THEN latest_isl.ref_key
-                    ELSE NULL
-                END) AS active_boxes
-            FROM (
-                SELECT isl.id, isl.inspection_session_id,
-                       COALESCE(NULLIF(TRIM(isl.ref_number), ''), CONCAT('LOT-', isl.id)) AS ref_key
-                FROM inspection_session_lots isl
-                JOIN inspection_sessions ss2 ON ss2.id = isl.inspection_session_id
-                WHERE ss2.inspection_type = 'safety_stock'
-                  AND (isl.lot_status IS NULL OR isl.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                  AND isl.id IN (
-                      SELECT MAX(isl3.id)
-                      FROM inspection_session_lots isl3
-                      JOIN inspection_sessions ss3 ON ss3.id = isl3.inspection_session_id
-                      WHERE ss3.inspection_type = 'safety_stock'
-                        AND (isl3.lot_status IS NULL OR isl3.lot_status IN ('ok', 'reinspected', 'passed', ''))
-                      GROUP BY COALESCE(NULLIF(TRIM(isl3.ref_number), ''), CONCAT('LOT-', isl3.id))
-                  )
-            ) latest_isl
-            JOIN inspection_sessions ss ON ss.id = latest_isl.inspection_session_id
+                ss.id AS session_id,
+                ss.started_at,
+                ss.status,
+                ss.auto_fulfilled_by_session_id,
+                COALESCE(did.part_code, ki.item_code) AS part_code,
+                COALESCE(did.part_name, ki.item_description, 'Part Safety Stock') AS part_name,
+                COALESCE(isl.lot_number, did.lot_number, '-') AS lot_number,
+                COALESCE(isl.ref_number, '-') AS ref_number,
+                COALESCE(isl.qty, ss.total_scanned_qty, 0) AS sisa_qty,
+                isl.remarks AS lot_remarks,
+                ki.remark AS kanban_remark,
+                isl.scanned_qr_raw
+            FROM inspection_sessions ss
             LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
             LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
-            WHERE ss.inspection_type = 'safety_stock'
-            GROUP BY UPPER(TRIM(COALESCE(did.part_code, ki.item_code, '')))
+            LEFT JOIN inspection_session_lots isl ON isl.inspection_session_id = ss.id
+            WHERE {$sisaWhereStr}
+            ORDER BY ss.id DESC
+        ";
+        $stSisa = $pdo->prepare($sqlSisa);
+        $stSisa->execute($sisaParams);
+        $allSisaData = $stSisa->fetchAll(PDO::FETCH_ASSOC);
+        $summary['sisa_events_count'] = count($allSisaData);
+
+        // ── G. TAB 3: DATA LOG RIWAYAT AKTIVITAS (MUTASI KELUAR - MASUK) ─────
+        // Menggabungkan mutasi Masuk Normal, Masuk Sisa, dan Keluar Terpakai secara sinkron
+        $allActivities = [];
+
+        // 1. Aktivitas Masuk Sisa (dari $allSisaData yang sudah difilter periode/search)
+        foreach ($allSisaData as $sd) {
+            $allActivities[] = [
+                'timestamp' => $sd['started_at'],
+                'type'      => 'masuk_sisa',
+                'part_code' => $sd['part_code'],
+                'part_name' => $sd['part_name'],
+                'lot'       => $sd['lot_number'],
+                'ref'       => $sd['ref_number'],
+                'qty'       => (int)$sd['sisa_qty'],
+                'note'      => $sd['lot_remarks'] ?: $sd['kanban_remark'],
+                'session_id'=> $sd['session_id']
+            ];
+        }
+
+        // 2. Aktivitas Masuk Normal (Sesuai Filter Periode & Search, tanpa batasan LIMIT yang memotong data)
+        $normalActWhere = [
+            "ss.inspection_type = 'safety_stock'",
+            "(ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%')",
+            "(isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))",
+            "(isl.lot_status IS NULL OR isl.lot_status != 'action_closed')"
+        ];
+        $normalActParams = [];
+        if (!empty($startDate) && !empty($endDate)) {
+            $normalActWhere[] = "DATE(COALESCE(ss.started_at, did.created_at)) BETWEEN :na_sd AND :na_ed";
+            $normalActParams[':na_sd'] = $startDate;
+            $normalActParams[':na_ed'] = $endDate;
+        }
+        if (!empty($search)) {
+            $normalActWhere[] = "(did.part_code LIKE :na_s1 OR did.part_name LIKE :na_s2 OR ki.item_code LIKE :na_s3 OR isl.lot_number LIKE :na_s4 OR isl.ref_number LIKE :na_s5)";
+            $like = '%' . $search . '%';
+            $normalActParams[':na_s1'] = $like;
+            $normalActParams[':na_s2'] = $like;
+            $normalActParams[':na_s3'] = $like;
+            $normalActParams[':na_s4'] = $like;
+            $normalActParams[':na_s5'] = $like;
+        }
+        $normalActWhereStr = implode(" AND ", $normalActWhere);
+
+        $stNormalAct = $pdo->prepare("
+            SELECT 
+                ss.id AS session_id,
+                ss.started_at,
+                COALESCE(did.part_code, ki.item_code) AS part_code,
+                COALESCE(did.part_name, ki.item_description, 'Part Safety Stock') AS part_name,
+                COALESCE(isl.lot_number, did.lot_number, '-') AS lot_number,
+                COALESCE(isl.ref_number, '-') AS ref_number,
+                COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty
+            FROM inspection_sessions ss
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN inspection_session_lots isl ON isl.inspection_session_id = ss.id
+            WHERE {$normalActWhereStr}
+            ORDER BY ss.started_at DESC, ss.id DESC
         ");
-        if ($stmtBoxes) {
-            while ($bRow = $stmtBoxes->fetch(PDO::FETCH_ASSOC)) {
-                $boxMap[$bRow['pcode']] = $bRow;
-            }
+        $stNormalAct->execute($normalActParams);
+        while ($nRow = $stNormalAct->fetch(PDO::FETCH_ASSOC)) {
+            $allActivities[] = [
+                'timestamp' => $nRow['started_at'],
+                'type'      => 'masuk_normal',
+                'part_code' => $nRow['part_code'],
+                'part_name' => $nRow['part_name'],
+                'lot'       => $nRow['lot_number'],
+                'ref'       => $nRow['ref_number'],
+                'qty'       => (int)$nRow['qty'],
+                'note'      => 'Hasil inspeksi OQC Safety Stock (Masuk Normal)',
+                'session_id'=> $nRow['session_id']
+            ];
         }
 
-        // Apply Status Filter if specified
-        if (!empty($statusFilter)) {
-            $allParts = array_filter($allParts, function($p) use ($statusFilter) {
-                if ($statusFilter === 'available') return (int)$p['available_qty'] > 0;
-                if ($statusFilter === 'exhausted') return (int)$p['available_qty'] === 0 && (int)$p['total_used_qty'] > 0;
-                if ($statusFilter === 'in_progress') return $p['part_status'] === 'in_progress';
-                if ($statusFilter === 'rejected') return $p['part_status'] === 'rejected';
-                return true;
-            });
-            $allParts = array_values($allParts);
+        // 3. Aktivitas Keluar Kanban (DEDICATED QUERY - 100% SINKRON DENGAN 161 LOT KELUAR)
+        $keluarActWhere = [
+            "ss.inspection_type = 'safety_stock'",
+            "ss.auto_fulfilled_by_session_id > 0"
+        ];
+        $keluarActParams = [];
+        if (!empty($startDate) && !empty($endDate)) {
+            $keluarActWhere[] = "DATE(COALESCE(s_k.started_at, ss.started_at)) BETWEEN :ka_sd AND :ka_ed";
+            $keluarActParams[':ka_sd'] = $startDate;
+            $keluarActParams[':ka_ed'] = $endDate;
+        }
+        if (!empty($search)) {
+            $keluarActWhere[] = "(did.part_code LIKE :ka_s1 OR did.part_name LIKE :ka_s2 OR ki.item_code LIKE :ka_s3 OR isl.lot_number LIKE :ka_s4 OR isl.ref_number LIKE :ka_s5 OR ki_k.kanban_no LIKE :ka_s6)";
+            $like = '%' . $search . '%';
+            $keluarActParams[':ka_s1'] = $like;
+            $keluarActParams[':ka_s2'] = $like;
+            $keluarActParams[':ka_s3'] = $like;
+            $keluarActParams[':ka_s4'] = $like;
+            $keluarActParams[':ka_s5'] = $like;
+            $keluarActParams[':ka_s6'] = $like;
+        }
+        $keluarActWhereStr = implode(" AND ", $keluarActWhere);
+
+        $stKeluarAct = $pdo->prepare("
+            SELECT 
+                ss.id AS session_id,
+                COALESCE(s_k.started_at, ss.started_at) AS timestamp_keluar,
+                COALESCE(did.part_code, ki.item_code) AS part_code,
+                COALESCE(did.part_name, ki.item_description, 'Part Safety Stock') AS part_name,
+                COALESCE(isl.lot_number, did.lot_number, '-') AS lot_number,
+                COALESCE(isl.ref_number, '-') AS ref_number,
+                COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty_keluar,
+                ss.auto_fulfilled_by_session_id,
+                ki_k.kanban_no,
+                ki_k.qty AS kanban_order_qty
+            FROM inspection_sessions ss
+            JOIN inspection_sessions s_k ON s_k.id = ss.auto_fulfilled_by_session_id
+            LEFT JOIN kanban_items ki_k ON ki_k.id = s_k.kanban_item_id
+            LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+            LEFT JOIN kanban_items ki ON ki.id = ss.kanban_item_id
+            LEFT JOIN inspection_session_lots isl ON isl.inspection_session_id = ss.id
+            WHERE {$keluarActWhereStr}
+            ORDER BY COALESCE(s_k.started_at, ss.started_at) DESC, ss.id DESC
+        ");
+        $stKeluarAct->execute($keluarActParams);
+        while ($kRow = $stKeluarAct->fetch(PDO::FETCH_ASSOC)) {
+            $kNo = !empty($kRow['kanban_no']) ? "Kanban #{$kRow['kanban_no']}" : "Kanban Sesi #{$kRow['auto_fulfilled_by_session_id']}";
+            $kOrderQty = !empty($kRow['kanban_order_qty']) ? " (Demand: " . number_format($kRow['kanban_order_qty']) . " pcs)" : "";
+            $allActivities[] = [
+                'timestamp' => $kRow['timestamp_keluar'],
+                'type'      => 'keluar_kanban',
+                'part_code' => $kRow['part_code'],
+                'part_name' => $kRow['part_name'],
+                'lot'       => $kRow['lot_number'],
+                'ref'       => $kRow['ref_number'],
+                'qty'       => (int)$kRow['qty_keluar'],
+                'note'      => "Terpakai untuk memotong order {$kNo}{$kOrderQty}",
+                'session_id'=> $kRow['session_id'],
+                'kanban_id' => $kRow['auto_fulfilled_by_session_id']
+            ];
         }
 
-        // Compute Summary KPIs
+        // Urutkan aktivitas dari waktu terbaru ke terlama
+        usort($allActivities, function($a, $b) {
+            return strcmp($b['timestamp'] ?? '', $a['timestamp'] ?? '');
+        });
+        $summary['total_activities'] = count($allActivities);
+
+        // ── H. Hitung Akumulasi KPI Global ───────────────────────────────────
         $summary['total_parts'] = count($allParts);
         foreach ($allParts as $p) {
             $pCode = strtoupper(trim($p['part_code']));
             $bInfo = $boxMap[$pCode] ?? null;
-            $boxCount = ($bInfo && (int)$bInfo['total_boxes'] > 0) ? (int)$bInfo['total_boxes'] : max(1, (int)$p['session_count']);
 
-            $summary['total_boxes']     += $boxCount;
-            $summary['total_initial']   += (int)$p['total_initial_qty'];
-            $summary['total_used']      += (int)$p['total_used_qty'];
-            $summary['total_available'] += (int)$p['available_qty'];
+            $normalBoxes = ($bInfo && isset($bInfo['normal_boxes'])) ? (int)$bInfo['normal_boxes'] : (($p['normal_in_qty'] > 0) ? 1 : 0);
+            $sisaBoxes   = ($bInfo && isset($bInfo['sisa_boxes'])) ? (int)$bInfo['sisa_boxes'] : (($p['sisa_in_qty'] > 0) ? 1 : 0);
+            $totalBoxes  = max(1, $normalBoxes + $sisaBoxes);
+            $activeBoxes = ($bInfo && isset($bInfo['active_boxes'])) ? (int)$bInfo['active_boxes'] : (($p['available_qty'] > 0) ? $totalBoxes : 0);
+
+            $pUsedQty    = (int)$p['total_used_qty'];
+            if ($pUsedQty <= 0) {
+                $usedBoxes = 0;
+            } else {
+                $rawUsed = $usedLotsMap[$pCode] ?? 1;
+                $usedBoxes = min($totalBoxes, max(1, (int)$rawUsed));
+            }
+
+            // 1. Masuk Normal
+            $summary['normal_in_lots']       += $normalBoxes;
+            $summary['normal_in_qty']        += (int)$p['normal_in_qty'];
+            // 2. Masuk Sisa Kanban
+            $summary['sisa_in_lots']         += $sisaBoxes;
+            $summary['sisa_in_qty']          += (int)$p['sisa_in_qty'];
+            // 3. Keluar Terpakai Kanban
+            $summary['total_used_lots']      += $usedBoxes;
+            $summary['total_used_qty']       += $pUsedQty;
+            // 4. Sisa di Gudang (Ready)
+            $summary['total_available_lots'] += $activeBoxes;
+            $summary['total_available_qty']  += (int)$p['available_qty'];
         }
 
-        // Pagination for Grouped Results
+        // Pastikan Card 4 (Stok Gudang Saat Ini) konsisten 100% dengan rumus visual: (Masuk Normal + Sisa) - Keluar
+        $summary['total_available_lots'] = max(0, ($summary['normal_in_lots'] + $summary['sisa_in_lots']) - $summary['total_used_lots']);
+        $summary['total_available_qty']  = max(0, ($summary['normal_in_qty'] + $summary['sisa_in_qty']) - $summary['total_used_qty']);
+
+        // ── I. Pagination Data untuk Masing-Masing Tab ────────────────────────
+        // Tab 1: Stok per Part
         $totalItems = count($allParts);
         $totalPages = max(1, ceil($totalItems / $limit));
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
-
         $items = array_slice($allParts, $offset, $limit);
+
+        // Tab 2: Sisa Scan Kanban
+        $totalSisaItems = count($allSisaData);
+        $totalSisaPages = max(1, ceil($totalSisaItems / $limit));
+        $sisaItems = array_slice($allSisaData, $offset, $limit);
+
+        // Tab 3: Riwayat Aktivitas & Hitung Rincian KPI Mutasi
+        $mutasiSummary = [
+            'semua' => ['count' => count($allActivities), 'qty' => 0],
+            'normal'=> ['count' => 0, 'qty' => 0],
+            'sisa'  => ['count' => 0, 'qty' => 0],
+            'keluar'=> ['count' => 0, 'qty' => 0],
+        ];
+        foreach ($allActivities as $act) {
+            $qty = (int)$act['qty'];
+            $mutasiSummary['semua']['qty'] += $qty;
+            if ($act['type'] === 'masuk_normal') {
+                $mutasiSummary['normal']['count']++;
+                $mutasiSummary['normal']['qty'] += $qty;
+            } elseif ($act['type'] === 'masuk_sisa') {
+                $mutasiSummary['sisa']['count']++;
+                $mutasiSummary['sisa']['qty'] += $qty;
+            } elseif ($act['type'] === 'keluar_kanban') {
+                $mutasiSummary['keluar']['count']++;
+                $mutasiSummary['keluar']['qty'] += $qty;
+            }
+        }
+
+        // Filter aktivitas berdasarkan kategori kartu mutasi yang dipilih
+        $filteredActivities = $allActivities;
+        if ($mutasiFilter === 'normal') {
+            $filteredActivities = array_values(array_filter($allActivities, fn($a) => $a['type'] === 'masuk_normal'));
+        } elseif ($mutasiFilter === 'sisa') {
+            $filteredActivities = array_values(array_filter($allActivities, fn($a) => $a['type'] === 'masuk_sisa'));
+        } elseif ($mutasiFilter === 'keluar') {
+            $filteredActivities = array_values(array_filter($allActivities, fn($a) => $a['type'] === 'keluar_kanban'));
+        }
+
+        $totalRiwayatItems = count($filteredActivities);
+        $totalRiwayatPages = max(1, ceil($totalRiwayatItems / $limit));
+        $offsetRiwayat     = max(0, ($page - 1) * $limit);
+        $riwayatItems      = array_slice($filteredActivities, $offsetRiwayat, $limit);
 
     } catch (PDOException $e) {
         set_flash('error', 'Gagal memuat data Safety Stock: ' . $e->getMessage());
@@ -264,14 +744,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </svg>
                 </div>
                 <div>
-                    <h2 style="font-size: 14px; font-weight: 800; margin: 0; line-height: 1.2;">Monitoring Safety Stock</h2>
+                    <h2 style="font-size: 15px; font-weight: 800; margin: 0; line-height: 1.2;">Monitoring Safety Stock</h2>
                     <p style="font-size: 11px; color: #cbd5e1; font-weight: 500; margin-top: 3px;">
-                        Daftar stok pengaman per part, ketersediaan box di gudang, dan alokasi pemotongan Kanban
+                        Pemantauan stok fisik di gudang, limpahan sisa scan Kanban, dan catatan mutasi keluar-masuk
                     </p>
                 </div>
             </div>
 
-            <a href="<?= base_url('modules/safety_stock/index.php') ?>" style="background-color: #334155; color: #ffffff; border-radius: 8px; padding: 7px 14px; font-size: 11px; font-weight: 700; border: none; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;" title="Refresh Data">
+            <a href="<?= base_url('modules/safety_stock/index.php?tab=' . urlencode($activeTab)) ?>" style="background-color: #334155; color: #ffffff; border-radius: 8px; padding: 7px 14px; font-size: 11px; font-weight: 700; border: none; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;" title="Refresh Data">
                 <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                 </svg>
@@ -279,335 +759,835 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </a>
         </div>
 
-        <!-- 2. KPI CARDS (4 Cards Grid) -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+        <!-- 1.5 Quick Period Preset Pills Bar -->
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <span style="font-size: 11px; font-weight: 800; color: #1e293b; letter-spacing: 0.5px; text-transform: uppercase;">PERIODE:</span>
+                <div style="display: flex; align-items: center; gap: 4px; background: #f1f5f9; padding: 3px; border-radius: 9px; border: 1px solid #e2e8f0; flex-wrap: wrap;">
+                    <?php
+                    $periodOptions = [
+                        'hari_ini' => 'Hari Ini',
+                        'mingguan' => 'Minggu Ini',
+                        'bulanan'  => 'Bulan Ini',
+                        'tahunan'  => 'Tahun Ini',
+                        'semua'    => 'Semua'
+                    ];
+                    foreach ($periodOptions as $optKey => $optLabel):
+                        $isActive = ($period === $optKey);
+                        $pillStyle = $isActive 
+                            ? "background-color: #2563eb; color: #ffffff; font-weight: 800; box-shadow: 0 1px 3px rgba(37,99,235,0.3);" 
+                            : "background-color: transparent; color: #475569; font-weight: 700;";
+                        
+                        $pillParams = array_filter([
+                            'tab'    => $activeTab,
+                            'period' => $optKey,
+                            'search' => $search,
+                            'limit'  => ($limit != 10) ? $limit : null
+                        ]);
+                        $pillUrl = base_url('modules/safety_stock/index.php?') . http_build_query($pillParams);
+                    ?>
+                        <a href="<?= $pillUrl ?>" 
+                           style="padding: 5px 14px; border-radius: 6px; font-size: 11px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s ease-in-out; <?= $pillStyle ?>">
+                            <?= $optLabel ?>
+                        </a>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+
+            <!-- Keterangan Status Periode Aktif -->
+            <div style="font-size: 11px; font-weight: 600; color: #64748b; display: flex; align-items: center; gap: 6px;">
+                <?php if ($period === 'semua'): ?>
+                    <span style="display: inline-flex; align-items: center; gap: 5px;">
+                        <span style="width: 7px; height: 7px; border-radius: 9999px; background-color: #2563eb; display: inline-block;"></span>
+                        Cakupan: <b style="color: #2563eb;">Seluruh Stok Gudang (All-Time)</b>
+                    </span>
+                <?php elseif (!empty($startDate) && !empty($endDate)): ?>
+                    <span style="display: inline-flex; align-items: center; gap: 5px;">
+                        <span style="width: 7px; height: 7px; border-radius: 9999px; background-color: #10b981; display: inline-block;"></span>
+                        Filter: <b style="color: #1e293b;"><?= date('d M Y', strtotime($startDate)) ?></b> s/d <b style="color: #1e293b;"><?= date('d M Y', strtotime($endDate)) ?></b>
+                    </span>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- 2. KPI CARDS (4 Cards Grid - Didesain Khusus Transparan & Ramah Orang Awam) -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
             
-            <!-- Card 1: Total Part Safety Stock -->
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <!-- Card 1: 📥 Masuk Normal (IN) -->
+            <div style="background-color: #ffffff; border: 1px solid #bae6fd; border-left: 4px solid #0284c7; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Total Part</span>
-                    <span style="width: 8px; height: 8px; border-radius: 9999px; background-color: #2563eb; display: inline-block;"></span>
+                    <span style="font-size: 11px; font-weight: 800; color: #0369a1; letter-spacing: 0.5px; text-transform: uppercase;">
+                        📥 Masuk Normal (IN)
+                    </span>
+                    <span style="font-size: 10px; font-weight: 700; background-color: #e0f2fe; color: #0369a1; padding: 2px 6px; border-radius: 6px;">Baru</span>
                 </div>
-                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
-                    <span style="font-size: 22px; font-weight: 900; color: #0f172a; line-height: 1;"><?= number_format($summary['total_parts']) ?></span>
-                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">part</span>
+                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
+                    <span style="font-size: 22px; font-weight: 900; color: #0f172a; line-height: 1;"><?= number_format($summary['normal_in_lots']) ?></span>
+                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
+                    <span style="font-size: 13px; font-weight: 800; color: #0284c7; margin-left: 2px;">(<?= number_format($summary['normal_in_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 6px; border-top: 1px solid #f1f5f9; padding-top: 4px;">
-                    Kategori: <b style="color: #1e293b;">Master Safety Stock</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #f1f5f9; padding-top: 5px;">
+                    Asal: <b style="color: #0369a1;">Hasil Inspeksi OQC Murni</b>
                 </div>
             </div>
 
-            <!-- Card 2: Total Stok Masuk -->
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <!-- Card 2: 🔄 Masuk Sisa Scan Kanban (IN) -->
+            <div style="background-color: #fffdf5; border: 1px solid #fde68a; border-left: 4px solid #d97706; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Total Stok Masuk</span>
-                    <span style="width: 8px; height: 8px; border-radius: 9999px; background-color: #0284c7; display: inline-block;"></span>
+                    <span style="font-size: 11px; font-weight: 800; color: #b45309; letter-spacing: 0.5px; text-transform: uppercase;">
+                        🔄 Masuk Sisa Scan (IN)
+                    </span>
+                    <span style="font-size: 10px; font-weight: 800; background-color: #fef3c7; color: #b45309; padding: 2px 6px; border-radius: 6px;">Sisa Kanban</span>
                 </div>
-                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
-                    <span style="font-size: 22px; font-weight: 900; color: #0f172a; line-height: 1;"><?= number_format($summary['total_initial']) ?></span>
-                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
+                    <span style="font-size: 22px; font-weight: 900; color: #b45309; line-height: 1;"><?= number_format($summary['sisa_in_lots']) ?></span>
+                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
+                    <span style="font-size: 13px; font-weight: 800; color: #d97706; margin-left: 2px;">(<?= number_format($summary['sisa_in_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 6px; border-top: 1px solid #f1f5f9; padding-top: 4px;">
-                    Akumulasi: <b style="color: #0284c7;">Hasil Inspeksi OQC</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #fef3c7; padding-top: 5px;">
+                    Asal: <b style="color: #b45309;">Limpahan Sisa / Split Kanban</b>
                 </div>
             </div>
 
-            <!-- Card 3: Terpakai Memotong Kanban -->
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <!-- Card 3: 📤 Total Keluar (OUT) -->
+            <div style="background-color: #ffffff; border: 1px solid #e9d5ff; border-left: 4px solid #9333ea; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Terpakai Kanban</span>
-                    <span style="width: 8px; height: 8px; border-radius: 9999px; background-color: #7c3aed; display: inline-block;"></span>
+                    <span style="font-size: 11px; font-weight: 800; color: #7e22ce; letter-spacing: 0.5px; text-transform: uppercase;">
+                        📤 Total Keluar (OUT)
+                    </span>
+                    <span style="font-size: 10px; font-weight: 700; background-color: #f3e8ff; color: #7e22ce; padding: 2px 6px; border-radius: 6px;">Terpakai</span>
                 </div>
-                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
-                    <span style="font-size: 22px; font-weight: 900; color: #7c3aed; line-height: 1;"><?= number_format($summary['total_used']) ?></span>
-                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
+                    <span style="font-size: 22px; font-weight: 900; color: #9333ea; line-height: 1;"><?= number_format($summary['total_used_lots']) ?></span>
+                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
+                    <span style="font-size: 13px; font-weight: 800; color: #7e22ce; margin-left: 2px;">(<?= number_format($summary['total_used_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 6px; border-top: 1px solid #f1f5f9; padding-top: 4px;">
-                    Alokasi: <b style="color: #7c3aed;">Pemenuhan Order</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #f1f5f9; padding-top: 5px;">
+                    Alokasi: <b style="color: #7e22ce;">Memotong Order Kanban</b>
                 </div>
             </div>
 
-            <!-- Card 4: Sisa Stok di Gudang -->
-            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <!-- Card 4: 📦 Sisa Stok di Gudang (READY) -->
+            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="font-size: 10px; font-weight: 800; color: #166534; letter-spacing: 0.5px; text-transform: uppercase;">Sisa Stok Gudang</span>
-                    <span style="width: 8px; height: 8px; border-radius: 9999px; background-color: #16a34a; display: inline-block;"></span>
+                    <span style="font-size: 11px; font-weight: 800; color: #166534; letter-spacing: 0.5px; text-transform: uppercase;">
+                        📦 Stok Gudang Saat Ini
+                    </span>
+                    <span style="font-size: 10px; font-weight: 800; background-color: #dcfce7; color: #15803d; padding: 2px 6px; border-radius: 6px;">Fisik Siap Pakai</span>
                 </div>
-                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 4px;">
-                    <span style="font-size: 22px; font-weight: 900; color: #15803d; line-height: 1;"><?= number_format($summary['total_available']) ?></span>
-                    <span style="font-size: 11px; font-weight: 700; color: #166534;">pcs</span>
+                <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
+                    <span style="font-size: 22px; font-weight: 900; color: #15803d; line-height: 1;"><?= number_format($summary['total_available_lots']) ?></span>
+                    <span style="font-size: 11px; font-weight: 700; color: #166534;">Lot/Box</span>
+                    <span style="font-size: 13px; font-weight: 900; color: #15803d; margin-left: 2px;">(<?= number_format($summary['total_available_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #166534; font-weight: 500; margin-top: 6px; border-top: 1px solid #dcfce7; padding-top: 4px;">
-                    Status: <b style="color: #15803d;">Tersedia & Siap Pakai</b>
+                <div style="font-size: 10px; color: #166534; font-weight: 600; margin-top: 8px; border-top: 1px solid #dcfce7; padding-top: 5px;">
+                    Rumus: <b style="color: #15803d;">(Masuk Normal + Sisa) - Keluar</b>
                 </div>
             </div>
 
         </div>
 
-        <!-- 3. FILTER BAR -->
-        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; overflow-x: auto; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-            <form action="<?= base_url('modules/safety_stock/index.php') ?>" method="GET" style="display: flex; align-items: center; gap: 8px; min-width: 880px;">
+        <!-- 3. FILTER SEARCH BAR (Dengan scanner barcode & QR) -->
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <form action="<?= base_url('modules/safety_stock/index.php') ?>" method="GET" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+                <input type="hidden" name="mutasi" value="<?= htmlspecialchars($mutasiFilter) ?>">
+                <input type="hidden" name="period" value="<?= htmlspecialchars($period) ?>">
                 
-                <!-- Search Input with Barcode/QR Scanner support -->
-                <div style="width: 260px; flex-shrink: 0; position: relative;">
+                <div style="width: 320px; flex-shrink: 0; position: relative;">
                     <input type="text" id="safetyStockSearchInput" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Scan QR atau Cari Part, Lot, Ref..." 
                            onkeydown="handleSafetyStockSearchScan(event)"
-                           style="width: 100%; padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #1e293b; font-weight: 500; outline: none;">
+                           style="width: 100%; padding: 7px 12px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #1e293b; font-weight: 600; outline: none;">
                 </div>
 
-                <!-- Customer Filter -->
-                <select name="customer" onchange="this.form.submit()" style="width: 160px; padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #334155; font-weight: 600; outline: none; flex-shrink: 0;">
-                    <option value="">Semua Customer</option>
-                    <?php foreach ($customersList as $c): ?>
-                        <option value="<?= htmlspecialchars($c) ?>" <?= ($customer === $c) ? 'selected' : '' ?>><?= htmlspecialchars($c) ?></option>
-                    <?php endforeach; ?>
-                </select>
-
-                <!-- Status Filter -->
-                <select name="status" onchange="this.form.submit()" style="width: 150px; padding: 6px 10px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12px; color: #334155; font-weight: 600; outline: none; flex-shrink: 0;">
-                    <option value="">Semua Status</option>
-                    <option value="available" <?= ($statusFilter === 'available') ? 'selected' : '' ?>>Tersedia di WH</option>
-                    <option value="exhausted" <?= ($statusFilter === 'exhausted') ? 'selected' : '' ?>>Habis Terpakai</option>
-                    <option value="in_progress" <?= ($statusFilter === 'in_progress') ? 'selected' : '' ?>>In Progress</option>
-                    <option value="rejected" <?= ($statusFilter === 'rejected') ? 'selected' : '' ?>>Defect / Reject</option>
-                </select>
-
-                <!-- Start Date -->
-                <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">Dari:</span>
-                    <input type="date" name="start_date" value="<?= htmlspecialchars($startDate) ?>" style="padding: 5px 8px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 11px; color: #334155; font-weight: 600; outline: none;">
-                </div>
-
-                <!-- End Date -->
-                <div style="display: flex; align-items: center; gap: 4px; flex-shrink: 0;">
-                    <span style="font-size: 11px; font-weight: 700; color: #64748b;">s/d:</span>
-                    <input type="date" name="end_date" value="<?= htmlspecialchars($endDate) ?>" style="padding: 5px 8px; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 11px; color: #334155; font-weight: 600; outline: none;">
-                </div>
-
-                <!-- Action Buttons -->
-                <button type="submit" style="padding: 6px 14px; background-color: #2563eb; color: #ffffff; font-weight: 700; font-size: 12px; border-radius: 8px; border: none; cursor: pointer; flex-shrink: 0;">
+                <button type="submit" style="padding: 7px 16px; background-color: #2563eb; color: #ffffff; font-weight: 700; font-size: 12px; border-radius: 8px; border: none; cursor: pointer; flex-shrink: 0;">
                     Cari
                 </button>
 
-                <a href="<?= base_url('modules/safety_stock/index.php') ?>" style="padding: 6px 10px; background-color: #f1f5f9; color: #64748b; font-weight: 700; font-size: 12px; border-radius: 8px; border: 1px solid #cbd5e1; text-decoration: none; flex-shrink: 0;">
+                <a href="<?= base_url('modules/safety_stock/index.php?tab=' . urlencode($activeTab)) ?>" style="padding: 7px 12px; background-color: #f1f5f9; color: #64748b; font-weight: 700; font-size: 12px; border-radius: 8px; border: 1px solid #cbd5e1; text-decoration: none; flex-shrink: 0;">
                     Reset
                 </a>
-
             </form>
         </div>
 
-        <!-- 4. MAIN TABLE REALISASI SAFETY STOCK PER PART -->
-        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-            
-            <div style="padding: 12px 16px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <h2 style="font-size: 12px; font-weight: 800; color: #334155; text-transform: uppercase; letter-spacing: 0.5px; margin: 0;">
-                        Daftar Safety Stock per Part
-                    </h2>
-                    <span style="padding: 2px 8px; background-color: #dbeafe; color: #1d4ed8; font-size: 11px; font-weight: 800; border-radius: 9999px;">
-                        <?= number_format($totalItems) ?> Part
+        <!-- 4. TAB NAVIGATION BAR (3 Tab Jelas & Bersih) -->
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px 12px 0 0; padding: 6px 10px; border-bottom: 2px solid #e2e8f0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <?php
+                $tabUrlHelper = function($tabName) use ($period, $search, $limit) {
+                    $p = [
+                        'tab'    => $tabName,
+                        'period' => $period,
+                        'search' => $search,
+                        'limit'  => ($limit != 10) ? $limit : null
+                    ];
+                    return base_url('modules/safety_stock/index.php?') . http_build_query(array_filter($p));
+                };
+            ?>
+
+            <!-- Tab 1: Stok Barang di Gudang -->
+            <a href="<?= $tabUrlHelper('stok') ?>" 
+               style="padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 800; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; <?= ($activeTab === 'stok') ? 'background-color: #2563eb; color: #ffffff; box-shadow: 0 1px 3px rgba(37,99,235,0.3);' : 'background-color: transparent; color: #475569;' ?>">
+                <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                </svg>
+                <span>1. Stok Barang per Part</span>
+                <span style="font-size: 10px; padding: 2px 7px; border-radius: 9999px; font-weight: 800; <?= ($activeTab === 'stok') ? 'background-color: #1d4ed8; color: #ffffff;' : 'background-color: #e2e8f0; color: #334155;' ?>">
+                    <?= number_format($summary['total_parts']) ?> Part
+                </span>
+            </a>
+
+            <!-- Tab 2: Sisa dari Scan Kanban -->
+            <a href="<?= $tabUrlHelper('sisa') ?>" 
+               style="padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 800; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; <?= ($activeTab === 'sisa') ? 'background-color: #d97706; color: #ffffff; box-shadow: 0 1px 3px rgba(217,119,6,0.3);' : 'background-color: transparent; color: #475569;' ?>">
+                <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                <span>2. Sisa dari Scan Kanban</span>
+                <span style="font-size: 10px; padding: 2px 7px; border-radius: 9999px; font-weight: 800; <?= ($activeTab === 'sisa') ? 'background-color: #b45309; color: #ffffff;' : 'background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a;' ?>">
+                    <?= number_format($summary['sisa_events_count']) ?> Box Sisa
+                </span>
+            </a>
+
+            <!-- Tab 3: Riwayat Aktivitas / Mutasi -->
+            <a href="<?= $tabUrlHelper('riwayat') ?>" 
+               style="padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 800; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; <?= ($activeTab === 'riwayat') ? 'background-color: #7e22ce; color: #ffffff; box-shadow: 0 1px 3px rgba(126,34,206,0.3);' : 'background-color: transparent; color: #475569;' ?>">
+                <svg style="width: 16px; height: 16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
+                </svg>
+                <span>3. Riwayat Mutasi (Keluar - Masuk)</span>
+                <span style="font-size: 10px; padding: 2px 7px; border-radius: 9999px; font-weight: 800; <?= ($activeTab === 'riwayat') ? 'background-color: #6b21a8; color: #ffffff;' : 'background-color: #f3e8ff; color: #7e22ce;' ?>">
+                    <?= number_format($summary['total_activities']) ?> Log
+                </span>
+            </a>
+        </div>
+
+        <!-- 5. KONTEN MASING-MASING TAB -->
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 12px 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+
+            <!-- ════════════════════════════════════════════════════════════════
+                 TAB 1: STOK BARANG PER PART
+                 ════════════════════════════════════════════════════════════════ -->
+            <?php if ($activeTab === 'stok'): ?>
+                <div style="padding: 12px 16px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <h2 style="font-size: 13px; font-weight: 800; color: #1e293b; text-transform: uppercase; margin: 0;">
+                            Daftar Stok Safety Stock per Part
+                        </h2>
+                    </div>
+
+                    <!-- Limit Dropdown -->
+                    <form method="GET" action="<?= base_url('modules/safety_stock/index.php') ?>" style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+                        <input type="hidden" name="tab" value="stok">
+                        <input type="hidden" name="period" value="<?= htmlspecialchars($period) ?>">
+                        <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+
+                        <span style="color: #64748b; font-weight: 600;">Tampilkan:</span>
+                        <select name="limit" onchange="this.form.submit()" style="padding: 4px 8px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; font-weight: 700; color: #334155; outline: none;">
+                            <option value="5" <?= ($limit == 5) ? 'selected' : '' ?>>5</option>
+                            <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10</option>
+                            <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25</option>
+                            <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50</option>
+                            <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100</option>
+                        </select>
+                    </form>
+                </div>
+
+                <div style="overflow-x-auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
+                        <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
+                            <tr>
+                                <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
+                                <th style="padding: 10px 14px; min-width: 180px;">Kode & Nama Part</th>
+                                <th style="padding: 10px 14px; text-align: center; width: 100px;">Kemasan Box</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #0369a1;">📥 Masuk Normal</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #b45309;">🔄 Sisa Kanban</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #7e22ce;">📤 Terpakai</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 120px; color: #15803d; background-color: #f0fdf4;">📦 Sisa di Rak</th>
+                                <th style="padding: 10px 14px; width: 100px; text-align: center;">Status</th>
+                                <th style="padding: 10px 14px; min-width: 120px;">Tgl Terakhir</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 90px;">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($items)): ?>
+                                <tr>
+                                    <td colspan="10" style="padding: 48px; text-align: center; color: #94a3b8;">
+                                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                                            <span style="font-weight: 800; color: #334155; font-size: 14px;">Belum Ada Data Safety Stock</span>
+                                            <span style="font-size: 12px; color: #64748b; margin-top: 4px;">Data stok pengaman yang diinspeksi OQC akan tampil di sini.</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($items as $idx => $it): ?>
+                                    <?php 
+                                        $rowNum = $offset + $idx + 1;
+                                        $pCode = strtoupper(trim($it['part_code']));
+                                        $bInfo = $boxMap[$pCode] ?? null;
+
+                                        $normalBoxes = ($bInfo && isset($bInfo['normal_boxes'])) ? (int)$bInfo['normal_boxes'] : (($it['normal_in_qty'] > 0) ? 1 : 0);
+                                        $sisaBoxes   = ($bInfo && isset($bInfo['sisa_boxes'])) ? (int)$bInfo['sisa_boxes'] : (($it['sisa_in_qty'] > 0) ? 1 : 0);
+                                        $totalBoxes  = max(1, $normalBoxes + $sisaBoxes);
+                                        $availBoxes  = ($bInfo && isset($bInfo['active_boxes'])) ? (int)$bInfo['active_boxes'] : (($it['available_qty'] > 0) ? $totalBoxes : 0);
+
+                                        $normalIn = (int)$it['normal_in_qty'];
+                                        $sisaIn   = (int)$it['sisa_in_qty'];
+                                        $usedQty  = (int)$it['total_used_qty'];
+                                        $availQty = (int)$it['available_qty'];
+
+                                        // Status badge
+                                        if ($availQty > 0) {
+                                            $statusBadge = '<span style="display: inline-flex; align-items: center; justify-content: center; background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap;">TERSEDIA</span>';
+                                        } else {
+                                            $statusBadge = '<span style="display: inline-flex; align-items: center; justify-content: center; background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; white-space: nowrap;">HABIS</span>';
+                                        }
+                                    ?>
+                                    <tr style="border-bottom: 1px solid #f1f5f9;">
+                                        <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $rowNum ?></td>
+                                        
+                                        <!-- Kode & Nama Part -->
+                                        <td style="padding: 10px 14px;">
+                                            <div style="font-weight: 800; color: #1d4ed8; font-family: monospace; font-size: 13px; margin-bottom: 2px;">
+                                                <?= htmlspecialchars($it['part_code']) ?>
+                                            </div>
+                                            <div style="font-weight: 600; color: #1e293b; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;" title="<?= htmlspecialchars($it['part_name']) ?>">
+                                                <?= htmlspecialchars($it['part_name']) ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- Kemasan Box -->
+                                        <td style="padding: 10px 14px; text-align: center;">
+                                            <span style="font-weight: 800; color: #1e293b; background-color: #f8fafc; padding: 3px 8px; border-radius: 9999px; border: 1px solid #cbd5e1; font-size: 11px;">
+                                                <?= number_format($totalBoxes) ?> Box
+                                            </span>
+                                        </td>
+
+                                        <!-- Masuk Normal -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <span style="font-weight: 800; color: #0284c7; font-size: 12px; font-family: monospace;">
+                                                <?= number_format($normalIn) ?> <span style="font-size: 10px; font-weight: 600; color: #64748b;">pcs</span>
+                                            </span>
+                                        </td>
+
+                                        <!-- Masuk Sisa Kanban -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <?php if ($sisaIn > 0): ?>
+                                                <span style="font-weight: 800; color: #d97706; font-size: 12px; font-family: monospace; background-color: #fffbeb; padding: 2px 6px; border-radius: 6px; border: 1px solid #fde68a;">
+                                                    +<?= number_format($sisaIn) ?> pcs
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="color: #94a3b8; font-size: 11px;">0 pcs</span>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Terpakai Kanban -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <span style="font-weight: 800; color: #7e22ce; font-size: 12px; font-family: monospace;">
+                                                <?= number_format($usedQty) ?> <span style="font-size: 10px; font-weight: 600; color: #7e22ce;">pcs</span>
+                                            </span>
+                                        </td>
+
+                                        <!-- Sisa di Rak Gudang -->
+                                        <td style="padding: 10px 14px; text-align: right; background-color: #f0fdf4;">
+                                            <div style="font-weight: 900; color: <?= ($availQty > 0) ? '#15803d' : '#94a3b8' ?>; font-size: 13px; font-family: monospace;">
+                                                <?= number_format($availQty) ?> <span style="font-size: 10px; font-weight: 700;">pcs</span>
+                                            </div>
+                                            <div style="font-size: 10px; color: #166534; font-weight: 600;">
+                                                (<?= number_format($availBoxes) ?> Box)
+                                            </div>
+                                        </td>
+
+                                        <!-- Status -->
+                                        <td style="padding: 10px 14px; text-align: center;">
+                                            <?= $statusBadge ?>
+                                        </td>
+
+                                        <!-- Tanggal Terakhir -->
+                                        <td style="padding: 10px 14px; color: #64748b; font-weight: 500; font-size: 11px;">
+                                            <?= !empty($it['last_started_at']) ? date('d M Y, H:i', strtotime($it['last_started_at'])) : '-' ?>
+                                        </td>
+
+                                        <!-- Aksi -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code'])) ?>" 
+                                               style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none; display: inline-flex; align-items: center; gap: 3px;">
+                                                <span>Detail</span> &raquo;
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination Tab 1 -->
+                <?php if ($totalPages > 1): ?>
+                    <div style="padding: 12px 16px; border-top: 1px solid #e2e8f0; background-color: #f8fafc; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px;">
+                        <div style="color: #64748b;">
+                            Halaman <b style="color: #1e293b;"><?= $page ?></b> dari <b style="color: #1e293b;"><?= $totalPages ?></b> (Total <?= number_format($totalItems) ?> part)
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <?php 
+                                $queryParams = $_GET; 
+                                $queryParams['tab'] = 'stok';
+                                $queryParams['page'] = max(1, $page - 1);
+                                $prevUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                                $queryParams['page'] = min($totalPages, $page + 1);
+                                $nextUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                            ?>
+                            <a href="<?= $prevUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page <= 1) ? 'pointer-events-none opacity-50' : '' ?>">&laquo; Prev</a>
+                            <span style="padding: 5px 10px; font-weight: 800; color: #1d4ed8;"><?= $page ?></span>
+                            <a href="<?= $nextUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page >= $totalPages) ? 'pointer-events-none opacity-50' : '' ?>">Next &raquo;</a>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+            <!-- ════════════════════════════════════════════════════════════════
+                 TAB 2: SISA DARI SCAN KANBAN (EXCESS AUDIT)
+                 ════════════════════════════════════════════════════════════════ -->
+            <?php elseif ($activeTab === 'sisa'): ?>
+                <div style="padding: 12px 16px; background-color: #fffdf5; border-bottom: 1px solid #fde68a; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div>
+                        <h2 style="font-size: 13px; font-weight: 800; color: #b45309; text-transform: uppercase; margin: 0;">
+                            Laporan Khusus Sisa Scan Kanban (Limpahan Excess)
+                        </h2>
+                        <p style="font-size: 11px; color: #78350f; margin: 2px 0 0 0;">
+                            Menjawab kapan dan apa saja box sisa/kelebihan yang terjadi saat proses scan order Kanban
+                        </p>
+                    </div>
+
+                    <span style="padding: 4px 10px; background-color: #fef3c7; color: #b45309; font-size: 11px; font-weight: 800; border-radius: 9999px; border: 1px solid #fde68a;">
+                        Total: <?= number_format($totalSisaItems) ?> Kejadian Sisa
                     </span>
                 </div>
 
-                <!-- Dynamic Limit Dropdown -->
-                <form method="GET" action="<?= base_url('modules/safety_stock/index.php') ?>" style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
-                    <input type="hidden" name="start_date" value="<?= htmlspecialchars($startDate) ?>">
-                    <input type="hidden" name="end_date" value="<?= htmlspecialchars($endDate) ?>">
-                    <input type="hidden" name="customer" value="<?= htmlspecialchars($customer) ?>">
-                    <input type="hidden" name="status" value="<?= htmlspecialchars($statusFilter) ?>">
-                    <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
-
-                    <span style="color: #64748b; font-weight: 500;">Tampilkan:</span>
-                    <select name="limit" onchange="this.form.submit()" style="padding: 4px 8px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; font-weight: 700; color: #334155; outline: none;">
-                        <option value="5" <?= ($limit == 5) ? 'selected' : '' ?>>5</option>
-                        <option value="10" <?= ($limit == 10) ? 'selected' : '' ?>>10</option>
-                        <option value="25" <?= ($limit == 25) ? 'selected' : '' ?>>25</option>
-                        <option value="50" <?= ($limit == 50) ? 'selected' : '' ?>>50</option>
-                        <option value="100" <?= ($limit == 100) ? 'selected' : '' ?>>100</option>
-                    </select>
-                </form>
-            </div>
-
-            <div style="overflow-x-auto;">
-                <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
-                    <thead style="background-color: #ffffff; border-bottom: 1px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase;">
-                        <tr>
-                            <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
-                            <th style="padding: 10px 14px; min-width: 180px;">Kode & Nama Part</th>
-                            <th style="padding: 10px 14px; min-width: 140px;">Customer</th>
-                            <th style="padding: 10px 14px; text-align: center; width: 110px;">Kemasan Box</th>
-                            <th style="padding: 10px 14px; text-align: right; width: 110px;">Stok Masuk</th>
-                            <th style="padding: 10px 14px; text-align: right; width: 110px;">Terpakai</th>
-                            <th style="padding: 10px 14px; text-align: right; width: 120px;">Sisa di WH</th>
-                            <th style="padding: 10px 14px; width: 110px;">Status</th>
-                            <th style="padding: 10px 14px; min-width: 130px;">Tgl Terakhir</th>
-                            <th style="padding: 10px 14px; text-align: right; width: 90px;">Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php if (empty($items)): ?>
+                <div style="overflow-x-auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
+                        <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
-                                <td colspan="10" style="padding: 48px; text-align: center; color: #94a3b8;">
-                                    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
-                                        <svg style="width: 44px; height: 44px; color: #cbd5e1; margin-bottom: 8px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
-                                        </svg>
-                                        <span style="font-weight: 800; color: #334155; font-size: 14px;">Belum Ada Data Safety Stock</span>
-                                        <span style="font-size: 12px; color: #64748b; margin-top: 4px; max-width: 460px; line-height: 1.4;">
-                                            Data safety stock yang diinspeksi OQC akan otomatis dikelompokkan per part di halaman ini.
-                                        </span>
-                                    </div>
-                                </td>
+                                <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
+                                <th style="padding: 10px 14px; min-width: 130px;">Waktu Terjadi</th>
+                                <th style="padding: 10px 14px; min-width: 180px;">Part (Kode & Nama)</th>
+                                <th style="padding: 10px 14px; min-width: 120px;">No. Lot / No. Ref</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 155px; color: #b45309;">Rincian Qty (Asli &rarr; Sisa)</th>
+                                <th style="padding: 10px 14px; min-width: 240px;">Keterangan Asal Sisa</th>
+                                <th style="padding: 10px 14px; width: 120px; text-align: center;">Status Fisik</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 80px;">Aksi</th>
                             </tr>
-                        <?php else: ?>
-                            <?php foreach ($items as $idx => $it): ?>
-                                <?php 
-                                    $rowNum = $offset + $idx + 1;
-                                    $pCode = strtoupper(trim($it['part_code']));
-                                    $bInfo = $boxMap[$pCode] ?? null;
-                                    $totalBoxes = ($bInfo && (int)$bInfo['total_boxes'] > 0) ? (int)$bInfo['total_boxes'] : max(1, (int)$it['session_count']);
-                                    $activeBoxes = ($bInfo && isset($bInfo['active_boxes']) && (int)$bInfo['total_boxes'] > 0) ? (int)$bInfo['active_boxes'] : $totalBoxes;
-
-                                    $totalInitialQty = (int)$it['total_initial_qty'];
-                                    $totalUsedQty    = (int)$it['total_used_qty'];
-                                    $availQty        = max(0, (int)$it['available_qty']);
-
-                                    // Status Badge Logic
-                                    $pStatus = $it['part_status'];
-                                    if ($availQty > 0) {
-                                        $statusBadge = '<span style="background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 2px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px;">TERSEDIA</span>';
-                                    } elseif ($totalUsedQty > 0 && $availQty === 0) {
-                                        $statusBadge = '<span style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; padding: 2px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px;">HABIS</span>';
-                                    } elseif ($pStatus === 'in_progress') {
-                                        $statusBadge = '<span style="background-color: #fef3c7; color: #92400e; border: 1px solid #fde68a; padding: 2px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px;">IN PROGRESS</span>';
-                                    } elseif ($pStatus === 'rejected') {
-                                        $statusBadge = '<span style="background-color: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 2px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px;">DEFECT</span>';
-                                    } else {
-                                        $statusBadge = '<span style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; padding: 2px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px;">SELESAI</span>';
-                                    }
-                                ?>
-                                <tr style="border-bottom: 1px solid #f1f5f9;">
-                                    <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $rowNum ?></td>
-                                    
-                                    <!-- Kode & Nama Part -->
-                                    <td style="padding: 10px 14px;">
-                                        <div style="font-weight: 800; color: #1d4ed8; font-family: monospace; font-size: 13px; margin-bottom: 2px;">
-                                            <?= htmlspecialchars($it['part_code']) ?>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($sisaItems)): ?>
+                                <tr>
+                                    <td colspan="8" style="padding: 48px; text-align: center; color: #94a3b8;">
+                                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                                            <span style="font-weight: 800; color: #334155; font-size: 14px;">Belum Ada Sisa Scan Kanban</span>
+                                            <span style="font-size: 12px; color: #64748b; margin-top: 4px;">Jika ada scan kanban yang menghasilkan sisa pecahan box, datanya otomatis tercatat di sini.</span>
                                         </div>
-                                        <div style="font-weight: 600; color: #1e293b; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;" title="<?= htmlspecialchars($it['part_name']) ?>">
-                                            <?= htmlspecialchars($it['part_name']) ?>
-                                        </div>
-                                    </td>
-
-                                    <!-- Customer -->
-                                    <td style="padding: 10px 14px;">
-                                        <span style="font-weight: 600; color: #475569; font-size: 11px;">
-                                            <?= htmlspecialchars($it['customer'] ?: 'INTERNAL SAFETY STOCK') ?>
-                                        </span>
-                                    </td>
-
-                                    <!-- Kemasan Box -->
-                                    <td style="padding: 10px 14px; text-align: center;">
-                                        <span style="font-weight: 800; color: #1e293b; background-color: #f8fafc; padding: 3px 10px; border-radius: 9999px; border: 1px solid #cbd5e1; font-size: 11px; display: inline-block;">
-                                            <?= number_format($totalBoxes) ?> Box
-                                        </span>
-                                    </td>
-
-                                    <!-- Stok Masuk -->
-                                    <td style="padding: 10px 14px; text-align: right;">
-                                        <span style="font-family: monospace; font-weight: 700; color: #475569; font-size: 12px;">
-                                            <?= number_format($totalInitialQty) ?>
-                                        </span>
-                                        <span style="font-size: 10px; color: #94a3b8;"> pcs</span>
-                                    </td>
-
-                                    <!-- Terpakai Kanban -->
-                                    <td style="padding: 10px 14px; text-align: right;">
-                                        <span style="font-family: monospace; font-weight: 800; color: #7c3aed; font-size: 12px;">
-                                            <?= number_format($totalUsedQty) ?>
-                                        </span>
-                                        <span style="font-size: 10px; color: #94a3b8;"> pcs</span>
-                                    </td>
-
-                                    <!-- Sisa di WH -->
-                                    <td style="padding: 10px 14px; text-align: right;">
-                                        <span style="font-family: monospace; font-weight: 900; color: <?= ($availQty > 0) ? '#15803d' : '#94a3b8' ?>; font-size: 13px;">
-                                            <?= number_format($availQty) ?>
-                                        </span>
-                                        <span style="font-size: 10px; color: <?= ($availQty > 0) ? '#166534' : '#94a3b8' ?>;"> pcs</span>
-                                    </td>
-
-                                    <!-- Status -->
-                                    <td style="padding: 10px 14px;">
-                                        <?= $statusBadge ?>
-                                    </td>
-
-                                    <!-- Tanggal Terakhir -->
-                                    <td style="padding: 10px 14px; color: #64748b; font-weight: 500; font-size: 11px;">
-                                        <?php if (!empty($it['last_started_at'])): ?>
-                                            <?= date('d M Y, H:i', strtotime($it['last_started_at'])) ?>
-                                        <?php else: ?>
-                                            <span style="color: #94a3b8;">-</span>
-                                        <?php endif; ?>
-                                    </td>
-
-                                    <!-- Aksi -->
-                                    <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
-                                        <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code'])) ?>" 
-                                           style="padding: 6px 12px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 8px; border: 1px solid #bfdbfe; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;" 
-                                           title="Lihat Detail Box & Pemakaian Kanban">
-                                            <svg style="width: 13px; height: 13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                                            </svg>
-                                            <span>Detail</span>
-                                        </a>
                                     </td>
                                 </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
+                            <?php else: ?>
+                                <?php foreach ($sisaItems as $idx => $sRow): ?>
+                                    <?php 
+                                        $rowNum = $offset + $idx + 1;
+                                        $isUsed = (!empty($sRow['auto_fulfilled_by_session_id']) && (int)$sRow['auto_fulfilled_by_session_id'] > 0);
+                                        $qtySisa = (int)$sRow['sisa_qty'];
+                                        $bInfo = parseSisaBoxOrigin($sRow['scanned_qr_raw'], $qtySisa, $sRow['kanban_remark'], $sRow['lot_remarks']);
+                                    ?>
+                                    <tr style="border-bottom: 1px solid #f1f5f9;">
+                                        <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $rowNum ?></td>
+                                        
+                                        <!-- Waktu Terjadi -->
+                                        <td style="padding: 10px 14px; white-space: nowrap;">
+                                            <div style="font-weight: 800; color: #1e293b; font-size: 12px;">
+                                                <?= date('d M Y', strtotime($sRow['started_at'])) ?>
+                                            </div>
+                                            <div style="font-size: 11px; color: #64748b; font-weight: 600;">
+                                                Pukul <?= date('H:i', strtotime($sRow['started_at'])) ?> WIB
+                                            </div>
+                                        </td>
 
-            <!-- PAGINATION FOOTER -->
-            <?php if ($totalPages > 1): ?>
-                <div style="padding: 12px 16px; border-top: 1px solid #e2e8f0; background-color: #f8fafc; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px;">
-                    <div style="color: #64748b;">
-                        Menampilkan halaman <b style="color: #1e293b;"><?= $page ?></b> dari <b style="color: #1e293b;"><?= $totalPages ?></b> (Total <?= number_format($totalItems) ?> part)
+                                        <!-- Part -->
+                                        <td style="padding: 10px 14px;">
+                                            <div style="font-weight: 800; color: #1d4ed8; font-family: monospace; font-size: 13px;">
+                                                <?= htmlspecialchars($sRow['part_code']) ?>
+                                            </div>
+                                            <div style="font-size: 11px; color: #475569; font-weight: 600;">
+                                                <?= htmlspecialchars($sRow['part_name']) ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- Lot & Ref -->
+                                        <td style="padding: 10px 14px;">
+                                            <div style="font-weight: 700; color: #1e293b; font-size: 12px;">
+                                                Lot: <span style="font-family: monospace; font-weight: 800;"><?= htmlspecialchars($sRow['lot_number']) ?></span>
+                                            </div>
+                                            <div style="font-size: 11px; color: #64748b;">
+                                                Ref: <span style="font-family: monospace; font-weight: 600;"><?= htmlspecialchars($sRow['ref_number']) ?></span>
+                                            </div>
+                                        </td>
+
+                                        <!-- Rincian Qty (Asli & Sisa) -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <!-- Qty Sisa di Rak (Angka Utama) -->
+                                            <div style="font-size: 14px; font-weight: 900; color: #b45309; font-family: monospace;">
+                                                <?= number_format($qtySisa) ?> <span style="font-size: 11px; font-weight: 700;">pcs</span>
+                                            </div>
+
+                                            <?php if ($bInfo['is_split'] && $bInfo['orig_box_qty'] > 0): ?>
+                                                <!-- Kotak Rincian Box Asli vs Pemotongan -->
+                                                <div style="margin-top: 4px; padding: 4px 8px; background-color: #fffdf5; border: 1px solid #fde68a; border-radius: 6px; font-size: 10px; line-height: 1.4; text-align: right; display: inline-block;">
+                                                    <div style="color: #475569; font-weight: 700;">
+                                                        📦 Box Asli: <b style="color: #0369a1; font-family: monospace;"><?= number_format($bInfo['orig_box_qty']) ?> pcs</b>
+                                                    </div>
+                                                    <div style="color: #991b1b; font-weight: 700;">
+                                                        ✂️ Terpakai: <b style="color: #b91c1c; font-family: monospace;">-<?= number_format($bInfo['used_qty']) ?> pcs</b>
+                                                    </div>
+                                                </div>
+                                            <?php elseif ($bInfo['orig_box_qty'] > 0): ?>
+                                                <?php $boxCount = max(1, round($qtySisa / $bInfo['orig_box_qty'])); ?>
+                                                <div style="margin-top: 3px; font-size: 10px; color: #64748b; font-weight: 600;">
+                                                    Standar: <b style="color: #1e293b;"><?= number_format($bInfo['orig_box_qty']) ?> pcs/box</b>
+                                                    <div style="color: #0284c7; font-weight: 700;">(<?= $boxCount ?> Box Utuh)</div>
+                                                </div>
+                                            <?php else: ?>
+                                                <div style="font-size: 10px; color: #64748b; font-weight: 600;">(Box Pecahan)</div>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Keterangan Asal Sisa -->
+                                        <td style="padding: 10px 14px;">
+                                            <?php if ($bInfo['is_split'] && $bInfo['orig_box_qty'] > 0): ?>
+                                                <div style="font-size: 11px; font-weight: 700; color: #1e293b; line-height: 1.4;">
+                                                    Diambil <span style="color: #7e22ce; font-family: monospace;"><?= number_format($bInfo['used_qty']) ?> pcs</span> untuk Kanban, sisa <span style="color: #b45309; font-family: monospace;"><?= number_format($qtySisa) ?> pcs</span> masuk Safety Stock
+                                                </div>
+                                                <div style="font-size: 10px; color: #64748b; margin-top: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                                    <?php if (!empty($bInfo['origin_sess_id'])): ?>
+                                                        <span style="background-color: #f1f5f9; color: #334155; padding: 2px 7px; border-radius: 5px; border: 1px solid #cbd5e1; font-weight: 700;">
+                                                            Asal Kanban: Sesi #<?= $bInfo['origin_sess_id'] ?>
+                                                        </span>
+                                                    <?php endif; ?>
+                                                    <span style="color: #94a3b8;">Sesi SS: #<?= $sRow['session_id'] ?></span>
+                                                </div>
+                                            <?php else: ?>
+                                                <div style="font-size: 11px; font-weight: 600; color: #1e293b; line-height: 1.4;">
+                                                    <?= htmlspecialchars($sRow['lot_remarks'] ?: $sRow['kanban_remark']) ?>
+                                                </div>
+                                                <div style="font-size: 10px; color: #94a3b8; margin-top: 3px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                                    <?php if (!empty($bInfo['origin_sess_id'])): ?>
+                                                        <span style="background-color: #f1f5f9; color: #334155; padding: 2px 7px; border-radius: 5px; border: 1px solid #cbd5e1; font-weight: 700;">
+                                                            Asal Kanban: Sesi #<?= $bInfo['origin_sess_id'] ?>
+                                                        </span>
+                                                    <?php endif; ?>
+                                                    <span>Sesi SS: #<?= $sRow['session_id'] ?></span>
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Status Fisik -->
+                                        <td style="padding: 10px 14px; text-align: center;">
+                                            <?php if ($isUsed): ?>
+                                                <span style="background-color: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; display: inline-block;">
+                                                    SUDAH DIPAKAI
+                                                </span>
+                                            <?php else: ?>
+                                                <span style="background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 3px 8px; border-radius: 9999px; font-weight: 800; font-size: 10px; display: inline-block;">
+                                                    ADA DI RAK GUDANG
+                                                </span>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Aksi -->
+                                        <td style="padding: 10px 14px; text-align: right;">
+                                            <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($sRow['part_code'])) ?>" 
+                                               style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none;">
+                                                Lihat
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination Tab 2 -->
+                <?php if ($totalSisaPages > 1): ?>
+                    <div style="padding: 12px 16px; border-top: 1px solid #e2e8f0; background-color: #f8fafc; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px;">
+                        <div style="color: #64748b;">
+                            Halaman <b style="color: #1e293b;"><?= $page ?></b> dari <b style="color: #1e293b;"><?= $totalSisaPages ?></b> (Total <?= number_format($totalSisaItems) ?> kejadian sisa)
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <?php 
+                                $queryParams = $_GET; 
+                                $queryParams['tab'] = 'sisa';
+                                $queryParams['page'] = max(1, $page - 1);
+                                $prevUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                                $queryParams['page'] = min($totalSisaPages, $page + 1);
+                                $nextUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                            ?>
+                            <a href="<?= $prevUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page <= 1) ? 'pointer-events-none opacity-50' : '' ?>">&laquo; Prev</a>
+                            <span style="padding: 5px 10px; font-weight: 800; color: #d97706;"><?= $page ?></span>
+                            <a href="<?= $nextUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page >= $totalSisaPages) ? 'pointer-events-none opacity-50' : '' ?>">Next &raquo;</a>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
+            <!-- ════════════════════════════════════════════════════════════════
+                 TAB 3: RIWAYAT AKTIVITAS (LOG MUTASI KELUAR - MASUK)
+                 ════════════════════════════════════════════════════════════════ -->
+            <?php elseif ($activeTab === 'riwayat'): ?>
+                <div style="padding: 12px 16px; background-color: #faf5ff; border-bottom: 1px solid #e9d5ff; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div>
+                        <h2 style="font-size: 13px; font-weight: 800; color: #7e22ce; text-transform: uppercase; margin: 0;">
+                            Buku Riwayat Mutasi Safety Stock (Keluar - Masuk)
+                        </h2>
+                        <p style="font-size: 11px; color: #6b21a8; margin: 2px 0 0 0;">
+                            Catatan kronologis perubahan kuantiti stok pengaman (urut dari aktivitas paling baru)
+                        </p>
                     </div>
 
-                    <div style="display: flex; align-items: center; gap: 4px;">
-                        <?php 
-                            $queryParams = $_GET; 
-                            $prevPage = max(1, $page - 1);
-                            $nextPage = min($totalPages, $page + 1);
-                            $queryParams['page'] = $prevPage;
-                            $prevUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
-                            $queryParams['page'] = $nextPage;
-                            $nextUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                    <span style="padding: 4px 10px; background-color: #f3e8ff; color: #7e22ce; font-size: 11px; font-weight: 800; border-radius: 9999px; border: 1px solid #e9d5ff;">
+                        Ditampilkan: <?= number_format($totalRiwayatItems) ?> Log
+                    </span>
+                </div>
+
+                <!-- 4 KARTU FILTER MUTASI INTERAKTIF (BISA DIKLIK) -->
+                <div style="padding: 12px 16px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;">
+                        <span style="font-size: 11px; font-weight: 800; color: #475569; letter-spacing: 0.5px; text-transform: uppercase;">
+                            ⚡ PILIH JENIS MUTASI (KLIK KARTU UNTUK FILTER):
+                        </span>
+                        <?php if ($mutasiFilter !== 'semua'): ?>
+                            <a href="<?= base_url('modules/safety_stock/index.php?tab=riwayat&mutasi=semua&period=' . urlencode($period) . '&search=' . urlencode($search)) ?>" 
+                               style="font-size: 11px; font-weight: 700; color: #2563eb; text-decoration: none;">
+                                &times; Reset Filter Mutasi
+                            </a>
+                        <?php endif; ?>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+                        <?php
+                            $filterUrlHelper = function($mType) use ($period, $search, $limit) {
+                                $p = [
+                                    'tab'    => 'riwayat',
+                                    'mutasi' => $mType,
+                                    'period' => $period,
+                                    'search' => $search,
+                                    'limit'  => ($limit != 10) ? $limit : null
+                                ];
+                                return base_url('modules/safety_stock/index.php?') . http_build_query(array_filter($p));
+                            };
                         ?>
 
-                        <a href="<?= $prevUrl ?>" style="padding: 6px 12px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page <= 1) ? 'pointer-events-none opacity-50' : '' ?>">
-                            &laquo; Prev
+                        <!-- Card 1: 🌐 SEMUA MUTASI -->
+                        <?php $isAll = ($mutasiFilter === 'semua'); ?>
+                        <a href="<?= $filterUrlHelper('semua') ?>" 
+                           style="background-color: <?= $isAll ? '#0f172a' : '#ffffff' ?>; color: <?= $isAll ? '#ffffff' : '#1e293b' ?>; border: <?= $isAll ? '2px solid #0f172a' : '1px solid #cbd5e1' ?>; border-radius: 10px; padding: 10px 14px; text-decoration: none; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.15s; box-shadow: <?= $isAll ? '0 2px 6px rgba(15,23,42,0.25)' : '0 1px 2px rgba(0,0,0,0.03)' ?>; cursor: pointer;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: <?= $isAll ? '#94a3b8' : '#64748b' ?>;">
+                                    🌐 SEMUA
+                                </span>
+                                <?php if ($isAll): ?>
+                                    <span style="background-color: #2563eb; color: #ffffff; font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 9999px;">✓ AKTIF</span>
+                                <?php endif; ?>
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <div style="font-size: 19px; font-weight: 900; line-height: 1;">
+                                    <?= number_format($mutasiSummary['semua']['count']) ?> <span style="font-size: 11px; font-weight: 700;">Log</span>
+                                </div>
+                                <div style="font-size: 10px; margin-top: 4px; font-weight: 600; color: <?= $isAll ? '#cbd5e1' : '#64748b' ?>;">
+                                    Seluruh Mutasi Gerak
+                                </div>
+                            </div>
                         </a>
 
-                        <?php for ($p = 1; $p <= $totalPages; $p++): ?>
-                            <?php 
-                                if ($p > 1 && $p < $totalPages && abs($p - $page) > 2) continue;
-                                $queryParams['page'] = $p;
-                                $pUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
-                            ?>
-                            <a href="<?= $pUrl ?>" style="padding: 6px 12px; border-radius: 6px; font-weight: 800; text-decoration: none; <?= ($p == $page) ? 'background-color: #2563eb; color: #ffffff; border: 1px solid #2563eb;' : 'background-color: #ffffff; color: #334155; border: 1px solid #cbd5e1;' ?>">
-                                <?= $p ?>
-                            </a>
-                        <?php endfor; ?>
-
-                        <a href="<?= $nextUrl ?>" style="padding: 6px 12px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page >= $totalPages) ? 'pointer-events-none opacity-50' : '' ?>">
-                            Next &raquo;
+                        <!-- Card 2: 📥 MASUK NORMAL -->
+                        <?php $isNormal = ($mutasiFilter === 'normal'); ?>
+                        <a href="<?= $filterUrlHelper('normal') ?>" 
+                           style="background-color: <?= $isNormal ? '#0284c7' : '#ffffff' ?>; color: <?= $isNormal ? '#ffffff' : '#0369a1' ?>; border: <?= $isNormal ? '2px solid #0284c7' : '1px solid #bae6fd' ?>; border-radius: 10px; padding: 10px 14px; text-decoration: none; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.15s; box-shadow: <?= $isNormal ? '0 2px 6px rgba(2,132,199,0.3)' : '0 1px 2px rgba(0,0,0,0.03)' ?>; cursor: pointer;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: <?= $isNormal ? '#e0f2fe' : '#0369a1' ?>;">
+                                    📥 MASUK NORMAL
+                                </span>
+                                <?php if ($isNormal): ?>
+                                    <span style="background-color: #ffffff; color: #0284c7; font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 9999px;">✓ AKTIF</span>
+                                <?php endif; ?>
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <div style="font-size: 19px; font-weight: 900; line-height: 1;">
+                                    <?= number_format($mutasiSummary['normal']['count']) ?> <span style="font-size: 11px; font-weight: 700;">Log</span>
+                                </div>
+                                <div style="font-size: 10px; margin-top: 4px; font-weight: 700; color: <?= $isNormal ? '#e0f2fe' : '#0284c7' ?>;">
+                                    +<?= number_format($summary['normal_in_qty']) ?> pcs (Baru)
+                                </div>
+                            </div>
                         </a>
+
+                        <!-- Card 3: 🔄 SISA KANBAN -->
+                        <?php $isSisa = ($mutasiFilter === 'sisa'); ?>
+                        <a href="<?= $filterUrlHelper('sisa') ?>" 
+                           style="background-color: <?= $isSisa ? '#d97706' : '#ffffff' ?>; color: <?= $isSisa ? '#ffffff' : '#b45309' ?>; border: <?= $isSisa ? '2px solid #d97706' : '1px solid #fde68a' ?>; border-radius: 10px; padding: 10px 14px; text-decoration: none; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.15s; box-shadow: <?= $isSisa ? '0 2px 6px rgba(217,119,6,0.3)' : '0 1px 2px rgba(0,0,0,0.03)' ?>; cursor: pointer;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: <?= $isSisa ? '#fef3c7' : '#b45309' ?>;">
+                                    🔄 SISA KANBAN
+                                </span>
+                                <?php if ($isSisa): ?>
+                                    <span style="background-color: #ffffff; color: #d97706; font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 9999px;">✓ AKTIF</span>
+                                <?php endif; ?>
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <div style="font-size: 19px; font-weight: 900; line-height: 1;">
+                                    <?= number_format($mutasiSummary['sisa']['count']) ?> <span style="font-size: 11px; font-weight: 700;">Log</span>
+                                </div>
+                                <div style="font-size: 10px; margin-top: 4px; font-weight: 700; color: <?= $isSisa ? '#fef3c7' : '#d97706' ?>;">
+                                    +<?= number_format($mutasiSummary['sisa']['qty']) ?> pcs (Sisa)
+                                </div>
+                            </div>
+                        </a>
+
+                        <!-- Card 4: 📤 KELUAR KANBAN -->
+                        <?php $isKeluar = ($mutasiFilter === 'keluar'); ?>
+                        <a href="<?= $filterUrlHelper('keluar') ?>" 
+                           style="background-color: <?= $isKeluar ? '#7e22ce' : '#ffffff' ?>; color: <?= $isKeluar ? '#ffffff' : '#7e22ce' ?>; border: <?= $isKeluar ? '2px solid #7e22ce' : '1px solid #e9d5ff' ?>; border-radius: 10px; padding: 10px 14px; text-decoration: none; display: flex; flex-direction: column; justify-content: space-between; transition: all 0.15s; box-shadow: <?= $isKeluar ? '0 2px 6px rgba(126,34,206,0.3)' : '0 1px 2px rgba(0,0,0,0.03)' ?>; cursor: pointer;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: <?= $isKeluar ? '#f3e8ff' : '#7e22ce' ?>;">
+                                    📤 KELUAR KANBAN
+                                </span>
+                                <?php if ($isKeluar): ?>
+                                    <span style="background-color: #ffffff; color: #7e22ce; font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 9999px;">✓ AKTIF</span>
+                                <?php endif; ?>
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <div style="font-size: 19px; font-weight: 900; line-height: 1;">
+                                    <?= number_format($mutasiSummary['keluar']['count']) ?> <span style="font-size: 11px; font-weight: 700;">Log</span>
+                                </div>
+                                <div style="font-size: 10px; margin-top: 4px; font-weight: 700; color: <?= $isKeluar ? '#f3e8ff' : '#7e22ce' ?>;">
+                                    -<?= number_format($mutasiSummary['keluar']['qty']) ?> pcs (Terpakai)
+                                </div>
+                            </div>
+                        </a>
+
                     </div>
                 </div>
+
+                <div style="overflow-x-auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
+                        <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
+                            <tr>
+                                <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
+                                <th style="padding: 10px 14px; min-width: 130px; white-space: nowrap;">Waktu & Tanggal</th>
+                                <th style="padding: 10px 14px; width: 1%; white-space: nowrap;">Jenis Mutasi</th>
+                                <th style="padding: 10px 14px; min-width: 180px;">Part (Kode & Nama)</th>
+                                <th style="padding: 10px 14px; min-width: 140px; white-space: nowrap;">No. Lot / Ref</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 120px; white-space: nowrap;">Perubahan Qty</th>
+                                <th style="padding: 10px 14px; min-width: 260px;">Keterangan Mutasi</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($riwayatItems)): ?>
+                                <tr>
+                                    <td colspan="7" style="padding: 48px; text-align: center; color: #94a3b8;">
+                                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                                            <span style="font-weight: 800; color: #334155; font-size: 14px;">Tidak Ada Riwayat Mutasi</span>
+                                            <span style="font-size: 12px; color: #64748b; margin-top: 4px;">Tidak ada pergerakan data untuk filter jenis mutasi yang dipilih.</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($riwayatItems as $idx => $act): ?>
+                                    <?php 
+                                        $rowNum = $offsetRiwayat + $idx + 1;
+                                        $type = $act['type'];
+                                        if ($type === 'masuk_normal') {
+                                            $typeBadge = '<span style="display: inline-block; white-space: nowrap !important; background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 4px 12px; border-radius: 9999px; font-weight: 800; font-size: 10px; line-height: 1.4; vertical-align: middle;">📥 MASUK NORMAL</span>';
+                                            $qtyStyle = 'color: #0284c7; font-weight: 900;';
+                                            $qtyPrefix = '+';
+                                        } elseif ($type === 'masuk_sisa') {
+                                            $typeBadge = '<span style="display: inline-block; white-space: nowrap !important; background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a; padding: 4px 12px; border-radius: 9999px; font-weight: 800; font-size: 10px; line-height: 1.4; vertical-align: middle;">🔄 SISA KANBAN</span>';
+                                            $qtyStyle = 'color: #d97706; font-weight: 900;';
+                                            $qtyPrefix = '+';
+                                        } else {
+                                            $typeBadge = '<span style="display: inline-block; white-space: nowrap !important; background-color: #f3e8ff; color: #7e22ce; border: 1px solid #e9d5ff; padding: 4px 12px; border-radius: 9999px; font-weight: 800; font-size: 10px; line-height: 1.4; vertical-align: middle;">📤 KELUAR KANBAN</span>';
+                                            $qtyStyle = 'color: #9333ea; font-weight: 900;';
+                                            $qtyPrefix = '-';
+                                        }
+                                    ?>
+                                    <tr style="border-bottom: 1px solid #f1f5f9;">
+                                        <td style="padding: 10px 14px; text-align: center; font-weight: 700; color: #64748b;"><?= $rowNum ?></td>
+                                        
+                                        <!-- Waktu & Tanggal -->
+                                        <td style="padding: 10px 14px; white-space: nowrap;">
+                                            <div style="font-weight: 800; color: #1e293b; font-size: 12px;">
+                                                <?= date('d M Y', strtotime($act['timestamp'])) ?>
+                                            </div>
+                                            <div style="font-size: 11px; color: #64748b;">
+                                                <?= date('H:i:s', strtotime($act['timestamp'])) ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- Jenis Mutasi -->
+                                        <td style="padding: 10px 14px; width: 1%; white-space: nowrap;">
+                                            <?= $typeBadge ?>
+                                        </td>
+
+                                        <!-- Part -->
+                                        <td style="padding: 10px 14px;">
+                                            <div style="font-weight: 800; color: #1d4ed8; font-family: monospace; font-size: 12px;">
+                                                <?= htmlspecialchars($act['part_code']) ?>
+                                            </div>
+                                            <div style="font-size: 11px; color: #475569; font-weight: 600;">
+                                                <?= htmlspecialchars($act['part_name']) ?>
+                                            </div>
+                                        </td>
+
+                                        <!-- Lot & Ref -->
+                                        <td style="padding: 10px 14px; font-family: monospace; font-size: 11px; color: #334155;">
+                                            <div>Lot: <?= htmlspecialchars($act['lot']) ?></div>
+                                            <?php if (!empty($act['ref']) && $act['ref'] !== '-'): ?>
+                                                <div style="color: #64748b;">Ref: <?= htmlspecialchars($act['ref']) ?></div>
+                                            <?php endif; ?>
+                                        </td>
+
+                                        <!-- Perubahan Qty -->
+                                        <td style="padding: 10px 14px; text-align: right; font-family: monospace; font-size: 13px; <?= $qtyStyle ?>">
+                                            <?= $qtyPrefix . number_format($act['qty']) ?> pcs
+                                        </td>
+
+                                        <!-- Keterangan Mutasi -->
+                                        <td style="padding: 10px 14px; font-size: 11px; color: #334155; line-height: 1.4;">
+                                            <?= htmlspecialchars($act['note']) ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination Tab 3 -->
+                <?php if ($totalRiwayatPages > 1): ?>
+                    <div style="padding: 12px 16px; border-top: 1px solid #e2e8f0; background-color: #f8fafc; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px;">
+                        <div style="color: #64748b;">
+                            Halaman <b style="color: #1e293b;"><?= $page ?></b> dari <b style="color: #1e293b;"><?= $totalRiwayatPages ?></b> (Total <?= number_format($totalRiwayatItems) ?> log)
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <?php 
+                                $queryParams = $_GET; 
+                                $queryParams['tab'] = 'riwayat';
+                                $queryParams['mutasi'] = $mutasiFilter;
+                                $queryParams['page'] = max(1, $page - 1);
+                                $prevUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                                $queryParams['page'] = min($totalRiwayatPages, $page + 1);
+                                $nextUrl = base_url('modules/safety_stock/index.php?') . http_build_query($queryParams);
+                            ?>
+                            <a href="<?= $prevUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page <= 1) ? 'pointer-events-none opacity-50' : '' ?>">&laquo; Prev</a>
+                            <span style="padding: 5px 10px; font-weight: 800; color: #7e22ce;"><?= $page ?></span>
+                            <a href="<?= $nextUrl ?>" style="padding: 5px 10px; background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; color: #334155; font-weight: 700; text-decoration: none; <?= ($page >= $totalRiwayatPages) ? 'pointer-events-none opacity-50' : '' ?>">Next &raquo;</a>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
             <?php endif; ?>
 
         </div>
@@ -642,8 +1622,6 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             var val = input.value.trim();
             if (val.includes('|') || val.startsWith('Z1') || val.startsWith('Z2') || val.startsWith('Z5')) {
                 var qr = parseSafetyStockQR(val);
-                // Utamakan Part Code (Z1) karena halaman ini mengelompokkan safety stock per part,
-                // atau Ref No (Z5) / Lot No (Z2)
                 if (qr.Z1) {
                     input.value = qr.Z1;
                 } else if (qr.Z5) {
@@ -652,7 +1630,6 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     input.value = qr.Z2;
                 }
             }
-            // Biarkan form di-submit secara otomatis
         }
     }
     </script>

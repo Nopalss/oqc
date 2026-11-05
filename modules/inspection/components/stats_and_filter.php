@@ -1347,6 +1347,42 @@
                                 </span>
                             </a>
 
+                            <!-- Tombol Pill: Rekomendasi Safety Stock (FIFO) -->
+                            <?php 
+                                $isSsActive = ($viewMode === 'safety_stock'); 
+                                $ssBtnStyle = $isSsActive ? 'background-color: #7c3aed; color: #ffffff; border: 1px solid #6d28d9; box-shadow: 0 2px 6px rgba(124,58,237,0.35);' : 'background-color: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe;';
+                                $ssBadgeStyle = $isSsActive ? 'background-color: rgba(255,255,255,0.25); color: #ffffff; border: 1px solid rgba(255,255,255,0.4);' : 'background-color: #ede9fe; color: #5b21b6; border: 1px solid #c4b5fd;';
+                                $ssIconColor = $isSsActive ? '#ffffff' : '#7c3aed';
+
+                                $buildSsUrl = function() use ($activeTab, $period, $selectedDate, $batchFilter, $scopeFilter, $orderFilter, $search, $isSsActive) {
+                                    $params = [
+                                        'tab'           => $activeTab,
+                                        'period'        => $period,
+                                        'selected_date' => $selectedDate,
+                                        'batch_id'      => $batchFilter,
+                                        'scope'         => $scopeFilter,
+                                        'order_by'      => $orderFilter,
+                                    ];
+                                    if (!$isSsActive) {
+                                        $params['view'] = 'safety_stock';
+                                    }
+                                    if (!empty($search)) $params['search'] = $search;
+                                    return '?' . http_build_query($params);
+                                };
+                            ?>
+                            <a href="<?= $buildSsUrl() ?>" 
+                               class="flex-shrink-0 px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2"
+                               style="<?= $ssBtnStyle ?>"
+                               title="Lihat daftar Kanban yang bisa dipotong menggunakan Safety Stock di gudang (urutan FIFO)">
+                                <svg class="w-3.5 h-3.5" style="color: <?= $ssIconColor ?>;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path>
+                                </svg>
+                                <span>Rekomendasi Safety Stock (FIFO)</span>
+                                <span class="px-2 py-0.5 rounded text-[10px] font-black" style="<?= $ssBadgeStyle ?>">
+                                    <?= count($safetyStockRecommendations) ?> Kanban Ready
+                                </span>
+                            </a>
+
                         <?php else: ?>
                             <div class="text-xs text-slate-500 italic py-1 px-2">
                                 Belum ada dokumen batch Kanban yang diunggah pada tanggal <?= date('d M Y', strtotime($selectedDate)) ?>.
