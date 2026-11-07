@@ -82,6 +82,7 @@ try {
                        WHERE s2.kanban_item_id = k.id
                    ), 0) AS total_passed_qty,
                    COUNT(s.id) AS total_sessions_count,
+                   MAX(s.id) AS last_session_id,
                    MAX(CASE WHEN s.status = 'rejected' OR EXISTS (SELECT 1 FROM inspection_session_lots isl_r WHERE isl_r.inspection_session_id = s.id AND (isl_r.lot_result = 'rejected' OR isl_r.lot_status IN ('rejected', 'ng_found'))) THEN 1 ELSE 0 END) AS has_rejected_session
             FROM kanban_items k
             LEFT JOIN inspection_sessions s ON s.kanban_item_id = k.id
@@ -128,6 +129,8 @@ try {
                 $statusLabel = 'Reject';
             }
 
+            $remainingQty = max(0, $targetQty - $passedQty);
+
             $kanbanUpdates[$kid] = [
                 'id'                   => $kid,
                 'status_type'          => $statusType,
@@ -140,10 +143,12 @@ try {
                 'is_own_session'       => $isOwnSession,
                 'passed_qty'           => $passedQty,
                 'target_qty'           => $targetQty,
+                'remaining_qty'        => $remainingQty,
                 'progress_pct'         => $progressPct,
                 'is_fully_passed'      => $isFullyPassed,
                 'has_rejected_session' => $hasRejectedSession,
-                'total_sessions'       => $totalSessions
+                'total_sessions'       => $totalSessions,
+                'last_session_id'      => (int)($row['last_session_id'] ?? 0)
             ];
         }
     }

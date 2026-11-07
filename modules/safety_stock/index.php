@@ -26,6 +26,10 @@ $activeTab    = sanitize($_GET['tab'] ?? 'stok');
 if (!in_array($activeTab, ['stok', 'sisa', 'riwayat'])) {
     $activeTab = 'stok';
 }
+$kpiFilter    = sanitize($_GET['kpi_filter'] ?? 'all');
+if (!in_array($kpiFilter, ['all', 'normal', 'sisa', 'keluar', 'ready'])) {
+    $kpiFilter = 'all';
+}
 $mutasiFilter = sanitize($_GET['mutasi'] ?? 'semua');
 if (!in_array($mutasiFilter, ['semua', 'normal', 'sisa', 'keluar'])) {
     $mutasiFilter = 'semua';
@@ -59,11 +63,11 @@ if ($period === 'hari_ini') {
 }
 
 // Dynamic Limit & Page
-$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: 10;
+$limit = filter_input(INPUT_GET, 'limit', FILTER_VALIDATE_INT) ?: (isset($_GET['limit']) ? (int)$_GET['limit'] : 10);
 if (!in_array($limit, [5, 10, 25, 50, 100])) {
     $limit = 10;
 }
-$page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: 1;
+$page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT) ?: (isset($_GET['page']) ? (int)$_GET['page'] : 1);
 if ($page < 1) $page = 1;
 
 /**
@@ -143,6 +147,8 @@ $summary = [
     // 4. Sisa di Gudang Saat Ini (READY)
     'total_available_lots' => 0,
     'total_available_qty'  => 0,
+    // Stok NG / Reject
+    'total_rejected_qty'   => 0,
     // Hitungan Khusus Tab Sisa
     'sisa_events_count'    => 0,
     'total_activities'     => 0
@@ -298,23 +304,23 @@ if ($pdo) {
             SELECT 
                 UPPER(TRIM(COALESCE(did.part_code, ki.item_code, ''))) AS pcode,
                 COUNT(CASE 
-                    WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%')
-                         AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))
+                    WHEN ss.status = 'passed' AND COALESCE(ss.ss_source, 'direct') = 'direct'
                     THEN isl.id 
                     ELSE NULL 
                 END) AS normal_boxes,
                 COUNT(CASE 
-                    WHEN (ki.remark LIKE '%Auto Safety Stock%' OR isl.remarks LIKE '%Sisa Kelebihan Kanban%' OR isl.remarks LIKE '%Sisa Split Safety Stock%')
+                    WHEN ss.status = 'passed' AND COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover')
                     THEN isl.id 
                     ELSE NULL 
                 END) AS sisa_boxes,
-                COUNT(isl.id) AS total_boxes,
+                COUNT(CASE WHEN ss.status = 'passed' THEN isl.id ELSE NULL END) AS total_boxes,
                 COUNT(CASE 
                     WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
                          AND ss.status = 'passed'
                     THEN isl.id 
                     ELSE NULL 
-                END) AS active_boxes
+                END) AS active_boxes,
+                COUNT(CASE WHEN ss.status = 'rejected' THEN isl.id ELSE NULL END) AS rejected_boxes
             FROM inspection_session_lots isl
             JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
             LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
@@ -367,22 +373,25 @@ if ($pdo) {
                         MIN(COALESCE(ki.customer, 'INTERNAL SAFETY STOCK')) AS customer,
                         MAX(ss.started_at) AS last_started_at,
                         MAX(ss.id) AS max_session_id,
-                        -- Masuk Normal
+                        -- Masuk Normal Lolos (Passed)
                         SUM(CASE 
-                            WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%') 
+                            WHEN COALESCE(ss.ss_source, 'direct') = 'direct' AND ss.status = 'passed'
                             THEN ss.total_scanned_qty 
                             ELSE 0 
                         END) AS normal_in_qty,
-                        -- Masuk Sisa Kanban
+                        -- Masuk Sisa Kanban Lolos (Passed)
                         SUM(CASE 
-                            WHEN (ki.remark LIKE '%Auto Safety Stock%' OR ss.id IN (
-                                SELECT isl_sub.inspection_session_id FROM inspection_session_lots isl_sub 
-                                WHERE isl_sub.remarks LIKE '%Sisa Kelebihan Kanban%'
-                            ))
+                            WHEN COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover') AND ss.status = 'passed'
                             THEN ss.total_scanned_qty 
                             ELSE 0 
                         END) AS sisa_in_qty,
-                        -- Sisa yang belum memotong kanban & passed
+                        -- Kuantiti Reject (NG)
+                        SUM(CASE 
+                            WHEN ss.status = 'rejected' 
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END) AS rejected_qty,
+                        -- Sisa yang belum memotong kanban & passed (Ready di rak)
                         SUM(CASE 
                             WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' 
                             THEN ss.total_scanned_qty 
@@ -405,7 +414,8 @@ if ($pdo) {
                           CASE 
                               WHEN SUM(CASE WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) AND ss.status = 'passed' THEN ss.total_scanned_qty ELSE 0 END) > 0 THEN 1
                               WHEN SUM(CASE WHEN ss.status = 'in_progress' THEN 1 ELSE 0 END) > 0 THEN 2
-                              ELSE 3 
+                              WHEN SUM(CASE WHEN ss.status = 'rejected' THEN 1 ELSE 0 END) > 0 THEN 3
+                              ELSE 4 
                           END ASC,
                           MAX(ss.id) DESC";
 
@@ -415,19 +425,29 @@ if ($pdo) {
 
         // Hitung Kuantiti Realistis & Akumulasi untuk Setiap Part
         foreach ($allParts as &$p) {
-            $pCode      = strtoupper(trim($p['part_code']));
-            $normalIn   = (int)$p['normal_in_qty'];
-            $sisaIn     = (int)$p['sisa_in_qty'];
-            $totalIn    = $normalIn + $sisaIn;
-            $usedQty    = (int)($kanbanUsageMap[$pCode]['total_kanban_used_qty'] ?? 0);
-            $availQty   = max(0, $totalIn - $usedQty);
+            $pCode       = strtoupper(trim($p['part_code']));
+            $normalIn    = (int)$p['normal_in_qty'];
+            $sisaIn      = (int)$p['sisa_in_qty'];
+            $rejectedQty = (int)$p['rejected_qty'];
+            $totalIn     = $normalIn + $sisaIn;
+            $usedQty     = (int)($kanbanUsageMap[$pCode]['total_kanban_used_qty'] ?? 0);
+            $availQty    = max(0, $totalIn - $usedQty);
 
             $p['normal_in_qty']  = $normalIn;
             $p['sisa_in_qty']    = $sisaIn;
+            $p['rejected_qty']   = $rejectedQty;
             $p['total_in_qty']   = $totalIn;
             $p['total_used_qty'] = $usedQty;
             $p['available_qty']  = $availQty;
-            $p['part_status']    = ($availQty > 0) ? 'available' : (($usedQty > 0) ? 'exhausted' : 'available');
+            if ($availQty > 0) {
+                $p['part_status'] = 'available';
+            } elseif ($rejectedQty > 0 && $usedQty == 0) {
+                $p['part_status'] = 'rejected';
+            } elseif ($usedQty > 0) {
+                $p['part_status'] = 'exhausted';
+            } else {
+                $p['part_status'] = 'available';
+            }
         }
         unset($p);
 
@@ -435,7 +455,7 @@ if ($pdo) {
         // Mengambil seluruh kejadian sisa scan Kanban untuk menjawab: berapa kali, apa saja, kapan saja
         $sisaWhere = [
             "ss.inspection_type = 'safety_stock'",
-            "(ki.remark LIKE '%Auto Safety Stock%' OR isl.remarks LIKE '%Sisa Kelebihan Kanban%')"
+            "COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover')"
         ];
         $sisaParams = [];
 
@@ -510,8 +530,8 @@ if ($pdo) {
         // 2. Aktivitas Masuk Normal (Sesuai Filter Periode & Search, tanpa batasan LIMIT yang memotong data)
         $normalActWhere = [
             "ss.inspection_type = 'safety_stock'",
-            "(ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock%')",
-            "(isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%' AND isl.remarks NOT LIKE '%Sisa Split Safety Stock%'))",
+            "ss.status = 'passed'",
+            "COALESCE(ss.ss_source, 'direct') = 'direct'",
             "(isl.lot_status IS NULL OR isl.lot_status != 'action_closed')"
         ];
         $normalActParams = [];
@@ -661,6 +681,8 @@ if ($pdo) {
             // 4. Sisa di Gudang (Ready)
             $summary['total_available_lots'] += $activeBoxes;
             $summary['total_available_qty']  += (int)$p['available_qty'];
+            // 5. Total Reject / NG
+            $summary['total_rejected_qty']   += (int)($p['rejected_qty'] ?? 0);
         }
 
         // Pastikan Card 4 (Stok Gudang Saat Ini) konsisten 100% dengan rumus visual: (Masuk Normal + Sisa) - Keluar
@@ -668,12 +690,33 @@ if ($pdo) {
         $summary['total_available_qty']  = max(0, ($summary['normal_in_qty'] + $summary['sisa_in_qty']) - $summary['total_used_qty']);
 
         // ── I. Pagination Data untuk Masing-Masing Tab ────────────────────────
+        // Filter Part berdasarkan KPI Card (Model A)
+        $unfilteredTotalParts = count($allParts);
+        $filteredParts = $allParts;
+        if ($kpiFilter === 'normal') {
+            $filteredParts = array_values(array_filter($allParts, function($p) {
+                return ((int)$p['normal_in_qty']) > 0;
+            }));
+        } elseif ($kpiFilter === 'sisa') {
+            $filteredParts = array_values(array_filter($allParts, function($p) {
+                return ((int)$p['sisa_in_qty']) > 0;
+            }));
+        } elseif ($kpiFilter === 'keluar') {
+            $filteredParts = array_values(array_filter($allParts, function($p) {
+                return ((int)$p['total_used_qty']) > 0;
+            }));
+        } elseif ($kpiFilter === 'ready') {
+            $filteredParts = array_values(array_filter($allParts, function($p) {
+                return ((int)$p['available_qty']) > 0;
+            }));
+        }
+
         // Tab 1: Stok per Part
-        $totalItems = count($allParts);
+        $totalItems = count($filteredParts);
         $totalPages = max(1, ceil($totalItems / $limit));
         if ($page > $totalPages) $page = $totalPages;
         $offset = ($page - 1) * $limit;
-        $items = array_slice($allParts, $offset, $limit);
+        $items = array_slice($filteredParts, $offset, $limit);
 
         // Tab 2: Sisa Scan Kanban
         $totalSisaItems = count($allSisaData);
@@ -779,10 +822,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             : "background-color: transparent; color: #475569; font-weight: 700;";
                         
                         $pillParams = array_filter([
-                            'tab'    => $activeTab,
-                            'period' => $optKey,
-                            'search' => $search,
-                            'limit'  => ($limit != 10) ? $limit : null
+                            'tab'        => $activeTab,
+                            'kpi_filter' => ($kpiFilter !== 'all') ? $kpiFilter : null,
+                            'period'     => $optKey,
+                            'search'     => $search,
+                            'limit'      => ($limit != 10) ? $limit : null
                         ]);
                         $pillUrl = base_url('modules/safety_stock/index.php?') . http_build_query($pillParams);
                     ?>
@@ -810,80 +854,128 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
-        <!-- 2. KPI CARDS (4 Cards Grid - Didesain Khusus Transparan & Ramah Orang Awam) -->
+        <!-- 2. KPI CARDS (4 Interactive Clickable Filter Cards - Model A) -->
+        <?php
+            $kpiCardUrl = function($targetFilter) use ($kpiFilter, $period, $startDate, $endDate, $search, $limit) {
+                $newFilter = ($kpiFilter === $targetFilter) ? 'all' : $targetFilter;
+                $p = [
+                    'tab'        => 'stok',
+                    'kpi_filter' => ($newFilter !== 'all') ? $newFilter : null,
+                    'period'     => $period,
+                    'start_date' => $startDate,
+                    'end_date'   => $endDate,
+                    'search'     => $search,
+                    'limit'      => ($limit != 10) ? $limit : null
+                ];
+                return base_url('modules/safety_stock/index.php?') . http_build_query(array_filter($p, function($v) { return $v !== null && $v !== ''; }));
+            };
+
+            $isNormalActive = ($kpiFilter === 'normal');
+            $isSisaActive   = ($kpiFilter === 'sisa');
+            $isKeluarActive = ($kpiFilter === 'keluar');
+            $isReadyActive  = ($kpiFilter === 'ready');
+        ?>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
             
             <!-- Card 1: 📥 Masuk Normal (IN) -->
-            <div style="background-color: #ffffff; border: 1px solid #bae6fd; border-left: 4px solid #0284c7; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <a href="<?= $kpiCardUrl('normal') ?>" 
+               title="<?= $isNormalActive ? 'Klik untuk matikan filter (Tampilkan semua part)' : 'Klik untuk filter tabel: Hanya part dengan Masuk Normal' ?>"
+               style="text-decoration: none; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; border-radius: 12px; padding: 12px 16px; transition: all 0.15s ease-in-out; <?= $isNormalActive ? 'background-color: #f0f9ff; border: 2px solid #0284c7; box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.25), 0 4px 12px rgba(2, 132, 199, 0.15);' : 'background-color: #ffffff; border: 1px solid #bae6fd; border-left: 4px solid #0284c7; box-shadow: 0 1px 2px rgba(0,0,0,0.03);' ?>">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
                     <span style="font-size: 11px; font-weight: 800; color: #0369a1; letter-spacing: 0.5px; text-transform: uppercase;">
                         📥 Masuk Normal (IN)
                     </span>
-                    <span style="font-size: 10px; font-weight: 700; background-color: #e0f2fe; color: #0369a1; padding: 2px 6px; border-radius: 6px;">Baru</span>
+                    <?php if ($isNormalActive): ?>
+                        <span style="font-size: 9px; font-weight: 800; background-color: #0284c7; color: #ffffff; padding: 2px 7px; border-radius: 9999px;">✓ FILTER AKTIF</span>
+                    <?php else: ?>
+                        <span style="font-size: 10px; font-weight: 700; background-color: #e0f2fe; color: #0369a1; padding: 2px 6px; border-radius: 6px;">Baru</span>
+                    <?php endif; ?>
                 </div>
                 <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
                     <span style="font-size: 22px; font-weight: 900; color: #0f172a; line-height: 1;"><?= number_format($summary['normal_in_lots']) ?></span>
                     <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
                     <span style="font-size: 13px; font-weight: 800; color: #0284c7; margin-left: 2px;">(<?= number_format($summary['normal_in_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #f1f5f9; padding-top: 5px;">
-                    Asal: <b style="color: #0369a1;">Hasil Inspeksi OQC Murni</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid <?= $isNormalActive ? '#bae6fd' : '#f1f5f9' ?>; padding-top: 5px; display: flex; align-items: center; justify-content: space-between;">
+                    <span>Asal: <b style="color: #0369a1;">Inspeksi OQC Murni</b></span>
+                    <span style="font-weight: 700; color: #0284c7;"><?= $isNormalActive ? '✕ Matikan' : 'Filter &raquo;' ?></span>
                 </div>
-            </div>
+            </a>
 
             <!-- Card 2: 🔄 Masuk Sisa Scan Kanban (IN) -->
-            <div style="background-color: #fffdf5; border: 1px solid #fde68a; border-left: 4px solid #d97706; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <a href="<?= $kpiCardUrl('sisa') ?>" 
+               title="<?= $isSisaActive ? 'Klik untuk matikan filter (Tampilkan semua part)' : 'Klik untuk filter tabel: Hanya part dengan Limpahan Sisa Kanban' ?>"
+               style="text-decoration: none; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; border-radius: 12px; padding: 12px 16px; transition: all 0.15s ease-in-out; <?= $isSisaActive ? 'background-color: #fffbeb; border: 2px solid #d97706; box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.25), 0 4px 12px rgba(217, 119, 6, 0.15);' : 'background-color: #fffdf5; border: 1px solid #fde68a; border-left: 4px solid #d97706; box-shadow: 0 1px 2px rgba(0,0,0,0.03);' ?>">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
                     <span style="font-size: 11px; font-weight: 800; color: #b45309; letter-spacing: 0.5px; text-transform: uppercase;">
                         🔄 Masuk Sisa Scan (IN)
                     </span>
-                    <span style="font-size: 10px; font-weight: 800; background-color: #fef3c7; color: #b45309; padding: 2px 6px; border-radius: 6px;">Sisa Kanban</span>
+                    <?php if ($isSisaActive): ?>
+                        <span style="font-size: 9px; font-weight: 800; background-color: #d97706; color: #ffffff; padding: 2px 7px; border-radius: 9999px;">✓ FILTER AKTIF</span>
+                    <?php else: ?>
+                        <span style="font-size: 10px; font-weight: 800; background-color: #fef3c7; color: #b45309; padding: 2px 6px; border-radius: 6px;">Sisa Kanban</span>
+                    <?php endif; ?>
                 </div>
                 <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
                     <span style="font-size: 22px; font-weight: 900; color: #b45309; line-height: 1;"><?= number_format($summary['sisa_in_lots']) ?></span>
                     <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
                     <span style="font-size: 13px; font-weight: 800; color: #d97706; margin-left: 2px;">(<?= number_format($summary['sisa_in_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #fef3c7; padding-top: 5px;">
-                    Asal: <b style="color: #b45309;">Limpahan Sisa / Split Kanban</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid <?= $isSisaActive ? '#fde68a' : '#fef3c7' ?>; padding-top: 5px; display: flex; align-items: center; justify-content: space-between;">
+                    <span>Asal: <b style="color: #b45309;">Limpahan Sisa Kanban</b></span>
+                    <span style="font-weight: 700; color: #d97706;"><?= $isSisaActive ? '✕ Matikan' : 'Filter &raquo;' ?></span>
                 </div>
-            </div>
+            </a>
 
             <!-- Card 3: 📤 Total Keluar (OUT) -->
-            <div style="background-color: #ffffff; border: 1px solid #e9d5ff; border-left: 4px solid #9333ea; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <a href="<?= $kpiCardUrl('keluar') ?>" 
+               title="<?= $isKeluarActive ? 'Klik untuk matikan filter (Tampilkan semua part)' : 'Klik untuk filter tabel: Hanya part yang Terpakai memotong Kanban' ?>"
+               style="text-decoration: none; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; border-radius: 12px; padding: 12px 16px; transition: all 0.15s ease-in-out; <?= $isKeluarActive ? 'background-color: #faf5ff; border: 2px solid #7e22ce; box-shadow: 0 0 0 3px rgba(126, 34, 206, 0.25), 0 4px 12px rgba(126, 34, 206, 0.15);' : 'background-color: #ffffff; border: 1px solid #e9d5ff; border-left: 4px solid #9333ea; box-shadow: 0 1px 2px rgba(0,0,0,0.03);' ?>">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
                     <span style="font-size: 11px; font-weight: 800; color: #7e22ce; letter-spacing: 0.5px; text-transform: uppercase;">
                         📤 Total Keluar (OUT)
                     </span>
-                    <span style="font-size: 10px; font-weight: 700; background-color: #f3e8ff; color: #7e22ce; padding: 2px 6px; border-radius: 6px;">Terpakai</span>
+                    <?php if ($isKeluarActive): ?>
+                        <span style="font-size: 9px; font-weight: 800; background-color: #7e22ce; color: #ffffff; padding: 2px 7px; border-radius: 9999px;">✓ FILTER AKTIF</span>
+                    <?php else: ?>
+                        <span style="font-size: 10px; font-weight: 700; background-color: #f3e8ff; color: #7e22ce; padding: 2px 6px; border-radius: 6px;">Terpakai</span>
+                    <?php endif; ?>
                 </div>
                 <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
                     <span style="font-size: 22px; font-weight: 900; color: #9333ea; line-height: 1;"><?= number_format($summary['total_used_lots']) ?></span>
                     <span style="font-size: 11px; font-weight: 700; color: #64748b;">Lot/Box</span>
                     <span style="font-size: 13px; font-weight: 800; color: #7e22ce; margin-left: 2px;">(<?= number_format($summary['total_used_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid #f1f5f9; padding-top: 5px;">
-                    Alokasi: <b style="color: #7e22ce;">Memotong Order Kanban</b>
+                <div style="font-size: 10px; color: #64748b; font-weight: 500; margin-top: 8px; border-top: 1px solid <?= $isKeluarActive ? '#e9d5ff' : '#f1f5f9' ?>; padding-top: 5px; display: flex; align-items: center; justify-content: space-between;">
+                    <span>Alokasi: <b style="color: #7e22ce;">Memotong Kanban</b></span>
+                    <span style="font-weight: 700; color: #7e22ce;"><?= $isKeluarActive ? '✕ Matikan' : 'Filter &raquo;' ?></span>
                 </div>
-            </div>
+            </a>
 
             <!-- Card 4: 📦 Sisa Stok di Gudang (READY) -->
-            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <a href="<?= $kpiCardUrl('ready') ?>" 
+               title="<?= $isReadyActive ? 'Klik untuk matikan filter (Tampilkan semua part)' : 'Klik untuk filter tabel: Hanya part dengan Stok Fisik Siap Pakai di Rak' ?>"
+               style="text-decoration: none; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; border-radius: 12px; padding: 12px 16px; transition: all 0.15s ease-in-out; <?= $isReadyActive ? 'background-color: #ecfdf5; border: 2px solid #16a34a; box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.25), 0 4px 12px rgba(22, 163, 74, 0.15);' : 'background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; box-shadow: 0 1px 2px rgba(0,0,0,0.03);' ?>">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
                     <span style="font-size: 11px; font-weight: 800; color: #166534; letter-spacing: 0.5px; text-transform: uppercase;">
                         📦 Stok Gudang Saat Ini
                     </span>
-                    <span style="font-size: 10px; font-weight: 800; background-color: #dcfce7; color: #15803d; padding: 2px 6px; border-radius: 6px;">Fisik Siap Pakai</span>
+                    <?php if ($isReadyActive): ?>
+                        <span style="font-size: 9px; font-weight: 800; background-color: #16a34a; color: #ffffff; padding: 2px 7px; border-radius: 9999px;">✓ FILTER AKTIF</span>
+                    <?php else: ?>
+                        <span style="font-size: 10px; font-weight: 800; background-color: #dcfce7; color: #15803d; padding: 2px 6px; border-radius: 6px;">Fisik Siap Pakai</span>
+                    <?php endif; ?>
                 </div>
                 <div style="display: flex; align-items: baseline; gap: 4px; margin-top: 6px; flex-wrap: wrap;">
                     <span style="font-size: 22px; font-weight: 900; color: #15803d; line-height: 1;"><?= number_format($summary['total_available_lots']) ?></span>
                     <span style="font-size: 11px; font-weight: 700; color: #166534;">Lot/Box</span>
                     <span style="font-size: 13px; font-weight: 900; color: #15803d; margin-left: 2px;">(<?= number_format($summary['total_available_qty']) ?> pcs)</span>
                 </div>
-                <div style="font-size: 10px; color: #166534; font-weight: 600; margin-top: 8px; border-top: 1px solid #dcfce7; padding-top: 5px;">
-                    Rumus: <b style="color: #15803d;">(Masuk Normal + Sisa) - Keluar</b>
+                <div style="font-size: 10px; color: #166534; font-weight: 600; margin-top: 8px; border-top: 1px solid <?= $isReadyActive ? '#bbf7d0' : '#dcfce7' ?>; padding-top: 5px; display: flex; align-items: center; justify-content: space-between;">
+                    <span>Status: <b style="color: #15803d;">Siap Pakai di Rak</b></span>
+                    <span style="font-weight: 700; color: #16a34a;"><?= $isReadyActive ? '✕ Matikan' : 'Filter &raquo;' ?></span>
                 </div>
-            </div>
+            </a>
 
         </div>
 
@@ -891,6 +983,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
             <form action="<?= base_url('modules/safety_stock/index.php') ?>" method="GET" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+                <input type="hidden" name="kpi_filter" value="<?= htmlspecialchars($kpiFilter) ?>">
                 <input type="hidden" name="mutasi" value="<?= htmlspecialchars($mutasiFilter) ?>">
                 <input type="hidden" name="period" value="<?= htmlspecialchars($period) ?>">
                 
@@ -913,12 +1006,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <!-- 4. TAB NAVIGATION BAR (3 Tab Jelas & Bersih) -->
         <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px 12px 0 0; padding: 6px 10px; border-bottom: 2px solid #e2e8f0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
             <?php
-                $tabUrlHelper = function($tabName) use ($period, $search, $limit) {
+                $tabUrlHelper = function($tabName) use ($period, $search, $limit, $kpiFilter) {
                     $p = [
-                        'tab'    => $tabName,
-                        'period' => $period,
-                        'search' => $search,
-                        'limit'  => ($limit != 10) ? $limit : null
+                        'tab'        => $tabName,
+                        'kpi_filter' => ($tabName === 'stok' && $kpiFilter !== 'all') ? $kpiFilter : null,
+                        'period'     => $period,
+                        'search'     => $search,
+                        'limit'      => ($limit != 10) ? $limit : null
                     ];
                     return base_url('modules/safety_stock/index.php?') . http_build_query(array_filter($p));
                 };
@@ -932,7 +1026,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </svg>
                 <span>1. Stok Barang per Part</span>
                 <span style="font-size: 10px; padding: 2px 7px; border-radius: 9999px; font-weight: 800; <?= ($activeTab === 'stok') ? 'background-color: #1d4ed8; color: #ffffff;' : 'background-color: #e2e8f0; color: #334155;' ?>">
-                    <?= number_format($summary['total_parts']) ?> Part
+                    <?= ($kpiFilter !== 'all') ? number_format($totalItems) . ' / ' . number_format($unfilteredTotalParts) : number_format($summary['total_parts']) ?> Part
                 </span>
             </a>
 
@@ -978,6 +1072,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <!-- Limit Dropdown -->
                     <form method="GET" action="<?= base_url('modules/safety_stock/index.php') ?>" style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
                         <input type="hidden" name="tab" value="stok">
+                        <input type="hidden" name="kpi_filter" value="<?= htmlspecialchars($kpiFilter) ?>">
                         <input type="hidden" name="period" value="<?= htmlspecialchars($period) ?>">
                         <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
 
@@ -992,7 +1087,29 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </form>
                 </div>
 
-                <div style="overflow-x-auto;">
+                <?php if ($kpiFilter !== 'all'): ?>
+                    <?php
+                        $kpiMeta = [
+                            'normal' => ['label' => 'Masuk Normal (Hasil Inspeksi OQC Murni)', 'color' => '#0284c7', 'bg' => '#f0f9ff', 'border' => '#bae6fd'],
+                            'sisa'   => ['label' => 'Masuk Sisa Scan (Limpahan Sisa Kanban)', 'color' => '#b45309', 'bg' => '#fffbeb', 'border' => '#fde68a'],
+                            'keluar' => ['label' => 'Total Keluar (Pernah Memotong Order Kanban)', 'color' => '#7e22ce', 'bg' => '#faf5ff', 'border' => '#e9d5ff'],
+                            'ready'  => ['label' => 'Stok Gudang Saat Ini (Fisik Siap Pakai di Rak)', 'color' => '#166534', 'bg' => '#ecfdf5', 'border' => '#bbf7d0'],
+                        ];
+                        $curMeta = $kpiMeta[$kpiFilter] ?? ['label' => $kpiFilter, 'color' => '#1e293b', 'bg' => '#f8fafc', 'border' => '#cbd5e1'];
+                        $resetUrl = $kpiCardUrl($kpiFilter);
+                    ?>
+                    <div style="padding: 10px 16px; background-color: <?= $curMeta['bg'] ?>; border-bottom: 1px solid <?= $curMeta['border'] ?>; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                        <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: <?= $curMeta['color'] ?>;">
+                            <span style="font-weight: 800; background-color: <?= $curMeta['color'] ?>; color: #ffffff; padding: 2px 8px; border-radius: 6px; font-size: 10px;">FILTER KPI AKTIF</span>
+                            <span>Menampilkan <b><?= number_format($totalItems) ?></b> dari <b><?= number_format($unfilteredTotalParts) ?></b> part (Kriteria: <b><?= $curMeta['label'] ?></b>)</span>
+                        </div>
+                        <a href="<?= $resetUrl ?>" style="padding: 4px 10px; background-color: #ffffff; border: 1px solid <?= $curMeta['border'] ?>; border-radius: 6px; color: <?= $curMeta['color'] ?>; font-weight: 800; font-size: 11px; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="Reset filter dan tampilkan semua part">
+                            <span>✕ Tampilkan Semua Part</span>
+                        </a>
+                    </div>
+                <?php endif; ?>
+
+                <div id="mainSafetyStockTableWrap" style="overflow-x: auto; width: 100%; box-sizing: border-box;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
                         <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
@@ -1005,7 +1122,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <th style="padding: 10px 14px; text-align: right; width: 120px; color: #15803d; background-color: #f0fdf4;">📦 Sisa di Rak</th>
                                 <th style="padding: 10px 14px; width: 100px; text-align: center;">Status</th>
                                 <th style="padding: 10px 14px; min-width: 120px;">Tgl Terakhir</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 90px;">Aksi</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 175px;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1013,8 +1130,16 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                 <tr>
                                     <td colspan="10" style="padding: 48px; text-align: center; color: #94a3b8;">
                                         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
-                                            <span style="font-weight: 800; color: #334155; font-size: 14px;">Belum Ada Data Safety Stock</span>
-                                            <span style="font-size: 12px; color: #64748b; margin-top: 4px;">Data stok pengaman yang diinspeksi OQC akan tampil di sini.</span>
+                                            <?php if ($kpiFilter !== 'all'): ?>
+                                                <span style="font-weight: 800; color: #334155; font-size: 14px;">Tidak Ada Part untuk Kriteria Filter Ini</span>
+                                                <span style="font-size: 12px; color: #64748b; margin-top: 4px; margin-bottom: 12px;">Tidak ada part yang memenuhi kriteria filter kartu KPI yang dipilih.</span>
+                                                <a href="<?= $kpiCardUrl($kpiFilter) ?>" style="padding: 6px 14px; background-color: #2563eb; color: #ffffff; border-radius: 6px; font-size: 11px; font-weight: 700; text-decoration: none;">
+                                                    Tampilkan Semua Part
+                                                </a>
+                                            <?php else: ?>
+                                                <span style="font-weight: 800; color: #334155; font-size: 14px;">Belum Ada Data Safety Stock</span>
+                                                <span style="font-size: 12px; color: #64748b; margin-top: 4px;">Data stok pengaman yang diinspeksi OQC akan tampil di sini.</span>
+                                            <?php endif; ?>
                                         </div>
                                     </td>
                                 </tr>
@@ -1027,13 +1152,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                         $normalBoxes = ($bInfo && isset($bInfo['normal_boxes'])) ? (int)$bInfo['normal_boxes'] : (($it['normal_in_qty'] > 0) ? 1 : 0);
                                         $sisaBoxes   = ($bInfo && isset($bInfo['sisa_boxes'])) ? (int)$bInfo['sisa_boxes'] : (($it['sisa_in_qty'] > 0) ? 1 : 0);
-                                        $totalBoxes  = max(1, $normalBoxes + $sisaBoxes);
+                                        $totalBoxes  = max(($it['available_qty'] > 0 || $normalBoxes > 0 || $sisaBoxes > 0) ? 1 : 0, $normalBoxes + $sisaBoxes);
                                         $availBoxes  = ($bInfo && isset($bInfo['active_boxes'])) ? (int)$bInfo['active_boxes'] : (($it['available_qty'] > 0) ? $totalBoxes : 0);
 
-                                        $normalIn = (int)$it['normal_in_qty'];
-                                        $sisaIn   = (int)$it['sisa_in_qty'];
-                                        $usedQty  = (int)$it['total_used_qty'];
-                                        $availQty = (int)$it['available_qty'];
+                                        $normalIn    = (int)$it['normal_in_qty'];
+                                        $sisaIn      = (int)$it['sisa_in_qty'];
+                                        $rejectedQty = (int)($it['rejected_qty'] ?? 0);
+                                        $usedQty     = (int)$it['total_used_qty'];
+                                        $availQty    = (int)$it['available_qty'];
 
                                         // Status badge
                                         if ($availQty > 0) {
@@ -1088,11 +1214,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         </td>
 
                                         <!-- Sisa di Rak Gudang -->
-                                        <td style="padding: 10px 14px; text-align: right; background-color: #f0fdf4;">
+                                        <td style="padding: 10px 14px; text-align: right; background-color: <?= ($availQty > 0) ? '#f0fdf4' : 'transparent' ?>;">
                                             <div style="font-weight: 900; color: <?= ($availQty > 0) ? '#15803d' : '#94a3b8' ?>; font-size: 13px; font-family: monospace;">
                                                 <?= number_format($availQty) ?> <span style="font-size: 10px; font-weight: 700;">pcs</span>
                                             </div>
-                                            <div style="font-size: 10px; color: #166534; font-weight: 600;">
+                                            <div style="font-size: 10px; color: <?= ($availQty > 0) ? '#166534' : '#94a3b8' ?>; font-weight: 600;">
                                                 (<?= number_format($availBoxes) ?> Box)
                                             </div>
                                         </td>
@@ -1108,11 +1234,34 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         </td>
 
                                         <!-- Aksi -->
-                                        <td style="padding: 10px 14px; text-align: right;">
-                                            <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code'])) ?>" 
-                                               style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none; display: inline-flex; align-items: center; gap: 3px;">
-                                                <span>Detail</span> &raquo;
-                                            </a>
+                                        <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
+                                            <?php $timelineRowId = 'timeline-row-' . md5($it['part_code']); ?>
+                                            <div style="display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;">
+                                                <button type="button" 
+                                                        onclick="togglePartTimeline('<?= htmlspecialchars($it['part_code'], ENT_QUOTES) ?>', '<?= $timelineRowId ?>', this)" 
+                                                        class="btn-toggle-timeline"
+                                                        style="padding: 5px 9px; background-color: #f8fafc; color: #475569; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #cbd5e1; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.15s;"
+                                                        title="Buka / Tutup Kronologi Mutasi Stok">
+                                                    <span>⏱️ Timeline</span>
+                                                    <svg class="timeline-chevron" style="width: 11px; height: 11px; transition: transform 0.2s;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                                    </svg>
+                                                </button>
+
+                                                <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code']) . '&period=' . urlencode($period) . (!empty($startDate) ? '&start_date=' . urlencode($startDate) . '&end_date=' . urlencode($endDate) : '')) ?>" 
+                                                   style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none; display: inline-flex; align-items: center; gap: 3px;">
+                                                    <span>Detail</span> &raquo;
+                                                </a>
+                                            </div>
+                                        </td>
+                                    </tr>
+
+                                    <!-- Expandable Child Row untuk Horizontal Timeline -->
+                                    <tr id="<?= $timelineRowId ?>" class="timeline-child-row" style="display: none; background-color: #f8fafc;">
+                                        <td colspan="10" style="padding: 10px 14px 14px 14px; border-bottom: 2px solid #cbd5e1; background-color: #f8fafc; max-width: 0 !important; width: 100%; overflow: hidden;">
+                                            <div class="timeline-content-box" data-loaded="0" data-part="<?= htmlspecialchars($it['part_code']) ?>" style="width: 100%; max-width: 100%; box-sizing: border-box; overflow: hidden;">
+                                                <!-- Content loaded via AJAX lazy load -->
+                                            </div>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -1162,7 +1311,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </span>
                 </div>
 
-                <div style="overflow-x-auto;">
+                <div id="mainSafetyStockTableWrap" style="overflow-x: auto; width: 100%; box-sizing: border-box;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
                         <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
@@ -1299,7 +1448,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                         <!-- Aksi -->
                                         <td style="padding: 10px 14px; text-align: right;">
-                                            <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($sRow['part_code'])) ?>" 
+                                            <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($sRow['part_code']) . '&period=' . urlencode($period) . (!empty($startDate) ? '&start_date=' . urlencode($startDate) . '&end_date=' . urlencode($endDate) : '')) ?>" 
                                                style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none;">
                                                 Lihat
                                             </a>
@@ -1471,7 +1620,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     </div>
                 </div>
 
-                <div style="overflow-x-auto;">
+                <div id="mainSafetyStockTableWrap" style="overflow-x: auto; width: 100%; box-sizing: border-box;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
                         <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
@@ -1613,6 +1762,209 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         });
         return obj;
     }
+
+    // ── Helper: Scroll Timeline via Tombol Panah ────────────────────────────
+    function scrollTimelineTrack(trackId, offset) {
+        var el = document.getElementById(trackId);
+        if (el) {
+            el.scrollBy({ left: offset, behavior: 'smooth' });
+        }
+    }
+
+    // ── Helper: Aktifkan Mouse Wheel Scroll, Drag-to-Scroll & Infinite Prepend ──
+    function initTimelineMouseInteractions(track) {
+        if (!track || track._hasMouseInteractions) return;
+        track._hasMouseInteractions = true;
+
+        // 1. Mouse Wheel: Map roda vertikal (deltaY) ke pergeseran horizontal
+        track.addEventListener('wheel', function(e) {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                this.scrollLeft += (e.deltaY * 1.5);
+            }
+        }, { passive: false });
+
+        // 2. Drag-to-Scroll (Klik dan Tahan Geser Mouse)
+        var isDown = false;
+        var startX = 0;
+        var scrollLeft = 0;
+
+        track.addEventListener('mousedown', function(e) {
+            if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A') return;
+            isDown = true;
+            track.style.cursor = 'grabbing';
+            startX = e.pageX - track.offsetLeft;
+            scrollLeft = track.scrollLeft;
+        });
+
+        track.addEventListener('mouseleave', function() {
+            isDown = false;
+            track.style.cursor = 'grab';
+        });
+
+        track.addEventListener('mouseup', function() {
+            isDown = false;
+            track.style.cursor = 'grab';
+        });
+
+        track.addEventListener('mousemove', function(e) {
+            if (!isDown) return;
+            e.preventDefault();
+            var x = e.pageX - track.offsetLeft;
+            var walk = (x - startX) * 1.5;
+            track.scrollLeft = scrollLeft - walk;
+        });
+
+        // 3. Infinite Scroll: Otomatis memuat chunk data sebelumnya saat digeser ke ujung kiri (< 35px)
+        track.addEventListener('scroll', function() {
+            if (track.scrollLeft < 35 && !track._isLoadingChunk) {
+                var btnMore = track.querySelector('.btn-timeline-load-more');
+                if (btnMore && !btnMore.disabled) {
+                    track._isLoadingChunk = true;
+                    btnMore.click();
+                    setTimeout(function() { track._isLoadingChunk = false; }, 1500);
+                }
+            }
+        });
+    }
+
+    // ── Helper: Muat 50 Transaksi Sebelumnya (Chunking Masa Lalu) ───────────
+    function loadMoreTimelineChunk(partCode, nextChunk, btn) {
+        var container = btn.closest('.timeline-content-box');
+        if (!container) return;
+
+        var track = container.querySelector('.timeline-scroll-track');
+        var oldScrollWidth = track ? track.scrollWidth : 0;
+        var oldScrollLeft = track ? track.scrollLeft : 0;
+
+        btn.disabled = true;
+        btn.innerHTML = '<span>Memuat data...</span>';
+
+        var periodParam = '<?= htmlspecialchars($period) ?>';
+        var startParam  = '<?= htmlspecialchars($startDate) ?>';
+        var endParam    = '<?= htmlspecialchars($endDate) ?>';
+        var url = '<?= base_url("modules/safety_stock/ajax_timeline.php") ?>?part_code=' + encodeURIComponent(partCode) + 
+                  '&period=' + encodeURIComponent(periodParam) + 
+                  '&start_date=' + encodeURIComponent(startParam) + 
+                  '&end_date=' + encodeURIComponent(endParam) + 
+                  '&chunk=' + nextChunk;
+
+        fetch(url)
+            .then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(function(html) {
+                container.innerHTML = html;
+                var newTrack = container.querySelector('.timeline-scroll-track');
+                if (newTrack) {
+                    initTimelineMouseInteractions(newTrack);
+                    // Pertahankan posisi scroll visual agar mulus tanpa loncat
+                    var newScrollWidth = newTrack.scrollWidth;
+                    var diff = newScrollWidth - oldScrollWidth;
+                    newTrack.scrollLeft = oldScrollLeft + diff;
+                }
+            })
+            .catch(function(err) {
+                alert('Gagal memuat transaksi sebelumnya: ' + err.message);
+                btn.disabled = false;
+                btn.innerHTML = '<span>◄ Coba Lagi</span>';
+            });
+    }
+
+    // ── Lazy Load & Accordion Toggle untuk Horizontal Timeline Mutasi Part ──
+    function togglePartTimeline(partCode, rowId, btn) {
+        var row = document.getElementById(rowId);
+        if (!row) return;
+
+        var isHidden = (row.style.display === 'none' || getComputedStyle(row).display === 'none');
+        var chevron = btn.querySelector('.timeline-chevron');
+        var container = row.querySelector('.timeline-content-box');
+
+        if (isHidden) {
+            // Tampilkan Baris Accordion
+            row.style.display = 'table-row';
+            if (chevron) chevron.style.transform = 'rotate(180deg)';
+            btn.style.backgroundColor = '#eff6ff';
+            btn.style.borderColor = '#93c5fd';
+            btn.style.color = '#1d4ed8';
+
+            // Kunci lebar kontainer agar tidak melebarkan tabel induk dan mengaktifkan scrollbar horizontal
+            var tableWrap = document.getElementById('mainSafetyStockTableWrap');
+            if (tableWrap) {
+                var availWidth = Math.max(300, tableWrap.clientWidth - 28);
+                container.style.maxWidth = availWidth + 'px';
+                container.style.width = availWidth + 'px';
+            }
+
+            // Lazy Load data hanya jika belum dimuat (Caching)
+            if (container && container.getAttribute('data-loaded') !== '1') {
+                container.innerHTML = `
+                    <div style="padding: 20px; text-align: center; color: #64748b; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                        <svg style="animation: spin 1s linear infinite; width: 16px; height: 16px; color: #2563eb;" fill="none" viewBox="0 0 24 24">
+                            <circle style="opacity: 0.25;" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path style="opacity: 0.75;" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Memuat kronologi mutasi stok part ${partCode}...</span>
+                    </div>
+                `;
+
+                var periodParam = '<?= htmlspecialchars($period) ?>';
+                var startParam  = '<?= htmlspecialchars($startDate) ?>';
+                var endParam    = '<?= htmlspecialchars($endDate) ?>';
+                var url = '<?= base_url("modules/safety_stock/ajax_timeline.php") ?>?part_code=' + encodeURIComponent(partCode) + 
+                          '&period=' + encodeURIComponent(periodParam) + 
+                          '&start_date=' + encodeURIComponent(startParam) + 
+                          '&end_date=' + encodeURIComponent(endParam) + 
+                          '&chunk=50';
+
+                fetch(url)
+                    .then(function(res) {
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        return res.text();
+                    })
+                    .then(function(html) {
+                        container.innerHTML = html;
+                        container.setAttribute('data-loaded', '1');
+                        var track = container.querySelector('.timeline-scroll-track');
+                        if (track) {
+                            initTimelineMouseInteractions(track);
+                        }
+                    })
+                    .catch(function(err) {
+                        container.innerHTML = `
+                            <div style="padding: 16px; text-align: center; color: #dc2626; font-size: 12px; font-weight: 700;">
+                                Gagal memuat timeline (${err.message}). Silakan coba klik tombol kembali.
+                            </div>
+                        `;
+                    });
+            } else {
+                // Pastikan listener tetap aktif jika baris dibuka kembali
+                var existingTrack = container.querySelector('.timeline-scroll-track');
+                if (existingTrack) {
+                    initTimelineMouseInteractions(existingTrack);
+                }
+            }
+        } else {
+            // Tutup Baris Accordion
+            row.style.display = 'none';
+            if (chevron) chevron.style.transform = 'rotate(0deg)';
+            btn.style.backgroundColor = '#f8fafc';
+            btn.style.borderColor = '#cbd5e1';
+            btn.style.color = '#475569';
+        }
+    }
+
+    // Sinkronkan lebar kontainer timeline saat ukuran jendela browser diubah
+    window.addEventListener('resize', function() {
+        var tableWrap = document.getElementById('mainSafetyStockTableWrap');
+        if (!tableWrap) return;
+        var availWidth = Math.max(300, tableWrap.clientWidth - 28);
+        document.querySelectorAll('.timeline-content-box').forEach(function(box) {
+            box.style.maxWidth = availWidth + 'px';
+            box.style.width = availWidth + 'px';
+        });
+    });
 
     // Handler untuk Scanner Barcode pada Kotak Pencarian Safety Stock
     function handleSafetyStockSearchScan(e) {

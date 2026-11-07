@@ -215,6 +215,7 @@ if ($activeTab === 'lot_details' || $activeTab === 'my_inspections') {
 
 $viewMode = isset($_GET['view']) ? trim(sanitize($_GET['view'])) : '';
 $safetyStockRecommendations = [];
+$ssAllocationByKanbanId     = [];
 $partSafetyStockMap         = [];
 $pagedRecommendations       = [];
 $totalSsItems               = 0;
@@ -373,6 +374,9 @@ if ($pdo) {
         }
     }
 
+    $selDateStart = $selectedDate . ' 00:00:00';
+    $selDateEnd   = $selectedDate . ' 23:59:59';
+
     // 2. Ambil daftar batch khusus untuk tanggal terpilih ($selectedDate)
     try {
         $batchSql = "
@@ -386,16 +390,18 @@ if ($pdo) {
               AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
               AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
               AND (
-                  DATE(b.imported_at) = :b_sel_date 
-                  OR DATE(k.created_at) = :b_sel_date2
+                  (b.imported_at BETWEEN :b_sel_start AND :b_sel_end)
+                  OR (b.imported_at IS NULL AND k.created_at BETWEEN :k_sel_start AND :k_sel_end)
               )
             GROUP BY b.id, b.document_number, b.vendor, b.imported_at, b.import_method
             ORDER BY b.imported_at ASC, b.id ASC
         ";
         $stmtB = $pdo->prepare($batchSql);
         $stmtB->execute([
-            ':b_sel_date'  => $selectedDate,
-            ':b_sel_date2' => $selectedDate
+            ':b_sel_start' => $selDateStart,
+            ':b_sel_end'   => $selDateEnd,
+            ':k_sel_start' => $selDateStart,
+            ':k_sel_end'   => $selDateEnd
         ]);
         $todayBatches = $stmtB->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $eBatches) {
@@ -407,13 +413,14 @@ if ($pdo) {
         $stmtPy = $pdo->prepare("
             SELECT COUNT(DISTINCT k.id)
             FROM kanban_items k
+            LEFT JOIN kanban_batches b ON b.id = k.batch_id
             WHERE (k.plan_type IS NULL OR k.plan_type = 'kanban')
               AND (k.check_type IS NULL OR k.check_type != 'Safety Stock')
               AND (k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')
-              AND DATE(k.created_at) < :py_date
+              AND COALESCE(b.imported_at, k.created_at) < :py_date
               AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')
         ");
-        $stmtPy->execute([':py_date' => $selectedDate]);
+        $stmtPy->execute([':py_date' => $selDateStart]);
         $pendingYesterdayCount = (int)$stmtPy->fetchColumn();
     } catch (Exception $ePy) {
         $pendingYesterdayCount = 0;
@@ -859,8 +866,15 @@ if ($pdo) {
 
             // KPI Summary selalu mencerminkan populasi gelombang kerja/tanggal terpilih secara stabil ($selectedDate)
             // Mengklik kartu Remain (scope=pending_yesterday) hanya menyaring baris tabel kerja di bawah, angka KPI atas tetap utuh.
-            $kbStatsWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kpi_sel_date";
-            $kbStatsParams[':kpi_sel_date'] = $selectedDate;
+            // Gunakan rentang waktu SARGable (BETWEEN) agar index B-Tree tetap aktif meski data mencapai ratusan juta baris
+            $kbStatsWhere[] = "(
+                (b.imported_at BETWEEN :kpi_start_dt AND :kpi_end_dt)
+                OR (b.imported_at IS NULL AND k.created_at BETWEEN :kpi_k_start_dt AND :kpi_k_end_dt)
+            )";
+            $kbStatsParams[':kpi_start_dt']   = $selDateStart;
+            $kbStatsParams[':kpi_end_dt']     = $selDateEnd;
+            $kbStatsParams[':kpi_k_start_dt'] = $selDateStart;
+            $kbStatsParams[':kpi_k_end_dt']   = $selDateEnd;
 
             // Sinkronisasi filter batch terpilih hanya jika tidak sedang memfilter remain/pending_yesterday
             if ($scopeFilter !== 'pending_yesterday' && $batchFilter !== 'all' && (int)$batchFilter > 0) {
@@ -1077,14 +1091,23 @@ if ($pdo) {
             // Scope filter: today vs pending_yesterday berdasarkan $selectedDate
             // Pengecualian: jika filter status 'in_progress', sertakan juga sesi yang sedang aktif berjalan lintas tanggal
             if ($statusFilter === 'in_progress') {
-                $tableWhere[] = "(DATE(COALESCE(b.imported_at, k.created_at)) = :kb_filter_sel_date OR EXISTS (SELECT 1 FROM inspection_sessions s_act2 WHERE s_act2.kanban_item_id = k.id AND s_act2.status = 'in_progress'))";
-                $tableParams[':kb_filter_sel_date'] = $selectedDate;
+                $tableWhere[] = "(
+                    ((b.imported_at BETWEEN :kb_f_s1 AND :kb_f_e1) OR (b.imported_at IS NULL AND k.created_at BETWEEN :kb_f_s2 AND :kb_f_e2))
+                    OR EXISTS (SELECT 1 FROM inspection_sessions s_act2 WHERE s_act2.kanban_item_id = k.id AND s_act2.status = 'in_progress')
+                )";
+                $tableParams[':kb_f_s1'] = $selDateStart;
+                $tableParams[':kb_f_e1'] = $selDateEnd;
+                $tableParams[':kb_f_s2'] = $selDateStart;
+                $tableParams[':kb_f_e2'] = $selDateEnd;
             } elseif ($scopeFilter === 'today') {
-                $tableWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :kb_filter_sel_date";
-                $tableParams[':kb_filter_sel_date'] = $selectedDate;
+                $tableWhere[] = "((b.imported_at BETWEEN :kb_f_s1 AND :kb_f_e1) OR (b.imported_at IS NULL AND k.created_at BETWEEN :kb_f_s2 AND :kb_f_e2))";
+                $tableParams[':kb_f_s1'] = $selDateStart;
+                $tableParams[':kb_f_e1'] = $selDateEnd;
+                $tableParams[':kb_f_s2'] = $selDateStart;
+                $tableParams[':kb_f_e2'] = $selDateEnd;
             } elseif ($scopeFilter === 'pending_yesterday') {
-                $tableWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :kb_filter_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
-                $tableParams[':kb_filter_py_date'] = $selectedDate;
+                $tableWhere[] = "COALESCE(b.imported_at, k.created_at) < :kb_filter_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                $tableParams[':kb_filter_py_date'] = $selDateStart;
             }
 
             // Batch ID Filter (jika filter in_progress dan batchFilter spesifik, jangan hilangkan kanban yang sedang aktif dikerjakan)
@@ -1352,64 +1375,82 @@ if ($pdo) {
                 }
 
                 // Ambil kandidat Kanban untuk target tanggal terpilih ($selectedDate) dan batch ($batchFilter)
-                $ssTargetWhere = [
-                    "k.status != 'completed'",
-                    "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
-                    "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
-                    "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')",
-                    "(k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))"
-                ];
-                $ssTargetParams = [];
-
-                if ($scopeFilter === 'pending_yesterday') {
-                    $ssTargetWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) < :ss_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
-                    $ssTargetParams[':ss_py_date'] = $selectedDate;
+                // OPTIMASI: Jika gudang tidak memiliki stok Safety Stock sama sekali, langsung skip (0 ms)!
+                if (empty($ssLotsPool)) {
+                    $allSsKanbanCandidates = [];
                 } else {
-                    $ssTargetWhere[] = "DATE(COALESCE(b.imported_at, k.created_at)) = :ss_sel_date";
-                    $ssTargetParams[':ss_sel_date'] = $selectedDate;
+                    $ssTargetWhere = [
+                        "k.status != 'completed'",
+                        "(k.plan_type IS NULL OR k.plan_type = 'kanban')",
+                        "(k.check_type IS NULL OR k.check_type != 'Safety Stock')",
+                        "(k.kanban_no IS NULL OR k.kanban_no NOT LIKE 'SS-%')",
+                        "(k.str_loc IS NULL OR k.str_loc NOT IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT'))"
+                    ];
+                    $ssTargetParams = [];
+
+                    if ($scopeFilter === 'pending_yesterday') {
+                        $ssTargetWhere[] = "COALESCE(b.imported_at, k.created_at) < :ss_py_date AND k.status IN ('uninspected', 'in_progress', 'partial', 'rejected')";
+                        $ssTargetParams[':ss_py_date'] = $selDateStart;
+                    } else {
+                        $ssTargetWhere[] = "((b.imported_at BETWEEN :ss_f_s1 AND :ss_f_e1) OR (b.imported_at IS NULL AND k.created_at BETWEEN :ss_f_s2 AND :ss_f_e2))";
+                        $ssTargetParams[':ss_f_s1'] = $selDateStart;
+                        $ssTargetParams[':ss_f_e1'] = $selDateEnd;
+                        $ssTargetParams[':ss_f_s2'] = $selDateStart;
+                        $ssTargetParams[':ss_f_e2'] = $selDateEnd;
+                    }
+
+                    if ($scopeFilter !== 'pending_yesterday' && $batchFilter !== 'all' && (int)$batchFilter > 0) {
+                        $ssTargetWhere[] = "k.batch_id = :ss_batch_id";
+                        $ssTargetParams[':ss_batch_id'] = (int)$batchFilter;
+                    }
+
+                    if ($search !== '') {
+                        $ssTargetWhere[] = "(k.kanban_no LIKE :ss_s1 OR k.item_code LIKE :ss_s2 OR k.item_description LIKE :ss_s3 OR k.customer LIKE :ss_s4)";
+                        $ssTargetParams[':ss_s1'] = '%' . $search . '%';
+                        $ssTargetParams[':ss_s2'] = '%' . $search . '%';
+                        $ssTargetParams[':ss_s3'] = '%' . $search . '%';
+                        $ssTargetParams[':ss_s4'] = '%' . $search . '%';
+                    }
+
+                    // TARGETED FILTER: Hanya query kanban yang part-nya benar-benar ada di Safety Stock pool
+                    $activePartCodes = array_keys($ssLotsPool);
+                    $inPartPlaceholders = [];
+                    foreach ($activePartCodes as $idx => $pCodeItem) {
+                        $ph = ':ss_p_' . $idx;
+                        $inPartPlaceholders[] = $ph;
+                        $ssTargetParams[$ph] = $pCodeItem;
+                    }
+                    $ssTargetWhere[] = "UPPER(TRIM(k.item_code)) IN (" . implode(',', $inPartPlaceholders) . ")";
+
+                    $ssTargetWhereStr = implode(' AND ', $ssTargetWhere);
+
+                    $stmtSsItems = $pdo->prepare("
+                        SELECT k.*, 
+                               b.document_number as doc_no, b.vendor, b.imported_at as batch_imported_at, b.import_method,
+                               mp.part_name as master_part_name,
+                               COALESCE((
+                                   SELECT SUM(
+                                       CASE 
+                                           WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
+                                               GREATEST(0, COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
+                                                         FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0))
+                                           WHEN s2.status = 'passed' THEN
+                                               s2.total_scanned_qty
+                                           ELSE 0
+                                       END
+                                   )
+                                   FROM inspection_sessions s2
+                                   WHERE s2.kanban_item_id = k.id
+                               ), 0) AS total_passed_qty
+                        FROM kanban_items k
+                        LEFT JOIN kanban_batches b ON b.id = k.batch_id
+                        LEFT JOIN master_parts mp ON mp.part_code = k.item_code
+                        WHERE {$ssTargetWhereStr}
+                        ORDER BY {$kanbanOrderBy}
+                    ");
+                    $stmtSsItems->execute($ssTargetParams);
+                    $allSsKanbanCandidates = $stmtSsItems->fetchAll(PDO::FETCH_ASSOC);
                 }
-
-                if ($scopeFilter !== 'pending_yesterday' && $batchFilter !== 'all' && (int)$batchFilter > 0) {
-                    $ssTargetWhere[] = "k.batch_id = :ss_batch_id";
-                    $ssTargetParams[':ss_batch_id'] = (int)$batchFilter;
-                }
-
-                if ($search !== '') {
-                    $ssTargetWhere[] = "(k.kanban_no LIKE :ss_s1 OR k.item_code LIKE :ss_s2 OR k.item_description LIKE :ss_s3 OR k.customer LIKE :ss_s4)";
-                    $ssTargetParams[':ss_s1'] = '%' . $search . '%';
-                    $ssTargetParams[':ss_s2'] = '%' . $search . '%';
-                    $ssTargetParams[':ss_s3'] = '%' . $search . '%';
-                    $ssTargetParams[':ss_s4'] = '%' . $search . '%';
-                }
-
-                $ssTargetWhereStr = implode(' AND ', $ssTargetWhere);
-
-                $stmtSsItems = $pdo->prepare("
-                    SELECT k.*, 
-                           b.document_number as doc_no, b.vendor, b.imported_at as batch_imported_at, b.import_method,
-                           mp.part_name as master_part_name,
-                           COALESCE((
-                               SELECT SUM(
-                                   CASE 
-                                       WHEN EXISTS (SELECT 1 FROM inspection_session_lots isl_c WHERE isl_c.inspection_session_id = s2.id) THEN
-                                           GREATEST(0, COALESCE((SELECT SUM(CASE WHEN isl2.lot_result IN ('passed', 'skipped') AND (isl2.lot_status IS NULL OR isl2.lot_status != 'replaced') THEN isl2.qty ELSE 0 END)
-                                                     FROM inspection_session_lots isl2 WHERE isl2.inspection_session_id = s2.id), 0))
-                                       WHEN s2.status = 'passed' THEN
-                                           s2.total_scanned_qty
-                                       ELSE 0
-                                   END
-                               )
-                               FROM inspection_sessions s2
-                               WHERE s2.kanban_item_id = k.id
-                           ), 0) AS total_passed_qty
-                    FROM kanban_items k
-                    LEFT JOIN kanban_batches b ON b.id = k.batch_id
-                    LEFT JOIN master_parts mp ON mp.part_code = k.item_code
-                    WHERE {$ssTargetWhereStr}
-                    ORDER BY k.id ASC
-                ");
-                $stmtSsItems->execute($ssTargetParams);
-                $allSsKanbanCandidates = $stmtSsItems->fetchAll(PDO::FETCH_ASSOC);
 
                 // Dynamic FIFO Depletion Pool Allocation:
                 // Setiap box yang dialokasikan ke suatu Kanban langsung dipotong dari pool sehingga
@@ -1469,6 +1510,13 @@ if ($pdo) {
                     if (!empty($allocatedBoxes)) {
                         $fulfillType = ($totalAllocatedThisKanban >= $targetCalc) ? 'full' : 'partial';
                         $fulfillPct  = ($targetCalc > 0) ? min(100, round(($totalAllocatedThisKanban / $targetCalc) * 100)) : 0;
+
+                        $ssAllocationByKanbanId[(int)$ck['id']] = [
+                            'allocated_qty' => $totalAllocatedThisKanban,
+                            'needed_qty'    => $needed,
+                            'fulfill_type'  => $fulfillType,
+                            'shortage_qty'  => max(0, $needed - $totalAllocatedThisKanban)
+                        ];
 
                         $safetyStockRecommendations[] = [
                             'item_id'      => $ck['id'],

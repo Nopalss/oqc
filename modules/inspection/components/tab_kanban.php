@@ -737,15 +737,16 @@
                                             <?php endif; ?>
                                             <?php 
                                                 $pCodeUpper = strtoupper(trim($k['item_code']));
-                                                $ssAvailQty = $partSafetyStockMap[$pCodeUpper] ?? 0;
+                                                $ssAlloc = $ssAllocationByKanbanId[$kid] ?? null;
+                                                $ssAllocQty = $ssAlloc ? (int)$ssAlloc['allocated_qty'] : 0;
                                             ?>
-                                            <?php if ($ssAvailQty > 0 && !$isCompleted && $remainingQuotaToClose > 0): ?>
+                                            <?php if ($ssAllocQty > 0 && !$isCompleted && $remainingQuotaToClose > 0): ?>
                                                 <div class="mt-1">
                                                     <a href="?tab=kanban&view=safety_stock&selected_date=<?= urlencode($selectedDate) ?>&batch_id=<?= urlencode($batchFilter) ?>" 
                                                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-extrabold transition-colors shadow-2xs" 
                                                        style="background-color: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe;"
-                                                       title="Part ini memiliki stok pengaman ready di rak gudang (Klik untuk lihat rekomendasi FIFO)">
-                                                        <span>📦 Ready SS: <?= number_format($ssAvailQty) ?> pcs</span>
+                                                       title="Part ini memiliki alokasi stok pengaman FIFO ready di rak gudang (Klik untuk lihat rekomendasi FIFO)">
+                                                        <span>📦 Ready SS: <?= number_format($ssAllocQty) ?> pcs</span>
                                                     </a>
                                                 </div>
                                             <?php endif; ?>
@@ -800,24 +801,25 @@
                                                     <span class="passed-qty-val"><?= number_format($passedQty) ?></span> <span class="text-slate-400 font-normal">/</span> <?= number_format($targetQty) ?> <span class="text-[10px] text-slate-500 font-medium">pcs</span>
                                                 </div>
                                                 <?php
-                                                    if ($isFullyPassed || $progressPct >= 100) {
+                                                    $remainingQty = max(0, $targetQty - $passedQty);
+                                                    if ($isFullyPassed || $progressPct >= 100 || $remainingQty <= 0) {
                                                         $barBg = 'background: linear-gradient(90deg, #10b981 0%, #059669 100%);';
-                                                        $barLabel = '100% selesai';
+                                                        $barLabel = 'Lengkap';
                                                         $labelClass = 'text-emerald-700 font-extrabold';
                                                         $barFillWidth = 100;
                                                     } elseif ($hasActiveSession) {
                                                         $barBg = 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);';
-                                                        $barLabel = ($progressPct > 0) ? ($progressPct . '% berjalan') : 'Mulai berjalan';
+                                                        $barLabel = 'Kurang ' . number_format($remainingQty) . ' pcs';
                                                         $labelClass = 'text-amber-800 font-black';
                                                         $barFillWidth = max(8, $progressPct);
                                                     } elseif ($progressPct > 0) {
                                                         $barBg = 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);';
-                                                        $barLabel = $progressPct . '% parsial';
+                                                        $barLabel = 'Kurang ' . number_format($remainingQty) . ' pcs';
                                                         $labelClass = 'text-amber-800 font-extrabold';
                                                         $barFillWidth = $progressPct;
                                                     } else {
                                                         $barBg = 'background-color: #cbd5e1;';
-                                                        $barLabel = 'Belum mulai';
+                                                        $barLabel = 'Kurang ' . number_format($targetQty) . ' pcs';
                                                         $labelClass = 'text-slate-400 font-medium';
                                                         $barFillWidth = 0;
                                                     }
@@ -828,6 +830,24 @@
                                                 <span class="text-[10px] <?= $labelClass ?> block leading-none progress-label">
                                                     <?= $barLabel ?>
                                                 </span>
+                                                <?php if ($ssAlloc && $ssAllocQty > 0 && !$isCompleted && $remainingQuotaToClose > 0): ?>
+                                                    <?php 
+                                                        $isSsFull = ($ssAlloc['fulfill_type'] === 'full');
+                                                        $allocQty = (int)$ssAlloc['allocated_qty'];
+                                                        $shortageQty = (int)$ssAlloc['shortage_qty'];
+                                                    ?>
+                                                    <div class="mt-1.5 ss-coverage-box">
+                                                        <a href="?tab=kanban&view=safety_stock&selected_date=<?= urlencode($selectedDate) ?>&batch_id=<?= urlencode($batchFilter) ?>" 
+                                                           class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-bold tracking-tight border transition-all hover:shadow-xs <?= $isSsFull ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100' : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100' ?>" 
+                                                           title="<?= $isSsFull ? 'Stok SS di gudang cukup untuk menutup Kanban ini (' . number_format($remainingQuotaToClose) . ' pcs)' : 'Stok SS hanya bisa menutup sebagian (' . number_format($allocQty) . ' pcs). Kanban masih kurang ' . number_format($shortageQty) . ' pcs.' ?>">
+                                                            <?php if ($isSsFull): ?>
+                                                                <span>📦 Stok SS Cukup (Bisa Tutup <?= number_format($remainingQuotaToClose) ?> pcs)</span>
+                                                            <?php else: ?>
+                                                                <span>⚠ Stok SS Cuma Ada <?= number_format($allocQty) ?> (Kurang <?= number_format($shortageQty) ?> pcs)</span>
+                                                            <?php endif; ?>
+                                                        </a>
+                                                    </div>
+                                                <?php endif; ?>
                                             </div>
                                         </td>
 
@@ -943,7 +963,19 @@
                                                             </a>
                                                         </div>
                                                     <?php else: ?>
-                                                        <!-- Selesai (tanpa label redundant) -->
+                                                        <?php
+                                                            $lastKSess = !empty($kSessions) ? end($kSessions) : null;
+                                                            $lastKSid = $lastKSess ? (int)$lastKSess['id'] : 0;
+                                                        ?>
+                                                        <?php if ($lastKSid > 0): ?>
+                                                            <a href="<?= base_url('modules/inspection/session.php?id=' . $lastKSid) ?>" 
+                                                               style="background-color: #475569; color: #ffffff;"
+                                                               class="px-3.5 py-1.5 hover:bg-slate-700 active:bg-slate-800 text-white font-extrabold text-xs rounded-md shadow-xs hover:shadow transition-all inline-flex items-center gap-1.5 whitespace-nowrap flex-nowrap" 
+                                                               title="Buka kembali kamar inspeksi Kanban ini">
+                                                                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                                                                <span>Buka Sesi</span>
+                                                            </a>
+                                                        <?php endif; ?>
                                                     <?php endif; ?>
                                                 </div>
 

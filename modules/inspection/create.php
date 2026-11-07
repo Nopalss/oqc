@@ -439,11 +439,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 }
             } else {
                 // INSERT baris sesi baru dengan flow_version = 2 dan mencatat line_id dan line_name
+                $ssSourceVal = ($inspectionType === 'safety_stock') ? 'direct' : 'direct';
                 $stmtIns = $pdo->prepare("INSERT INTO inspection_sessions 
-                    (flow_version, inspection_type, did_id, kanban_item_id, part_id, inspector_id, line_id, line_name, sample_size, total_scanned_qty, batch_sample_size, use_safety_stock_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at) 
-                    VALUES (2, :itype, :did, :kanban, :part, :insp, :lid, :line, :ssize, :tqty, :batch_ssize, :usss, :eqty, :rej, 0, 0, 'in_progress', NOW())");
+                    (flow_version, inspection_type, ss_source, did_id, kanban_item_id, part_id, inspector_id, line_id, line_name, sample_size, total_scanned_qty, batch_sample_size, use_safety_stock_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at) 
+                    VALUES (2, :itype, :ss_src, :did, :kanban, :part, :insp, :lid, :line, :ssize, :tqty, :batch_ssize, :usss, :eqty, :rej, 0, 0, 'in_progress', NOW())");
                 $stmtIns->execute([
                     ':itype'       => $inspectionType,
+                    ':ss_src'      => $ssSourceVal,
                     ':did'         => $didId,
                     ':kanban'      => $kanbanItemId ?: null,
                     ':part'        => $partId ?: null,
@@ -790,8 +792,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         // 3. Create a new Safety Stock inspection_sessions record for leftover Qty
                         $origSsId = (int)(($ssRow['original_ss_session_id'] ?? null) ?: $ssSessionId);
                         $stmtInsLeftoverS = $pdo->prepare("INSERT INTO inspection_sessions 
-                            (inspection_type, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, original_ss_session_id, started_at, closed_at) 
-                            VALUES ('safety_stock', :did, :kanban, :part, 1, :tqty, 0, 1, 1, 0, 'passed', :orig_ss, NOW(), NOW())");
+                            (inspection_type, ss_source, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, original_ss_session_id, started_at, closed_at) 
+                            VALUES ('safety_stock', 'split_leftover', :did, :kanban, :part, 1, :tqty, 0, 1, 1, 0, 'passed', :orig_ss, NOW(), NOW())");
                         $stmtInsLeftoverS->execute([
                             ':did'     => $ssRow['did_id'],
                             ':kanban'  => $newSSKId,

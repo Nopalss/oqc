@@ -798,7 +798,9 @@ if ($autoKanbanIdParam > 0 && $pdo) {
 }
 
 // Spectator / Read-Only Mode Detection
-$isExplicitReadOnly = (isset($_GET['view_mode']) && $_GET['view_mode'] === 'readonly') || (isset($_GET['spectator']) && $_GET['spectator'] == 1);
+// Prinsip Otorisasi Mutlak:
+// 1. Sesi milik orang lain (!isSessionOwner) -> OTOMATIS 100% Mode Pantau (Read-Only) bagi siapapun (termasuk Admin/Supervisor/Chief)
+// 2. Sesi milik sendiri (isSessionOwner) -> SELALU Write/Owner Access penuh, TIDAK PERNAH dikunci ke Read-Only
 $sessionInspectorName = 'QC Inspector';
 $isSessionOwner = false;
 $isPrivilegedUser = in_array($currentUserRole, ['admin', 'chief', 'supervisor', 'manager', 'leader'], true);
@@ -816,16 +818,8 @@ if (!empty($session['inspector_id'])) {
     $isSessionOwner = true;
 }
 
-// Kunci ke Read-Only Mode HANYA jika:
-// 1. Diminta secara eksplisit melalui URL (?view_mode=readonly atau ?spectator=1)
-// 2. ATAU sesi ini dimiliki oleh inspektur lain DAN user saat ini BUKAN role pengawas (admin/chief/supervisor/manager/leader)
-$isReadOnlyView = false;
-
-if ($isExplicitReadOnly) {
-    $isReadOnlyView = true;
-} elseif (!$isSessionOwner && !$isPrivilegedUser) {
-    $isReadOnlyView = true;
-}
+// Read-only hanya aktif jika sesi ini milik orang lain
+$isReadOnlyView = !$isSessionOwner;
 
 // If no session specified, auto open scan modal
 $showScanOverlay = (!$session || $autoScanNew);
@@ -972,6 +966,7 @@ window.OQC_CONFIG = {
     prefilledPartCode: <?= json_encode(sanitize($_GET['part_code'] ?? '')) ?>,
     defectTypesList: <?= json_encode($defectTypes ?? []) ?>,
     showScanOverlay: <?= $showScanOverlay ? 'true' : 'false' ?>,
+    isSessionOwner: <?= $isSessionOwner ? 'true' : 'false' ?>,
     isReadOnlyView: <?= $isReadOnlyView ? 'true' : 'false' ?>,
     currentUserName: <?= json_encode($currentUser['name'] ?? '') ?>,
     sessionData: <?= $session ? json_encode($session) : 'null' ?>

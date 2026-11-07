@@ -323,7 +323,8 @@
                 pointHitRadius: 0,
                 fill: false,
                 tension: 0,
-                order: 1
+                order: 1,
+                isTargetLine: true
             });
         }
 
@@ -496,6 +497,13 @@
                         bodyColor: '#e2e8f0',
                         padding: 10,
                         cornerRadius: 6,
+                        filter: function(tooltipItem) {
+                            // Sembunyikan garis target merah dari hover popup
+                            if (tooltipItem && tooltipItem.dataset && (tooltipItem.dataset.isTargetLine || tooltipItem.dataset.borderColor === '#ef4444')) {
+                                return false;
+                            }
+                            return true;
+                        },
                         callbacks: {
                             title: function(items) {
                                 if (!items || items.length === 0) return '';
@@ -503,8 +511,8 @@
                                 return (tooltips[idx] !== undefined) ? tooltips[idx] : items[0].label;
                             },
                             label: function(context) {
-                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
-                                    return ' 🎯 Batas Target: ' + Number(context.raw || 0).toLocaleString() + ' PPM';
+                                if (context.dataset && (context.dataset.isTargetLine || context.dataset.borderColor === '#ef4444')) {
+                                    return null;
                                 }
                                 // Pada mode bar (ada bar + line), cegah dobel label di tooltip
                                 if (hasBar && context.datasetIndex > 0 && datasets[0].type === 'bar') {
@@ -514,7 +522,7 @@
                                 return (isPassedMode ? ' Yield Rate: ' : ' Defect Rate: ') + val + ' ' + scaleUnit;
                             },
                             afterLabel: function(context) {
-                                if (context.dataset && context.dataset.borderColor === '#ef4444') {
+                                if (context.dataset && (context.dataset.isTargetLine || context.dataset.borderColor === '#ef4444')) {
                                     return '';
                                 }
                                 if (hasBar && context.datasetIndex > 0 && datasets[0].type === 'bar') {

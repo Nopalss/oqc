@@ -19,6 +19,9 @@ $isAdmin = ($currentUser['role'] === 'admin');
 
 $partCodeParam = sanitize($_GET['part_code'] ?? '');
 $sessionIdParam = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+$periodParam    = sanitize($_GET['period'] ?? 'semua');
+$startDateParam = sanitize($_GET['start_date'] ?? '');
+$endDateParam   = sanitize($_GET['end_date'] ?? '');
 
 $pdo = getDB();
 $partInfo = null;
@@ -121,20 +124,28 @@ if ($pdo) {
             $partInfo = $stPart->fetch(PDO::FETCH_ASSOC);
 
             if ($partInfo) {
-                // 2. High-Performance Aggregate Metrics (Direct B-Tree Index Scan)
-                $stInitial = $pdo->prepare("
+                // 2. High-Performance Aggregate Metrics (Sinkron dengan Arsitektur 4 Pilar Index & Timeline)
+                $stMetrics = $pdo->prepare("
                     SELECT 
+                        -- Masuk Normal Lolos (Passed)
                         COALESCE(SUM(CASE 
-                            WHEN (ki.remark IS NULL OR ki.remark NOT LIKE '%Auto Safety Stock Sisa Excess Kanban%') 
+                            WHEN COALESCE(ss.ss_source, 'direct') = 'direct' AND ss.status = 'passed'
                             THEN ss.total_scanned_qty 
                             ELSE 0 
-                        END), 0) AS total_initial,
+                        END), 0) AS normal_in_qty,
+                        -- Masuk Sisa Kanban Lolos (Passed)
                         COALESCE(SUM(CASE 
-                            WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
-                                 AND ss.status = 'passed' 
+                            WHEN COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover') AND ss.status = 'passed'
                             THEN ss.total_scanned_qty 
                             ELSE 0 
-                        END), 0) AS available_stock,
+                        END), 0) AS sisa_in_qty,
+                        -- Reject
+                        COALESCE(SUM(CASE 
+                            WHEN ss.status = 'rejected' 
+                            THEN ss.total_scanned_qty 
+                            ELSE 0 
+                        END), 0) AS rejected_qty,
+                        -- Hitung Status Sesi
                         COALESCE(SUM(CASE 
                             WHEN (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0) 
                                  AND ss.status = 'in_progress' 
@@ -149,28 +160,25 @@ if ($pdo) {
                     WHERE ss.inspection_type = 'safety_stock'
                       AND (did.part_code = :p1 OR ki.item_code = :p2)
                 ");
-                $stInitial->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
-                $metrics = $stInitial->fetch(PDO::FETCH_ASSOC);
+                $stMetrics->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
+                $metrics = $stMetrics->fetch(PDO::FETCH_ASSOC);
 
-                // Fetch Kanban Used Qty for this part
+                // Fetch Riil Safety Stock Terpakai Memotong Kanban (Berdasarkan s_ss.total_scanned_qty)
                 $stUsed = $pdo->prepare("
-                    SELECT COALESCE(SUM(ki_k.qty), 0) AS total_used
-                    FROM (
-                        SELECT DISTINCT s_ss.auto_fulfilled_by_session_id AS kanban_session_id
-                        FROM inspection_sessions s_ss
-                        LEFT JOIN daily_inspection_data did_s ON did_s.id = s_ss.did_id
-                        LEFT JOIN kanban_items ki_s ON ki_s.id = s_ss.kanban_item_id
-                        WHERE s_ss.inspection_type = 'safety_stock'
-                          AND s_ss.auto_fulfilled_by_session_id > 0
-                          AND (did_s.part_code = :p1 OR ki_s.item_code = :p2)
-                    ) u_sess
-                    JOIN inspection_sessions s_k ON s_k.id = u_sess.kanban_session_id
-                    JOIN kanban_items ki_k ON ki_k.id = s_k.kanban_item_id
+                    SELECT COALESCE(SUM(s_ss.total_scanned_qty), 0) AS total_used
+                    FROM inspection_sessions s_ss
+                    LEFT JOIN daily_inspection_data did_s ON did_s.id = s_ss.did_id
+                    LEFT JOIN kanban_items ki_s ON ki_s.id = s_ss.kanban_item_id
+                    WHERE s_ss.inspection_type = 'safety_stock'
+                      AND s_ss.auto_fulfilled_by_session_id > 0
+                      AND (did_s.part_code = :p1 OR ki_s.item_code = :p2)
                 ");
                 $stUsed->execute([':p1' => $partCodeParam, ':p2' => $partCodeParam]);
                 $totalUsedQty = (int)$stUsed->fetchColumn();
 
-                $totalInitialStock = (int)($metrics['total_initial'] ?? 0);
+                $normalInQty       = (int)($metrics['normal_in_qty'] ?? 0);
+                $sisaInQty         = (int)($metrics['sisa_in_qty'] ?? 0);
+                $totalInitialStock = $normalInQty + $sisaInQty; // Total Seluruh Masuk Fisik (Normal + Sisa)
                 $availableStock    = max(0, $totalInitialStock - $totalUsedQty);
                 $hasInProgress     = ((int)($metrics['in_progress_count'] ?? 0) > 0);
                 $hasRejected       = ((int)($metrics['rejected_count'] ?? 0) > 0);
@@ -305,6 +313,7 @@ if ($pdo) {
                     SELECT isl.*, 
                            ss.started_at AS scanned_at, 
                            ss.status AS session_status, 
+                           ss.ss_source,
                            ss.auto_fulfilled_by_session_id,
                            ss.is_reinspection,
                            ss.reinspection_type,
@@ -326,7 +335,7 @@ if ($pdo) {
                 // Fallback for legacy session without individual session_lots rows
                 if (empty($sessionLots) && $totalFilteredLots === 0 && empty($boxSearch) && empty($boxStatus) && empty($boxStartDate)) {
                     $stFallback = $pdo->prepare("
-                        SELECT ss.id, ss.total_scanned_qty, ss.started_at, ss.status,
+                        SELECT ss.id, ss.total_scanned_qty, ss.started_at, ss.status, ss.ss_source,
                                did.lot_number AS did_lot,
                                COALESCE(u.name, did.pic, 'Inspector QC') AS inspector_name
                         FROM inspection_sessions ss
@@ -349,6 +358,7 @@ if ($pdo) {
                             'qty'                          => (int)$fb['total_scanned_qty'],
                             'scanned_at'                   => $fb['started_at'],
                             'session_status'               => $fb['status'],
+                            'ss_source'                    => $fb['ss_source'] ?? 'direct',
                             'auto_fulfilled_by_session_id' => 0,
                             'inspector_name'               => $fb['inspector_name'],
                             'remarks'                      => 'Sesi Utuh'
@@ -392,32 +402,29 @@ if ($pdo) {
                     }
 
                     if (!empty($khQrRef) && !empty($khQrLot)) {
-                        $khWhere[] = "((isl_k.ref_number LIKE :qrRef OR isl_ss.ref_number LIKE :qrRef2) AND (isl_k.lot_number LIKE :qrLot OR isl_ss.lot_number LIKE :qrLot2))";
+                        $khWhere[] = "(isl_ss.ref_number LIKE :qrRef AND (isl_ss.lot_number LIKE :qrLot OR did.lot_number LIKE :qrLot2))";
                         $khParams[':qrRef']  = '%' . $khQrRef . '%';
-                        $khParams[':qrRef2'] = '%' . $khQrRef . '%';
                         $khParams[':qrLot']  = '%' . $khQrLot . '%';
                         $khParams[':qrLot2'] = '%' . $khQrLot . '%';
                     } elseif (!empty($khQrRef)) {
-                        $khWhere[] = "(isl_k.ref_number LIKE :qrRef OR isl_ss.ref_number LIKE :qrRef2)";
+                        $khWhere[] = "isl_ss.ref_number LIKE :qrRef";
                         $khParams[':qrRef']  = '%' . $khQrRef . '%';
-                        $khParams[':qrRef2'] = '%' . $khQrRef . '%';
                     } elseif (!empty($khQrLot)) {
-                        $khWhere[] = "(isl_k.lot_number LIKE :qrLot OR isl_ss.lot_number LIKE :qrLot2)";
+                        $khWhere[] = "(isl_ss.lot_number LIKE :qrLot OR did.lot_number LIKE :qrLot2)";
                         $khParams[':qrLot']  = '%' . $khQrLot . '%';
                         $khParams[':qrLot2'] = '%' . $khQrLot . '%';
                     } else {
-                        $khWhere[] = "(ki.kanban_no LIKE :ks1 OR isl_k.ref_number LIKE :ks2 OR isl_ss.ref_number LIKE :ks3 OR isl_k.lot_number LIKE :ks4 OR isl_ss.lot_number LIKE :ks5)";
+                        $khWhere[] = "(ki.kanban_no LIKE :ks1 OR isl_ss.ref_number LIKE :ks2 OR isl_ss.lot_number LIKE :ks3 OR did.lot_number LIKE :ks4)";
                         $khParams[':ks1'] = '%' . $historySearch . '%';
                         $khParams[':ks2'] = '%' . $historySearch . '%';
                         $khParams[':ks3'] = '%' . $historySearch . '%';
                         $khParams[':ks4'] = '%' . $historySearch . '%';
-                        $khParams[':ks5'] = '%' . $historySearch . '%';
                     }
                 }
 
                 $khWhereStr = implode(" AND ", $khWhere);
 
-                // 5. Query Semua Alokasi Lot Pemotong Kanban (Per Lot Fisik)
+                // 5. Query Semua Alokasi Pemotong Kanban (Per Sesi Mutasi Out)
                 $stmtRawLots = $pdo->prepare("
                     SELECT 
                         s_kanban.id AS kanban_session_id,
@@ -431,67 +438,39 @@ if ($pdo) {
                         ki.customer,
                         ki.qty AS target_kanban_qty,
                         COALESCE(u.name, 'Inspector QC') AS inspector_name,
-                        isl_k.id AS k_lot_id,
-                        isl_k.ref_number,
-                        isl_k.lot_number,
-                        isl_k.qty AS lot_qty,
-                        isl_k.remarks AS lot_remarks
-                    FROM inspection_sessions s_kanban
-                    JOIN inspection_sessions s_ss ON s_ss.auto_fulfilled_by_session_id = s_kanban.id
+                        s_ss.id AS ss_session_id,
+                        COALESCE(MAX(NULLIF(TRIM(isl_ss.ref_number), '')), MAX(did.lot_number), CONCAT('SS-#', s_ss.id)) AS ref_number,
+                        COALESCE(MAX(NULLIF(TRIM(isl_ss.lot_number), '')), MAX(did.lot_number), 'LOT-SS') AS lot_number,
+                        s_ss.total_scanned_qty AS used_qty,
+                        COALESCE(MAX(isl_ss.remarks), 'Alokasi Safety Stock Fisik') AS lot_remarks
+                    FROM inspection_sessions s_ss
+                    JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
                     LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
                     LEFT JOIN kanban_items ki_ss ON ki_ss.id = s_ss.kanban_item_id
                     LEFT JOIN kanban_items ki ON ki.id = s_kanban.kanban_item_id
                     LEFT JOIN users u ON u.id = s_kanban.inspector_id
-                    JOIN inspection_session_lots isl_k ON isl_k.inspection_session_id = s_kanban.id
-                        AND (
-                            isl_k.remarks LIKE CONCAT('%Sesi #', s_ss.id, '%')
-                            OR isl_k.remarks LIKE '%Alokasi Safety Stock Fisik%'
-                        )
+                    LEFT JOIN inspection_session_lots isl_ss ON isl_ss.inspection_session_id = s_ss.id
                     WHERE {$khWhereStr}
-                    ORDER BY s_kanban.id DESC, isl_k.id ASC
+                    GROUP BY 
+                        s_ss.id,
+                        s_kanban.id,
+                        s_kanban.started_at,
+                        s_kanban.closed_at,
+                        s_kanban.status,
+                        s_kanban.samples_checked,
+                        s_kanban.sample_size,
+                        s_kanban.ng_count,
+                        ki.kanban_no,
+                        ki.customer,
+                        ki.qty,
+                        u.name,
+                        s_ss.total_scanned_qty
+                    ORDER BY s_kanban.id DESC, s_ss.id DESC
                 ");
                 $stmtRawLots->execute($khParams);
-                $rawAllocatedLots = $stmtRawLots->fetchAll(PDO::FETCH_ASSOC);
+                $allEligibleAllocations = $stmtRawLots->fetchAll(PDO::FETCH_ASSOC);
 
-                // Hitung kuota FIFO pemenuhan Kanban per lot:
-                // Hanya lot yang benar-benar memotong kuota Kanban (used_qty > 0) yang dimunculkan.
-                // Jika 1 Kanban butuh 100 pcs dan dipenuhi 2 lot @ 50 pcs -> tampil 2 baris terpisah!
-                $allEligibleAllocations = [];
-                $consumedQuotaByKanban = [];
-                $processedLotIds = [];
-
-                foreach ($rawAllocatedLots as $rLot) {
-                    $lotId = (int)$rLot['k_lot_id'];
-                    if (isset($processedLotIds[$lotId])) {
-                        continue;
-                    }
-                    $processedLotIds[$lotId] = true;
-
-                    $ksid = (int)$rLot['kanban_session_id'];
-                    $kTarget = (int)($rLot['target_kanban_qty'] ?: 0);
-                    $lotQty = (int)$rLot['lot_qty'];
-
-                    if (!isset($consumedQuotaByKanban[$ksid])) {
-                        $consumedQuotaByKanban[$ksid] = 0;
-                    }
-
-                    $alreadyTaken = $consumedQuotaByKanban[$ksid];
-                    $remainingNeeded = max(0, $kTarget - $alreadyTaken);
-
-                    // Qty yang benar-benar terpakai memotong Kanban
-                    $usedForKanban = min($lotQty, $remainingNeeded);
-                    $consumedQuotaByKanban[$ksid] += $usedForKanban;
-
-                    // HANYA MASUKKAN JIKA used_qty > 0 (lot yang berkontribusi)
-                    if ($usedForKanban > 0) {
-                        $rLot['used_qty'] = $usedForKanban;
-                        $rLot['ref_number'] = $rLot['ref_number'] ?: '-';
-                        $rLot['lot_number'] = $rLot['lot_number'] ?: '-';
-                        $allEligibleAllocations[] = $rLot;
-                    }
-                }
-
-                // Total Riwayat = Jumlah baris lot yang berkontribusi
+                // Total Riwayat = Jumlah baris kontribusi pemotongan kanban
                 $totalFilteredHistory = count($allEligibleAllocations);
                 $totalHistoryPages = max(1, (int)ceil($totalFilteredHistory / $historyLimit));
                 if ($historyPage > $totalHistoryPages) {
@@ -564,7 +543,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <!-- 1. Header Banner Card -->
         <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 12px; padding: 14px 18px; color: #ffffff; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; align-items: center; gap: 12px;">
-                <a href="<?= base_url('modules/safety_stock/index.php') ?>" style="background-color: #334155; color: #ffffff; border-radius: 8px; padding: 7px 12px; font-size: 11px; font-weight: 700; border: none; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="Kembali ke Monitoring Safety Stock">
+                <a href="<?= base_url('modules/safety_stock/index.php?period=' . urlencode($periodParam) . (!empty($startDateParam) ? '&start_date=' . urlencode($startDateParam) . '&end_date=' . urlencode($endDateParam) : '')) ?>" style="background-color: #334155; color: #ffffff; border-radius: 8px; padding: 7px 12px; font-size: 11px; font-weight: 700; border: none; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="Kembali ke Monitoring Safety Stock">
                     <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                     </svg>
@@ -588,40 +567,101 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             </div>
         </div>
 
-        <!-- 2. KPI SUMMARY CARDS (4 Cards Grid) -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+        <!-- 2. KPI SUMMARY CARDS (Format 4 Pilar Sinkron Index & Timeline) -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px;">
             
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-                <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Total Stok Masuk</span>
-                <div style="font-size: 20px; font-weight: 900; color: #0f172a; margin-top: 4px; font-family: monospace;">
-                    <?= number_format($totalInitialStock) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+            <!-- Pilar 1: Masuk Normal -->
+            <div style="background-color: #ffffff; border: 1px solid #bfdbfe; border-left: 4px solid #2563eb; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 10px; font-weight: 800; color: #1d4ed8; letter-spacing: 0.5px; text-transform: uppercase;">1. Masuk Normal</span>
+                    <span style="font-size: 14px;">📥</span>
                 </div>
+                <div style="font-size: 20px; font-weight: 900; color: #1e3a8a; margin-top: 4px; font-family: monospace;">
+                    +<?= number_format($normalInQty) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+                </div>
+                <div style="font-size: 10px; color: #64748b; margin-top: 2px;">Inspeksi Reguler Safety Stock</div>
             </div>
 
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-                <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Terpakai Kanban</span>
-                <div style="font-size: 20px; font-weight: 900; color: #7c3aed; margin-top: 4px; font-family: monospace;">
-                    <?= number_format($totalUsedQty) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+            <!-- Pilar 2: Sisa Kanban -->
+            <div style="background-color: #ffffff; border: 1px solid #fde68a; border-left: 4px solid #f59e0b; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 10px; font-weight: 800; color: #b45309; letter-spacing: 0.5px; text-transform: uppercase;">2. Sisa Kanban</span>
+                    <span style="font-size: 14px;">♻️</span>
                 </div>
+                <div style="font-size: 20px; font-weight: 900; color: #b45309; margin-top: 4px; font-family: monospace;">
+                    +<?= number_format($sisaInQty) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+                </div>
+                <div style="font-size: 10px; color: #64748b; margin-top: 2px;">Kembalian Scan Lebih Kanban</div>
             </div>
 
-            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-                <span style="font-size: 10px; font-weight: 800; color: #166534; letter-spacing: 0.5px; text-transform: uppercase;">Sisa Stok Gudang</span>
+            <!-- Pilar 3: Terpakai Kanban -->
+            <div style="background-color: #ffffff; border: 1px solid #e9d5ff; border-left: 4px solid #9333ea; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 10px; font-weight: 800; color: #7e22ce; letter-spacing: 0.5px; text-transform: uppercase;">3. Terpakai Kanban</span>
+                    <span style="font-size: 14px;">📤</span>
+                </div>
+                <div style="font-size: 20px; font-weight: 900; color: #6b21a8; margin-top: 4px; font-family: monospace;">
+                    -<?= number_format($totalUsedQty) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">pcs</span>
+                </div>
+                <div style="font-size: 10px; color: #64748b; margin-top: 2px;">Dipotong Untuk Pesanan Kanban</div>
+            </div>
+
+            <!-- Pilar 4: Stok Gudang Saat Ini -->
+            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="font-size: 10px; font-weight: 800; color: #166534; letter-spacing: 0.5px; text-transform: uppercase;">4. Sisa di Rak Saat Ini</span>
+                    <span style="font-size: 14px;">📦</span>
+                </div>
                 <div style="font-size: 20px; font-weight: 900; color: #15803d; margin-top: 4px; font-family: monospace;">
                     <?= number_format($availableStock) ?> <span style="font-size: 11px; font-weight: 700; color: #166534;">pcs</span>
                 </div>
-            </div>
-
-            <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
-                <span style="font-size: 10px; font-weight: 800; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase;">Total Kemasan Box Fisik</span>
-                <div style="font-size: 20px; font-weight: 900; color: #334155; margin-top: 4px; font-family: monospace;">
-                    <?= number_format($totalActiveBoxes) ?> <span style="font-size: 11px; font-weight: 700; color: #64748b;">box aktif</span>
+                <div style="font-size: 10px; font-weight: 700; color: #15803d; margin-top: 2px;">
+                    <?= number_format($totalActiveBoxes) ?> box aktif di rak
                 </div>
             </div>
 
         </div>
 
-        <!-- 3. TABEL 1: DAFTAR LABEL BOX & LOT FISIK DI GUDANG -->
+        <!-- 3. TIMELINE MUTASI HORIZONTAL MATRIX WIDGET -->
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+            <div style="padding: 12px 16px; background: linear-gradient(to right, #f8fafc, #eff6ff); border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 16px;">⏱️</span>
+                    <div>
+                        <h3 style="font-size: 12px; font-weight: 800; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin: 0; line-height: 1.2;">
+                            Timeline Kronologi Mutasi Fisik Part (Matriks Horizontal)
+                        </h3>
+                        <p style="font-size: 11px; color: #64748b; margin: 2px 0 0 0;">
+                            Riwayat pergerakan stok real-time (Masuk Normal, Sisa Kanban, Terpakai Kanban, dan Saldo Berjalan)
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Timeline Quick Period Filters -->
+                <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                    <div id="detailTimelinePeriodPills" style="display: inline-flex; align-items: center; background-color: #f1f5f9; padding: 2px; border-radius: 8px; border: 1px solid #cbd5e1;">
+                        <button type="button" class="btn-detail-period" data-period="semua" onclick="switchDetailTimelinePeriod('semua')" style="padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; <?= ($periodParam === 'semua') ? 'background-color: #2563eb; color: #ffffff;' : 'background: transparent; color: #475569;' ?>">Semua</button>
+                        <button type="button" class="btn-detail-period" data-period="tahunan" onclick="switchDetailTimelinePeriod('tahunan')" style="padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; <?= ($periodParam === 'tahunan') ? 'background-color: #2563eb; color: #ffffff;' : 'background: transparent; color: #475569;' ?>">Tahun Ini</button>
+                        <button type="button" class="btn-detail-period" data-period="bulanan" onclick="switchDetailTimelinePeriod('bulanan')" style="padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; <?= ($periodParam === 'bulanan') ? 'background-color: #2563eb; color: #ffffff;' : 'background: transparent; color: #475569;' ?>">Bulan Ini</button>
+                        <button type="button" class="btn-detail-period" data-period="mingguan" onclick="switchDetailTimelinePeriod('mingguan')" style="padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; <?= ($periodParam === 'mingguan') ? 'background-color: #2563eb; color: #ffffff;' : 'background: transparent; color: #475569;' ?>">Minggu Ini</button>
+                        <button type="button" class="btn-detail-period" data-period="hari_ini" onclick="switchDetailTimelinePeriod('hari_ini')" style="padding: 4px 10px; font-size: 11px; font-weight: 700; border-radius: 6px; border: none; cursor: pointer; transition: all 0.2s; <?= ($periodParam === 'hari_ini') ? 'background-color: #2563eb; color: #ffffff;' : 'background: transparent; color: #475569;' ?>">Hari Ini</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Inner Timeline Container for AJAX Loading -->
+            <div id="detailTimelineTrackWrap" style="position: relative; width: 100%; min-height: 180px; background-color: #ffffff; overflow: hidden;">
+                <div style="padding: 30px; text-align: center; color: #64748b; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    <svg style="animation: spin 1s linear infinite; width: 18px; height: 18px; color: #2563eb;" fill="none" viewBox="0 0 24 24">
+                        <circle style="opacity: 0.25;" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path style="opacity: 0.75;" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Memuat matriks kronologi mutasi...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. TABEL 1: DAFTAR LABEL BOX & LOT FISIK DI GUDANG -->
         <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
             
             <div style="padding: 12px 16px; background-color: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
@@ -647,6 +687,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             <!-- SERVER-SIDE SEARCH, QR SCAN & LOT STATUS FILTER TOOLBAR -->
             <form method="GET" action="<?= base_url('modules/safety_stock/detail.php') ?>" id="formFilterBox" style="padding: 10px 16px; background-color: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 0;">
                 <input type="hidden" name="part_code" value="<?= htmlspecialchars($partInfo['item_code']) ?>">
+                <input type="hidden" name="period" value="<?= htmlspecialchars($periodParam) ?>">
+                <?php if (!empty($startDateParam)): ?>
+                    <input type="hidden" name="start_date" value="<?= htmlspecialchars($startDateParam) ?>">
+                    <input type="hidden" name="end_date" value="<?= htmlspecialchars($endDateParam) ?>">
+                <?php endif; ?>
                 <input type="hidden" name="box_page" value="1">
 
                 <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 240px; max-width: 420px; position: relative;">
@@ -718,6 +763,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                             <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
                             <th style="padding: 10px 14px; min-width: 130px;">Ref Number (Box)</th>
                             <th style="padding: 10px 14px; min-width: 120px;">Lot Number</th>
+                            <th style="padding: 10px 14px; min-width: 120px; white-space: nowrap;">Sumber Box</th>
                             <th style="padding: 10px 14px; text-align: right; width: 110px;">Kuantiti Box</th>
                             <th style="padding: 10px 14px; min-width: 165px; white-space: nowrap;">Status Box</th>
                             <th style="padding: 10px 14px; min-width: 130px;">Waktu Masuk</th>
@@ -730,7 +776,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <tbody>
                         <?php if (empty($sessionLots)): ?>
                             <tr>
-                                <td colspan="<?= $isAdmin ? 8 : 7 ?>" style="padding: 32px; text-align: center; color: #94a3b8;">
+                                <td colspan="<?= $isAdmin ? 9 : 8 ?>" style="padding: 32px; text-align: center; color: #94a3b8;">
                                     Tidak ada data label box yang sesuai dengan kriteria pencarian / filter status.
                                 </td>
                             </tr>
@@ -762,6 +808,13 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             : '<span style="background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 2px 8px; border-radius: 9999px; font-weight: 700; font-size: 10px; white-space: nowrap; display: inline-block;">PASSED</span>';
                                     }
 
+                                    $lotSource = $lot['ss_source'] ?? 'direct';
+                                    if ($lotSource === 'kanban_excess' || $lotSource === 'split_leftover') {
+                                        $sourceBadge = '<span style="background-color: #fffbeb; color: #b45309; border: 1px solid #fde68a; padding: 2px 7px; border-radius: 6px; font-weight: 800; font-size: 10px; display: inline-flex; align-items: center; gap: 3px;"><span>♻️ Sisa Kanban</span></span>';
+                                    } else {
+                                        $sourceBadge = '<span style="background-color: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 2px 7px; border-radius: 6px; font-weight: 800; font-size: 10px; display: inline-flex; align-items: center; gap: 3px;"><span>📥 Masuk Normal</span></span>';
+                                    }
+
                                     $dateStr = !empty($lot['scanned_at']) ? date('d M Y, H:i', strtotime($lot['scanned_at'])) : '-';
                                     $lotId   = (int)$lot['id'];
                                     $sessId  = (int)$lot['inspection_session_id'];
@@ -784,6 +837,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                         <span style="font-family: monospace; font-weight: 700; color: #334155; background-color: #f8fafc; padding: 2px 8px; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 11px;">
                                             <?= htmlspecialchars($lotNum) ?>
                                         </span>
+                                    </td>
+
+                                    <!-- Sumber Box -->
+                                    <td style="padding: 10px 14px; white-space: nowrap;">
+                                        <?= $sourceBadge ?>
                                     </td>
 
                                     <!-- Kuantiti Box -->
@@ -899,6 +957,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             <!-- SERVER-SIDE FILTER & SCAN TOOLBAR UNTUK RIWAYAT KANBAN -->
             <form method="GET" action="<?= base_url('modules/safety_stock/detail.php') ?>" id="formFilterHistory" style="padding: 10px 16px; background-color: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 0;">
                 <input type="hidden" name="part_code" value="<?= htmlspecialchars($partInfo['item_code']) ?>">
+                <input type="hidden" name="period" value="<?= htmlspecialchars($periodParam) ?>">
+                <?php if (!empty($startDateParam)): ?>
+                    <input type="hidden" name="start_date" value="<?= htmlspecialchars($startDateParam) ?>">
+                    <input type="hidden" name="end_date" value="<?= htmlspecialchars($endDateParam) ?>">
+                <?php endif; ?>
                 <input type="hidden" name="box_page" value="<?= (int)$boxPage ?>">
                 <input type="hidden" name="search_box" value="<?= htmlspecialchars($boxSearch) ?>">
                 <input type="hidden" name="lot_status" value="<?= htmlspecialchars($boxStatus) ?>">
@@ -1360,6 +1423,170 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             document.getElementById('formFilterHistory').submit();
         }
     }
+
+    // ── Timeline Mutasi Horizontal Interactivity & AJAX Loader ──────────────
+    var currentDetailTimelinePeriod = '<?= htmlspecialchars($periodParam) ?>';
+    var currentDetailTimelineChunk  = 50;
+    var currentPartCode = '<?= htmlspecialchars($partInfo['item_code']) ?>';
+
+    function initTimelineMouseInteractions(track) {
+        if (!track || track._hasMouseInteractions) return;
+        track._hasMouseInteractions = true;
+
+        // 1. Mouse Wheel Mapping (Vertical -> Horizontal Scroll)
+        track.addEventListener('wheel', function(e) {
+            if (e.deltaY !== 0) {
+                e.preventDefault();
+                track.scrollLeft += (e.deltaY * 1.5);
+            }
+        }, { passive: false });
+
+        // 2. Click & Drag Scroll
+        var isDown = false;
+        var startX;
+        var scrollLeft;
+
+        track.addEventListener('mousedown', function(e) {
+            // Hindari trigger drag saat klik link/button
+            if (e.target.closest('button, a, input, select')) return;
+            isDown = true;
+            track.style.cursor = 'grabbing';
+            startX = e.pageX - track.offsetLeft;
+            scrollLeft = track.scrollLeft;
+        });
+
+        track.addEventListener('mouseleave', function() {
+            isDown = false;
+            track.style.cursor = 'grab';
+        });
+
+        track.addEventListener('mouseup', function() {
+            isDown = false;
+            track.style.cursor = 'grab';
+        });
+
+        track.addEventListener('mousemove', function(e) {
+            if (!isDown) return;
+            e.preventDefault();
+            var x = e.pageX - track.offsetLeft;
+            var walk = (x - startX) * 1.5;
+            track.scrollLeft = scrollLeft - walk;
+        });
+
+        // 3. Infinite Scroll: Otomatis memuat chunk transaksi masa lalu saat digeser ke ujung kiri (< 35px)
+        track.addEventListener('scroll', function() {
+            if (track.scrollLeft < 35 && !track._isLoadingChunk) {
+                var btnMore = track.querySelector('.btn-timeline-load-more');
+                if (btnMore && !btnMore.disabled) {
+                    track._isLoadingChunk = true;
+                    btnMore.click();
+                    setTimeout(function() { track._isLoadingChunk = false; }, 1500);
+                }
+            }
+        });
+    }
+
+    function loadDetailTimeline(period, chunk) {
+        var wrap = document.getElementById('detailTimelineTrackWrap');
+        if (!wrap) return;
+
+        period = period || currentDetailTimelinePeriod;
+        chunk  = chunk || 50;
+        currentDetailTimelinePeriod = period;
+        currentDetailTimelineChunk  = chunk;
+
+        wrap.innerHTML = `
+            <div style="padding: 30px; text-align: center; color: #64748b; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                <svg style="animation: spin 1s linear infinite; width: 18px; height: 18px; color: #2563eb;" fill="none" viewBox="0 0 24 24">
+                    <circle style="opacity: 0.25;" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path style="opacity: 0.75;" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span>Memuat matriks kronologi mutasi (${period})...</span>
+            </div>
+        `;
+
+        var url = '<?= base_url("modules/safety_stock/ajax_timeline.php") ?>?part_code=' + encodeURIComponent(currentPartCode) +
+                  '&period=' + encodeURIComponent(period) +
+                  '&chunk=' + chunk;
+
+        fetch(url)
+            .then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(function(html) {
+                wrap.innerHTML = html;
+                var track = wrap.querySelector('.timeline-scroll-track');
+                if (track) {
+                    initTimelineMouseInteractions(track);
+                    // Set scroll awal ke posisi paling kanan (transaksi terbaru)
+                    setTimeout(function() {
+                        track.scrollLeft = track.scrollWidth;
+                    }, 50);
+                }
+            })
+            .catch(function(err) {
+                wrap.innerHTML = '<div style="padding: 24px; text-align: center; color: #ef4444; font-size: 12px; font-weight: 700;">Gagal memuat timeline: ' + err.message + '</div>';
+            });
+    }
+
+    function switchDetailTimelinePeriod(period) {
+        var pills = document.querySelectorAll('#detailTimelinePeriodPills .btn-detail-period');
+        pills.forEach(function(btn) {
+            if (btn.getAttribute('data-period') === period) {
+                btn.style.backgroundColor = '#2563eb';
+                btn.style.color = '#ffffff';
+            } else {
+                btn.style.backgroundColor = 'transparent';
+                btn.style.color = '#475569';
+            }
+        });
+        loadDetailTimeline(period, 50);
+    }
+
+    // Handler Load More Chunk untuk Infinite Scroll
+    function loadMoreTimelineChunk(partCode, nextChunk, btn) {
+        var container = btn.closest('.timeline-content-box') || document.getElementById('detailTimelineTrackWrap');
+        if (!container) return;
+
+        var track = container.querySelector('.timeline-scroll-track');
+        var oldScrollWidth = track ? track.scrollWidth : 0;
+        var oldScrollLeft = track ? track.scrollLeft : 0;
+
+        btn.disabled = true;
+        btn.innerHTML = '<span>Memuat...</span>';
+
+        var url = '<?= base_url("modules/safety_stock/ajax_timeline.php") ?>?part_code=' + encodeURIComponent(partCode) + 
+                  '&period=' + encodeURIComponent(currentDetailTimelinePeriod) + 
+                  '&chunk=' + nextChunk;
+
+        fetch(url)
+            .then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(function(html) {
+                container.innerHTML = html;
+                var newTrack = container.querySelector('.timeline-scroll-track');
+                if (newTrack) {
+                    initTimelineMouseInteractions(newTrack);
+                    // Pertahankan posisi scroll visual agar mulus tanpa loncat
+                    var newScrollWidth = newTrack.scrollWidth;
+                    var diff = newScrollWidth - oldScrollWidth;
+                    newTrack.scrollLeft = oldScrollLeft + diff;
+                }
+            })
+            .catch(function(err) {
+                alert('Gagal memuat transaksi sebelumnya: ' + err.message);
+                btn.disabled = false;
+                btn.innerHTML = '<span>◄ Coba Lagi</span>';
+            });
+    }
+
+    // Auto-load timeline saat halaman detail pertama kali dibuka
+    document.addEventListener('DOMContentLoaded', function() {
+        loadDetailTimeline('<?= htmlspecialchars($periodParam) ?>', 50);
+    });
     </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

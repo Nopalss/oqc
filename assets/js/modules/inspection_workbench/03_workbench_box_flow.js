@@ -1,3 +1,217 @@
+var isPartNgHistoryExpanded = false;
+// Ultra-lightweight in-memory single-part cache (hanya menyimpan 1 part aktif saat ini, anti-menumpuk & auto-garbage-collected)
+var activePartNgCache = {
+    partCode: null,
+    data: null
+};
+
+function safeEscapeNgHtml(text) {
+    if (text === null || text === undefined) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function togglePartNgHistory() {
+    isPartNgHistoryExpanded = !isPartNgHistoryExpanded;
+    var contentEl = document.getElementById('part-ng-history-content');
+    var chevronEl = document.getElementById('part-ng-history-chevron');
+    if (!contentEl) return;
+
+    if (isPartNgHistoryExpanded) {
+        contentEl.style.display = 'flex';
+        if (chevronEl) chevronEl.style.transform = 'rotate(180deg)';
+
+        var partCode = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.part_code)
+            || (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.part_code)
+            || (window.OQC_CONFIG && window.OQC_CONFIG.sessionPartCode)
+            || '';
+
+        if (!partCode) {
+            var domPart = document.getElementById('card-part-code');
+            if (domPart) partCode = domPart.textContent.trim();
+        }
+
+        if (partCode && partCode !== '-') {
+            loadPartNgHistory(partCode);
+        } else {
+            var bodyEl = document.getElementById('part-ng-history-body');
+            if (bodyEl) {
+                bodyEl.innerHTML = '<div class="text-center py-4 text-slate-400 text-xs">Part code belum aktif atau belum discan.</div>';
+            }
+        }
+    } else {
+        contentEl.style.display = 'none';
+        if (chevronEl) chevronEl.style.transform = 'rotate(0deg)';
+    }
+}
+
+function loadPartNgHistory(partCode, forceRefresh) {
+    var bodyEl = document.getElementById('part-ng-history-body');
+    var badgeEl = document.getElementById('part-ng-history-badge');
+    if (!bodyEl) return;
+
+    if (!forceRefresh && activePartNgCache.partCode === partCode && activePartNgCache.data) {
+        renderPartNgHistory(activePartNgCache.data);
+        return;
+    }
+
+    bodyEl.innerHTML = '<div class="text-center py-6 text-slate-400 text-xs">' +
+        '<div class="inline-block animate-spin rounded-full h-4 w-4 border-2 border-rose-600 border-t-transparent mb-2"></div>' +
+        '<div>Memuat data riwayat defect part...</div></div>';
+
+    var baseUrl = (window.OQC_CONFIG && window.OQC_CONFIG.baseUrl) ? window.OQC_CONFIG.baseUrl : '';
+    var apiUrl = baseUrl + '/modules/inspection/api/get_part_ng_history.php?part_code=' + encodeURIComponent(partCode);
+
+    fetch(apiUrl)
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data && data.success) {
+                activePartNgCache.partCode = partCode;
+                activePartNgCache.data = data;
+                renderPartNgHistory(data);
+            } else {
+                bodyEl.innerHTML = '<div class="text-center py-4 text-rose-500 text-xs font-semibold">' + 
+                    safeEscapeNgHtml(data.message || 'Gagal memuat riwayat defect.') + '</div>';
+            }
+        })
+        .catch(function(err) {
+            bodyEl.innerHTML = '<div class="text-center py-4 text-rose-500 text-xs font-semibold">' +
+                'Koneksi gagal saat mengambil data riwayat defect.</div>';
+        });
+}
+
+function renderPartNgHistory(data) {
+    var bodyEl = document.getElementById('part-ng-history-body');
+    var badgeEl = document.getElementById('part-ng-history-badge');
+    if (!bodyEl) return;
+
+    var totalQty = (data.summary && data.summary.total_qty_ng) ? parseInt(data.summary.total_qty_ng) : 0;
+    var totalOccurrences = (data.summary && data.summary.total_occurrences) ? parseInt(data.summary.total_occurrences) : 0;
+
+    if (badgeEl) {
+        if (totalQty === 0) {
+            badgeEl.textContent = 'Zero Defect';
+            badgeEl.style.backgroundColor = '#10b981';
+        } else {
+            badgeEl.textContent = totalQty + ' pcs (' + totalOccurrences + 'x)';
+            badgeEl.style.backgroundColor = '#e11d48';
+        }
+    }
+
+    if (totalQty === 0) {
+        bodyEl.innerHTML = 
+            '<div class="text-center py-6 px-4 bg-emerald-50/70 rounded-xl border border-emerald-200">' +
+                '<svg class="w-8 h-8 text-emerald-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>' +
+                '<div class="text-xs font-extrabold text-emerald-800">Zero Defect (Bersih)</div>' +
+                '<div class="text-[11px] text-emerald-600 mt-0.5">Belum pernah tercatat temuan NG pada Part Code <span class="font-mono font-bold">' + safeEscapeNgHtml(data.part_code) + '</span>.</div>' +
+            '</div>';
+        return;
+    }
+
+    var html = '';
+
+    // SECTION 1: Top 5 Defect Ranking Leaderboard
+    if (data.top5 && data.top5.length > 0) {
+        html += '<div class="p-2.5 bg-rose-50/70 rounded-xl border border-rose-200/80 mb-2">' +
+            '<div class="flex items-center justify-between mb-2">' +
+                '<div class="flex items-center gap-1.5">' +
+                    '<span class="text-xs">🏆</span>' +
+                    '<span class="text-[11px] font-extrabold uppercase tracking-wider text-rose-900">Rank Top 5 Defect Terbanyak</span>' +
+                '</div>' +
+                '<span class="text-[10px] font-bold text-rose-700 bg-rose-200/60 px-2 py-0.5 rounded-full font-mono">' +
+                    'Total: ' + totalQty + ' pcs' +
+                '</span>' +
+            '</div>' +
+            '<div class="space-y-1.5">';
+
+        var rankColors = [
+            { bg: '#fee2e2', border: '#fca5a5', text: '#991b1b', bar: '#e11d48', badge: '🥇 #1' },
+            { bg: '#ffedd5', border: '#fdba74', text: '#9a3412', bar: '#ea580c', badge: '🥈 #2' },
+            { bg: '#fef3c7', border: '#fde68a', text: '#92400e', bar: '#d97706', badge: '🥉 #3' },
+            { bg: '#f1f5f9', border: '#cbd5e1', text: '#334155', bar: '#64748b', badge: ' #4' },
+            { bg: '#f1f5f9', border: '#cbd5e1', text: '#334155', bar: '#64748b', badge: ' #5' }
+        ];
+
+        data.top5.forEach(function(item, idx) {
+            var color = rankColors[idx] || rankColors[4];
+            var pct = item.percentage || 0;
+            html += '<div style="background-color: ' + color.bg + '; border: 1px solid ' + color.border + ';" class="p-1.5 rounded-lg text-xs">' +
+                '<div class="flex items-center justify-between text-[11px] font-extrabold mb-1">' +
+                    '<div class="flex items-center gap-1.5 truncate">' +
+                        '<span class="px-1.5 py-0.2 rounded font-black text-[9.5px] shadow-2xs" style="background-color: #ffffff; color: ' + color.text + ';">' + color.badge + '</span>' +
+                        '<span class="truncate" style="color: ' + color.text + ';" title="' + safeEscapeNgHtml(item.defect_name) + '">' + safeEscapeNgHtml(item.defect_name) + '</span>' +
+                    '</div>' +
+                    '<div class="flex items-center gap-1.5 flex-shrink-0 font-mono text-[10.5px]">' +
+                        '<span class="font-extrabold" style="color: ' + color.text + ';">' + item.total_qty + ' pcs</span>' +
+                        '<span class="text-[9.5px] opacity-75">(' + pct + '%)</span>' +
+                    '</div>' +
+                '</div>' +
+                '<div style="background-color: rgba(255,255,255,0.7); height: 5px; border-radius: 9999px; overflow: hidden;">' +
+                    '<div style="background-color: ' + color.bar + '; width: ' + Math.min(100, Math.max(4, pct)) + '%; height: 100%; border-radius: 9999px; transition: width 0.3s ease;"></div>' +
+                '</div>' +
+            '</div>';
+        });
+
+        html += '</div></div>';
+    }
+
+    // SECTION 2: Log Riwayat Temuan Box / Lot (Daftar Kejadian)
+    if (data.logs && data.logs.length > 0) {
+        html += '<div class="space-y-1.5">' +
+            '<div class="flex items-center justify-between px-0.5 pt-1">' +
+                '<span class="text-[10.5px] font-extrabold uppercase tracking-wider text-slate-700">Log Kejadian Defect Terakhir (' + data.logs.length + ')</span>' +
+                '<button type="button" onclick="loadPartNgHistory(\'' + safeEscapeNgHtml(data.part_code) + '\', true)" class="text-[9.5px] text-blue-600 hover:text-blue-800 font-bold inline-flex items-center gap-0.5 cursor-pointer" title="Refresh Riwayat">' +
+                    '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>' +
+                    '<span>Refresh</span>' +
+                '</button>' +
+            '</div>';
+
+        data.logs.forEach(function(log) {
+            var dateStr = log.ng_date ? log.ng_date.substring(0, 16) : '-';
+            var inspTypeBadge = (log.inspection_type === 'safety_stock') ?
+                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-purple-100 text-purple-800 border border-purple-200">SS</span>' :
+                '<span class="px-1.5 py-0.2 rounded text-[8.5px] font-extrabold bg-blue-100 text-blue-800 border border-blue-200">KB</span>';
+
+            html += '<div class="p-2 bg-slate-50 hover:bg-slate-100/80 transition-colors border border-slate-200 rounded-lg text-xs space-y-1">' +
+                '<div class="flex items-center justify-between text-[10.5px]">' +
+                    '<div class="flex items-center gap-1 font-mono font-bold text-slate-800 truncate">' +
+                        inspTypeBadge +
+                        '<span class="truncate">Lot: ' + safeEscapeNgHtml(log.lot_number) + '</span>' +
+                    '</div>' +
+                    '<span class="text-[9.5px] text-slate-400 font-mono flex-shrink-0">' + safeEscapeNgHtml(dateStr) + '</span>' +
+                '</div>' +
+                '<div class="flex items-center justify-between">' +
+                    '<div class="flex items-center gap-1.5">' +
+                        '<span class="px-1.5 py-0.5 rounded text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-200">' +
+                            safeEscapeNgHtml(log.defect_name) + ' (' + log.qty_ng + ' pcs)' +
+                        '</span>' +
+                    '</div>' +
+                    '<span class="text-[10px] font-semibold text-slate-600 truncate max-w-[150px]">' +
+                        'by ' + safeEscapeNgHtml(log.inspector_name) + (log.line_name && log.line_name !== '-' ? (' (' + safeEscapeNgHtml(log.line_name) + ')') : '') +
+                    '</span>' +
+                '</div>' +
+                (log.ref_number && log.ref_number !== '-' ?
+                    '<div class="text-[9.5px] text-slate-500 font-mono flex items-center justify-between pt-0.5 border-t border-slate-200/50">' +
+                        '<span>Ref: ' + safeEscapeNgHtml(log.ref_number) + '</span>' +
+                        (log.kanban_no ? ('<span>No. KB: ' + safeEscapeNgHtml(log.kanban_no) + '</span>') : '') +
+                    '</div>' : '') +
+                (log.ng_remark ?
+                    '<div class="text-[9.5px] text-slate-600 italic bg-white p-1 rounded border border-slate-100">' +
+                        'Catatan: ' + safeEscapeNgHtml(log.ng_remark) +
+                    '</div>' : '') +
+            '</div>';
+        });
+
+        html += '</div>';
+    }
+
+    bodyEl.innerHTML = html;
+}
+
 function toggleAllBoxesView() {
     isAllBoxesExpanded = !isAllBoxesExpanded;
     var contentEl = document.getElementById('all-boxes-content');
@@ -235,6 +449,7 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
             '</div>';
     }
 
+    var isReadOnly = (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView);
     var cardBorder = '#cbd5e1';
     var accentColor = '#f59e0b';
     var cardBg = '#ffffff';
@@ -269,14 +484,17 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
             chiefBadgeRep +
         '</div>';
 
+        var cancelRepBtn = isReadOnly ? '' :
+            '<button type="button" onclick="cancelReplacementLot(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" style="padding: 4px 9px; background-color: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Batalkan box pengganti dan kembalikan box ini ke status REJECTED">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 10h10a5 5 0 0 1 5 5v2"/><path d="M7 14l-4-4 4-4"/></svg>' +
+                '<span>Batal Ganti</span>' +
+            '</button>';
+
         actionBlockHtml = 
             '<div style="margin-top: 9px; padding: 7px 10px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 11px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">' +
                 '<span style="color: #64748b; font-weight: 600; font-size: 10.5px;">Box ini telah digantikan oleh box baru (Karantina / Retur).</span>' +
                 '<div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0;">' +
-                    '<button type="button" onclick="cancelReplacementLot(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" style="padding: 4px 9px; background-color: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 6px; font-size: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Batalkan box pengganti dan kembalikan box ini ke status REJECTED">' +
-                        '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 10h10a5 5 0 0 1 5 5v2"/><path d="M7 14l-4-4 4-4"/></svg>' +
-                        '<span>Batal Ganti</span>' +
-                    '</button>' +
+                    cancelRepBtn +
                     '<a href="' + (window.OQC_CONFIG.baseUrl || '') + '/modules/inspection/print_rejection.php?session_lot_id=' + lotId + '" target="_blank" ' +
                         'style="padding: 4px 10px; background-color: #fff1f2; color: #be123c; border: 1px solid #fecdd3; border-radius: 6px; font-size: 10px; font-weight: 800; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;" title="Buka lembar penolakan resmi lot ini">' +
                         '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>' +
@@ -309,38 +527,54 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                 '</button>';
         }
 
-        actionBlockHtml = 
-            '<div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;">' +
-                '<button type="button" onclick="openLotNgModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ', ' + splSize + ', ' + rejNum + ')" ' +
-                    'style="flex: 1; min-width: 90px; padding: 7px 10px; background-color: #fff1f2; color: #be123c; border: 1.5px solid #fecdd3; border-radius: 9px; font-size: 11px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; transition: all 0.15s;" ' +
-                    'onmouseover="this.style.backgroundColor=\'#ffe4e6\'" onmouseout="this.style.backgroundColor=\'#fff1f2\'">' +
-                    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' +
-                    '<span>Catat NG</span>' +
-                '</button>' +
-                '<button type="button" onclick="confirmLotPassed(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + splSize + ')" ' +
-                    'style="flex: 1.4; min-width: 130px; padding: 7px 12px; background: linear-gradient(135deg, #059669 0%, #047857 100%); color: #ffffff; border: none; border-radius: 9px; font-size: 11px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; box-shadow: 0 2px 5px rgba(5,150,105,0.25); transition: all 0.15s;" ' +
-                    'onmouseover="this.style.opacity=\'0.95\'" onmouseout="this.style.opacity=\'1\'">' +
-                    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
-                    '<span>Selesai Inspeksi (PASSED)</span>' +
-                '</button>' +
-                extraCancelBtn +
-            '</div>';
+        if (isReadOnly) {
+            var currInspName = (window.lastWorkbenchSessionData && window.lastWorkbenchSessionData.session && window.lastWorkbenchSessionData.session.inspector_name) ? window.lastWorkbenchSessionData.session.inspector_name : 'Inspektur';
+            actionBlockHtml = 
+                '<div style="margin-top: 8px; padding: 7px 11px; background-color: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; font-size: 11px; color: #92400e; font-weight: 700; display: flex; align-items: center; justify-content: space-between; gap: 6px;">' +
+                    '<div style="display: flex; align-items: center; gap: 6px;">' +
+                        '<span style="width: 7px; height: 7px; border-radius: 9999px; background-color: #d97706;" class="animate-pulse"></span>' +
+                        '<span>Sedang Diperiksa oleh ' + escapeHtml(currInspName) + ' (Mode Pantau)</span>' +
+                    '</div>' +
+                    '<span style="font-size: 9.5px; font-weight: 800; background: #ffffff; color: #b45309; border: 1px solid #fde68a; padding: 1.5px 6px; border-radius: 4px;">Terkunci</span>' +
+                '</div>';
+        } else {
+            actionBlockHtml = 
+                '<div style="display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;">' +
+                    '<button type="button" onclick="openLotNgModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ', ' + splSize + ', ' + rejNum + ')" ' +
+                        'style="flex: 1; min-width: 90px; padding: 7px 10px; background-color: #fff1f2; color: #be123c; border: 1.5px solid #fecdd3; border-radius: 9px; font-size: 11px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; transition: all 0.15s;" ' +
+                        'onmouseover="this.style.backgroundColor=\'#ffe4e6\'" onmouseout="this.style.backgroundColor=\'#fff1f2\'">' +
+                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' +
+                        '<span>Catat NG</span>' +
+                    '</button>' +
+                    '<button type="button" onclick="confirmLotPassed(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + splSize + ')" ' +
+                        'style="flex: 1.4; min-width: 130px; padding: 7px 12px; background: linear-gradient(135deg, #059669 0%, #047857 100%); color: #ffffff; border: none; border-radius: 9px; font-size: 11px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; box-shadow: 0 2px 5px rgba(5,150,105,0.25); transition: all 0.15s;" ' +
+                        'onmouseover="this.style.opacity=\'0.95\'" onmouseout="this.style.opacity=\'1\'">' +
+                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+                        '<span>Selesai Inspeksi (PASSED)</span>' +
+                    '</button>' +
+                    extraCancelBtn +
+                '</div>';
+        }
     } else if (res === 'passed') {
         cardBorder = isFocusMode ? '#34d399' : '#a7f3d0';
         accentColor = '#10b981';
         cardBg = '#f0fdf4';
         var passedCardBadgeText = isReinspected ? 'PASSED (RE-INSPEKSI)' : 'PASSED';
         statusBadgeHtml = '<span style="background-color: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 9999px;">' + passedCardBadgeText + '</span>';
+        
+        var passedResetBtn = isReadOnly ? '' :
+            '<button type="button" onclick="resetLotToInProgress(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" style="font-size: 10px; font-weight: 800; color: #1e293b; background-color: #f1f5f9; border: 1.5px solid #94a3b8; border-radius: 6px; padding: 3px 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#e2e8f0\'; this.style.borderColor=\'#64748b\';" onmouseout="this.style.backgroundColor=\'#f1f5f9\'; this.style.borderColor=\'#94a3b8\';" title="Kembalikan ke status pemeriksaan">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>' +
+                '<span>Batal / Re-Check</span>' +
+            '</button>';
+
         actionBlockHtml = 
             '<div style="margin-top: 9px; padding: 7px 10px; background-color: #ffffff; border: 1px solid #bbf7d0; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; font-size: 11px;">' +
                 '<div style="display: flex; align-items: center; gap: 6px; color: #065f46; font-weight: 700;">' +
                     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: #059669;"><polyline points="20 6 9 17 4 12"/></svg>' +
                     '<span>' + splSize + ' pcs sampel fisik lolos (0 NG)</span>' +
                 '</div>' +
-                '<button type="button" onclick="resetLotToInProgress(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" style="font-size: 10px; font-weight: 800; color: #1e293b; background-color: #f1f5f9; border: 1.5px solid #94a3b8; border-radius: 6px; padding: 3px 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#e2e8f0\'; this.style.borderColor=\'#64748b\';" onmouseout="this.style.backgroundColor=\'#f1f5f9\'; this.style.borderColor=\'#94a3b8\';" title="Kembalikan ke status pemeriksaan">' +
-                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>' +
-                    '<span>Batal / Re-Check</span>' +
-                '</button>' +
+                passedResetBtn +
             '</div>';
     } else if (res === 'rejected') {
         cardBorder = isFocusMode ? '#f87171' : '#fecdd3';
@@ -397,39 +631,52 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
                 '<span>Lembar reject belum di-ACC Chief QC. Klik <b>Rejection</b> untuk tanda tangan digital.</span>' +
             '</div>' : '';
 
+        var editNgBtn = isReadOnly ? '' :
+            '<button type="button" onclick="openLotNgModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ', ' + splSize + ', ' + rejNum + ')" ' +
+                'style="padding: 3px 8px; background-color: #fff1f2; color: #be123c; border: 1.5px solid #fda4af; border-radius: 6px; font-size: 9.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(190,18,60,0.08); transition: all 0.15s;" ' +
+                'onmouseover="this.style.backgroundColor=\'#ffe4e6\'; this.style.borderColor=\'#f43f5e\';" onmouseout="this.style.backgroundColor=\'#fff1f2\'; this.style.borderColor=\'#fda4af\';" ' +
+                'title="Edit jenis defect, ubah Qty NG, atau tambah temuan defect susulan">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>' +
+                '<span>Edit / Tambah NG</span>' +
+            '</button>';
+
+        var rejActionButtons = isReadOnly ? 
+            '<div style="display: flex; gap: 6px; margin-top: 8px;">' +
+                '<a href="' + (window.OQC_CONFIG.baseUrl || '') + '/modules/inspection/print_rejection.php?session_lot_id=' + lotId + '" target="_blank" ' +
+                    'style="width: 100%; padding: 7px 9px; background-color: #fff1f2; color: #9f1239; border: 1.5px solid #f43f5e; border-radius: 8px; font-size: 10.5px; font-weight: 800; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 4px; box-shadow: 0 1px 3px rgba(225,29,72,0.12); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#ffe4e6\'; this.style.borderColor=\'#e11d48\';" onmouseout="this.style.backgroundColor=\'#fff1f2\'; this.style.borderColor=\'#f43f5e\';" title="Buka lembar penolakan resmi lot ini">' +
+                    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #be123c;"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>' +
+                    '<span>Lihat Lembar Rejection Resmi</span>' + rejBtnBadge +
+                '</a>' +
+            '</div>' :
+            '<div style="display: flex; gap: 6px; margin-top: 8px;">' +
+                '<a href="' + (window.OQC_CONFIG.baseUrl || '') + '/modules/inspection/print_rejection.php?session_lot_id=' + lotId + '" target="_blank" ' +
+                    'style="flex: 1.1; padding: 7px 9px; background-color: #fff1f2; color: #9f1239; border: 1.5px solid #f43f5e; border-radius: 8px; font-size: 10.5px; font-weight: 800; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 4px; box-shadow: 0 1px 3px rgba(225,29,72,0.12); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#ffe4e6\'; this.style.borderColor=\'#e11d48\';" onmouseout="this.style.backgroundColor=\'#fff1f2\'; this.style.borderColor=\'#f43f5e\';" title="Buka lembar penolakan resmi lot ini">' +
+                    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #be123c;"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>' +
+                    '<span>Rejection</span>' + rejBtnBadge +
+                '</a>' +
+                '<button type="button" onclick="openLotReinspectionModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ')" ' +
+                    'style="flex: 1.2; padding: 7px 10px; background-color: #be123c; color: #ffffff; border: 1.5px solid #9f1239; border-radius: 8px; font-size: 10.5px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px; box-shadow: 0 2px 4px rgba(190,18,60,0.3); transition: all 0.15s;" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'none\'">' +
+                    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>' +
+                    '<span>Re-Inspeksi</span>' +
+                '</button>' +
+                '<button type="button" onclick="resetLotToInProgress(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" ' +
+                    'style="padding: 7px 12px; background-color: #f1f5f9; color: #334155; border: 1.5px solid #94a3b8; border-radius: 8px; font-size: 10.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#e2e8f0\'; this.style.borderColor=\'#64748b\';" onmouseout="this.style.backgroundColor=\'#f1f5f9\'; this.style.borderColor=\'#94a3b8\';" title="Kembalikan ke status pemeriksaan">' +
+                    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>' +
+                    '<span>Batal</span>' +
+                '</button>' +
+            '</div>';
+
         actionBlockHtml = 
             '<div style="margin-top: 9px; space-y: 6px;">' +
                 '<div style="padding: 6px 8px; background-color: #ffffff; border: 1px solid #fecdd3; border-radius: 8px; font-size: 10.5px;">' +
                     '<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">' +
                         '<div style="font-size: 9.5px; font-weight: 800; color: #9f1239; text-transform: uppercase;">RINCIAN TEMUAN DEFECT (' + ngCount + ' PCS NG):</div>' +
-                        '<button type="button" onclick="openLotNgModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ', ' + splSize + ', ' + rejNum + ')" ' +
-                            'style="padding: 3px 8px; background-color: #fff1f2; color: #be123c; border: 1.5px solid #fda4af; border-radius: 6px; font-size: 9.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(190,18,60,0.08); transition: all 0.15s;" ' +
-                            'onmouseover="this.style.backgroundColor=\'#ffe4e6\'; this.style.borderColor=\'#f43f5e\';" onmouseout="this.style.backgroundColor=\'#fff1f2\'; this.style.borderColor=\'#fda4af\';" ' +
-                            'title="Edit jenis defect, ubah Qty NG, atau tambah temuan defect susulan">' +
-                            '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>' +
-                            '<span>Edit / Tambah NG</span>' +
-                        '</button>' +
+                        editNgBtn +
                     '</div>' +
                     defectBadgesHtml +
                 '</div>' +
                 rejWarningNotice +
-                '<div style="display: flex; gap: 6px; margin-top: 8px;">' +
-                    '<a href="' + (window.OQC_CONFIG.baseUrl || '') + '/modules/inspection/print_rejection.php?session_lot_id=' + lotId + '" target="_blank" ' +
-                        'style="flex: 1.1; padding: 7px 9px; background-color: #fff1f2; color: #9f1239; border: 1.5px solid #f43f5e; border-radius: 8px; font-size: 10.5px; font-weight: 800; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 4px; box-shadow: 0 1px 3px rgba(225,29,72,0.12); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#ffe4e6\'; this.style.borderColor=\'#e11d48\';" onmouseout="this.style.backgroundColor=\'#fff1f2\'; this.style.borderColor=\'#f43f5e\';" title="Buka lembar penolakan resmi lot ini">' +
-                        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #be123c;"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>' +
-                        '<span>Rejection</span>' + rejBtnBadge +
-                    '</a>' +
-                    '<button type="button" onclick="openLotReinspectionModal(' + lotId + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ')" ' +
-                        'style="flex: 1.2; padding: 7px 10px; background-color: #be123c; color: #ffffff; border: 1.5px solid #9f1239; border-radius: 8px; font-size: 10.5px; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px; box-shadow: 0 2px 4px rgba(190,18,60,0.3); transition: all 0.15s;" onmouseover="this.style.filter=\'brightness(1.08)\'" onmouseout="this.style.filter=\'none\'">' +
-                        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>' +
-                        '<span>Re-Inspeksi</span>' +
-                    '</button>' +
-                    '<button type="button" onclick="resetLotToInProgress(' + lotId + ', \'' + escapeHtml(lotNo) + '\')" ' +
-                        'style="padding: 7px 12px; background-color: #f1f5f9; color: #334155; border: 1.5px solid #94a3b8; border-radius: 8px; font-size: 10.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); transition: all 0.15s;" onmouseover="this.style.backgroundColor=\'#e2e8f0\'; this.style.borderColor=\'#64748b\';" onmouseout="this.style.backgroundColor=\'#f1f5f9\'; this.style.borderColor=\'#94a3b8\';" title="Kembalikan ke status pemeriksaan">' +
-                        '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>' +
-                        '<span>Batal</span>' +
-                    '</button>' +
-                '</div>' +
+                rejActionButtons +
             '</div>';
     } else if (res === 'skipped') {
         cardBorder = '#e9d5ff';
@@ -459,7 +706,7 @@ function generateSingleLotCardHtml(lot, ngRecordsByLot, s, isFocusMode) {
     var repBadge = isReplacement ? '<span style="font-size: 9px; font-weight: 800; color: #1d4ed8; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 1px 6px; border-radius: 4px;">Box Pengganti</span>' : (isReinspected ? '<span style="font-size: 9px; font-weight: 800; color: #b45309; background-color: #fffbeb; border: 1px solid #fde68a; padding: 1px 6px; border-radius: 4px;">Hasil Sortir</span>' : '');
 
     var removeLotBtn = '';
-    if (s.status === 'in_progress' && !isReplaced) {
+    if (!isReadOnly && s.status === 'in_progress' && !isReplaced) {
         removeLotBtn = '<button type="button" onclick="confirmRemoveLot(' + lotId + ', ' + (lot._origBoxNum || 1) + ', \'' + escapeHtml(lotNo) + '\', \'' + escapeHtml(refNo) + '\', ' + qty + ')" ' +
             'style="padding: 3px 8px; background-color: #fef2f2; color: #991b1b; border: 1.5px solid #f87171; border-radius: 6px; font-size: 9.5px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; box-shadow: 0 1px 3px rgba(185,28,28,0.12); transition: all 0.15s;" ' +
             'onmouseover="this.style.backgroundColor=\'#fee2e2\'; this.style.borderColor=\'#ef4444\';" onmouseout="this.style.backgroundColor=\'#fef2f2\'; this.style.borderColor=\'#f87171\';" ' +
@@ -765,6 +1012,9 @@ function renderWorkbenchLotFlow(data) {
     window.lastWorkbenchSessionData = data;
     var s = data.session;
     if (typeof updateWorkbenchLiveBadge === 'function') { updateWorkbenchLiveBadge(s); }
+    if (s && s.part_code && isPartNgHistoryExpanded) {
+        loadPartNgHistory(s.part_code, true);
+    }
     var lots = data.session_lots || [];
     var ngRecordsByLot = data.ng_records_by_lot || {};
 
@@ -933,14 +1183,15 @@ function renderWorkbenchLotFlow(data) {
     });
 
     // Perbarui tombol "Tambah Box" & "Tandai Semua Box PASSED"
+    var isReadOnlyMode = (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView);
     var btnAddLot = document.getElementById('btn-add-lot');
     if (btnAddLot) {
-        btnAddLot.style.display = (s.status === 'in_progress' || s.status === 'passed' || s.status === 'rejected') ? 'inline-flex' : 'none';
+        btnAddLot.style.display = (!isReadOnlyMode && (s.status === 'in_progress' || s.status === 'passed' || s.status === 'rejected')) ? 'inline-flex' : 'none';
     }
 
     var btnPassAll = document.getElementById('btn-pass-all-lots');
     if (btnPassAll) {
-        if (countPending > 0 && s.status === 'in_progress') {
+        if (!isReadOnlyMode && countPending > 0 && s.status === 'in_progress') {
             btnPassAll.style.display = 'inline-flex';
             btnPassAll.querySelector('span').textContent = 'Tandai Semua Box PASSED (' + countPending + ')';
             btnPassAll.title = 'Loloskan seluruh ' + countPending + ' sisa box yang belum dicek sekaligus';
@@ -1196,7 +1447,11 @@ function renderWorkbenchLotFlow(data) {
 
             var nextActionsWrap = document.getElementById('v2-finished-next-actions');
             if (nextActionsWrap) {
-                if (s.status === 'passed') {
+                if (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView) {
+                    nextActionsWrap.classList.add('hidden');
+                    nextActionsWrap.style.display = 'none';
+                    nextActionsWrap.innerHTML = '';
+                } else if (s.status === 'passed') {
                     var isKb = (s.inspection_type || 'kanban') === 'kanban';
                     var totSc = parseInt(s.total_scanned_qty || 0);
                     var kbTg = parseInt(s.kanban_qty || 0);

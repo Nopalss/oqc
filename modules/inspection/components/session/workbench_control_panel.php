@@ -170,6 +170,25 @@
                     </button>
                 </div>
 
+                <!-- SECTION 3: Toggle Riwayat & Top 5 Defect Part Ini -->
+                <div style="margin-bottom: 6px;">
+                    <button type="button" id="btn-toggle-part-ng-history" onclick="togglePartNgHistory()" style="width: 100%; padding: 7px 12px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 10px; font-size: 11px; font-weight: 800; color: #be123c; cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: all 0.15s;" onmouseover="this.style.backgroundColor='#ffe4e6'" onmouseout="this.style.backgroundColor='#fff1f2'">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            <span>Riwayat & Top 5 Defect Part</span>
+                            <span id="part-ng-history-badge" style="background-color: #e11d48; color: #ffffff; padding: 0.5px 6px; border-radius: 9999px; font-size: 9.5px; font-weight: 800;">-</span>
+                        </div>
+                        <svg id="part-ng-history-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="transform: rotate(0deg); transition: transform 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                </div>
+
+                <!-- Container Collapsible Riwayat NG & Top 5 Defect -->
+                <div id="part-ng-history-content" style="display: none; flex-direction: column; background: #ffffff; border: 1px solid #fecdd3; border-radius: 12px; padding: 10px; margin-bottom: 8px; box-shadow: 0 2px 4px rgba(225, 29, 72, 0.05); max-height: 420px; overflow-y: auto;" class="custom-scrollbar">
+                    <div id="part-ng-history-body" class="space-y-3">
+                        <div class="text-center py-6 text-slate-400 text-xs">Memuat data riwayat defect part...</div>
+                    </div>
+                </div>
+
                 <!-- Konten Seluruh Box (Collapsible) -->
                 <div id="all-boxes-content" style="display: none; flex-direction: column; flex: 1; min-height: 200px; overflow: hidden;">
                     <!-- Tab Filter Status Lot -->

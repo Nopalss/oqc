@@ -7,11 +7,18 @@ require_once __DIR__ . '/config/app.php';
 require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/config/helper.php';
 
-// Redirect to dashboard if already logged in
+// Redirect to dashboard/monitoring if already logged in
 if (is_logged_in() && !isset($_GET['reauth'])) {
     $roleExist = strtolower(trim($_SESSION['user_role'] ?? ''));
     if (in_array($roleExist, ['inspektur', 'inspektor', 'operator'])) {
-        redirect('modules/inspection/index.php');
+        $pdo = getDB();
+        $userId = (int)($_SESSION['user_id'] ?? 0);
+        $isEarlyDone = is_monitoring_phase_completed($pdo, $userId, 'early');
+        if (!$isEarlyDone && can_access('monitoring_oqc')) {
+            redirect('modules/monitoring_oqc/index.php');
+        } else {
+            redirect('modules/inspection/index.php');
+        }
     } else {
         redirect('index.php');
     }
@@ -71,11 +78,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         set_flash('success', 'Selamat datang kembali, ' . htmlspecialchars($userFound['name']) . '!');
 
-                        // Role-based redirect: inspektur/operator wajib ceklis Tahap Awal 5S terlebih dahulu
+                        // Role-based redirect: inspektur/operator diarahkan ke Monitoring OQC jika belum isi checklist awal
                         $roleNorm = strtolower(trim($userFound['role']));
                         if (in_array($roleNorm, ['inspektur', 'inspektor', 'operator'])) {
                             $isEarlyDone = is_monitoring_phase_completed($pdo, (int)$userFound['id'], 'early');
-                            if (!$isEarlyDone) {
+                            if (!$isEarlyDone && can_access('monitoring_oqc')) {
                                 redirect('modules/monitoring_oqc/index.php?gatekeeper=1');
                             } else {
                                 redirect('modules/inspection/index.php');

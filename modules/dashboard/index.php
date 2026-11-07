@@ -1696,8 +1696,8 @@ $initialDashboardVersion = md5(implode('|', [
                         <?php else: ?>
                             <table style="width:100%;border-collapse:collapse;font-size:10.5px;text-align:left;">
                                 <thead>
-                                    <tr style="background:#1e293b;color:#ffffff;font-size:9.5px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;position:sticky;top:0;z-index:3;">
-                                        <th style="padding:6px 10px;width:130px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:4;" title="<?= $isPassedMode ? 'Status Hasil Mutu' : 'Jenis Cacat / Defect' ?>">
+                                    <tr style="background:#1e293b;color:#ffffff;font-size:9.5px;font-weight:800;letter-spacing:0.04em;text-transform:uppercase;position:sticky;top:0;z-index:4;">
+                                        <th style="padding:6px 10px;width:130px;min-width:130px;max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #0f172a;position:sticky;left:0;background:#1e293b;z-index:5;" title="<?= $isPassedMode ? 'Status Hasil Mutu' : 'Jenis Cacat / Defect' ?>">
                                             <?= $isPassedMode ? 'STATUS HASIL' : 'JENIS NG' ?>
                                         </th>
                                         <?php 
@@ -1705,7 +1705,7 @@ $initialDashboardVersion = md5(implode('|', [
                                             ? ('JAN – ' . strtoupper($mNamesShort[$selectedMonth] ?? date('M')) . ' ' . $selectedYear)
                                             : 'TOTAL';
                                         ?>
-                                        <th style="padding:6px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;background:#0f172a;color:#fbbf24;" title="<?= $isTahunanStacked ? 'Akumulasi total dari awal tahun s/d bulan ini (Sunday Anchor)' : 'Total periode terpilih' ?>">
+                                        <th style="padding:6px 10px;width:95px;min-width:95px;text-align:right;white-space:nowrap;border-bottom:1px solid #0f172a;position:sticky;left:130px;background:#0f172a;color:#fbbf24;z-index:5;box-shadow:2px 0 4px -1px rgba(0,0,0,0.25);" title="<?= $isTahunanStacked ? 'Akumulasi total dari awal tahun s/d bulan ini (Sunday Anchor)' : 'Total periode terpilih' ?>">
                                             <?= htmlspecialchars($colTotalTitle) ?>
                                         </th>
                                         <?php foreach ($activeDefectPeriodKeys as $dk): ?>
@@ -1736,11 +1736,11 @@ $initialDashboardVersion = md5(implode('|', [
                                             $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
                                     ?>
                                         <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;" class="hover:bg-blue-50">
-                                            <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:#ffffff;z-index:2;" title="<?= htmlspecialchars($rpm['label']) ?>">
+                                            <td style="padding:5px 10px;width:130px;min-width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:#ffffff;z-index:3;" title="<?= htmlspecialchars($rpm['label']) ?>">
                                                 <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $rpm['color'] ?>;margin-right:4px;vertical-align:middle;"></span>
                                                 <?= $rpm['label'] ?>
                                             </td>
-                                            <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:<?= $rpm['color'] ?>;background:<?= $isPassRow ? '#f0fdf4' : '#fff1f2' ?>;">
+                                            <td style="padding:5px 10px;width:95px;min-width:95px;text-align:right;font-family:monospace;font-weight:900;color:<?= $rpm['color'] ?>;position:sticky;left:130px;background:<?= $isPassRow ? '#f0fdf4' : '#fff1f2' ?>;z-index:3;box-shadow:2px 0 4px -1px rgba(0,0,0,0.08);">
                                                 <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
                                             </td>
                                             <?php foreach ($activeDefectPeriodKeys as $dk): 
@@ -1760,11 +1760,11 @@ $initialDashboardVersion = md5(implode('|', [
                                             $rowTotalPpm = ($grandTotSample > 0) ? round(($rowTotalPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
                                             <tr style="border-bottom:1px solid #f1f5f9;background:#ffffff;cursor:pointer;" class="hover:bg-red-50" onclick="handleDonutLegendClick('defect', '<?= htmlspecialchars($dname, ENT_QUOTES) ?>')" title="Klik untuk memfilter Model & Part yang terdampak <?= htmlspecialchars($dname) ?>">
-                                                <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:inherit;z-index:2;" title="<?= htmlspecialchars($dname) ?>">
+                                                <td style="padding:5px 10px;width:130px;min-width:130px;max-width:130px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:#ffffff;z-index:3;" title="<?= htmlspecialchars($dname) ?>">
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:<?= $thColor ?>;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= htmlspecialchars($dname) ?>
                                                 </td>
-                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;background:#fff1f2;">
+                                                <td style="padding:5px 10px;width:95px;min-width:95px;text-align:right;font-family:monospace;font-weight:900;color:#dc2626;position:sticky;left:130px;background:#fff1f2;z-index:3;box-shadow:2px 0 4px -1px rgba(0,0,0,0.08);">
                                                     <span class="defect-metric-total-val" data-pcs="<?= $rowTotalPcs ?>" data-ppm="<?= $rowTotalPpm ?>"><?= number_format($rowTotalPcs) ?></span>
                                                 </td>
                                                 <?php foreach ($activeDefectPeriodKeys as $dk): 
@@ -1787,11 +1787,11 @@ $initialDashboardVersion = md5(implode('|', [
                                                 $rowTotalOtherPpm = ($grandTotSample > 0) ? round(($rowTotalOtherPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
                                             <tr style="border-bottom:1px solid #f1f5f9;background:#f8fafc;" class="hover:bg-slate-100">
-                                                <td style="padding:5px 10px;width:130px;max-width:130px;font-weight:700;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:inherit;z-index:2;" title="Others (<?= count($otherNDefectTypes) ?> jenis lainnya)">
+                                                <td style="padding:5px 10px;width:130px;min-width:130px;max-width:130px;font-weight:700;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:#f8fafc;z-index:3;" title="Others (<?= count($otherNDefectTypes) ?> jenis lainnya)">
                                                     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background:#94a3b8;margin-right:4px;vertical-align:middle;"></span>
                                                     <?= 'Others (' . count($otherNDefectTypes) . ' jenis lainnya)' ?>
                                                 </td>
-                                                <td style="padding:5px 10px;text-align:right;font-family:monospace;font-weight:900;color:#64748b;background:#f1f5f9;">
+                                                <td style="padding:5px 10px;width:95px;min-width:95px;text-align:right;font-family:monospace;font-weight:900;color:#64748b;position:sticky;left:130px;background:#f1f5f9;z-index:3;box-shadow:2px 0 4px -1px rgba(0,0,0,0.08);">
                                                     <span class="defect-metric-total-val" data-pcs="<?= $rowTotalOtherPcs ?>" data-ppm="<?= $rowTotalOtherPpm ?>"><?= number_format($rowTotalOtherPcs) ?></span>
                                                 </td>
                                                 <?php foreach ($activeDefectPeriodKeys as $dk): 
@@ -1811,8 +1811,8 @@ $initialDashboardVersion = md5(implode('|', [
                                     <?php endif; ?>
                                 </tbody>
                                 <tfoot>
-                                    <tr style="background:#f8fafc;font-weight:800;border-top:2px solid #cbd5e1;position:sticky;bottom:0;z-index:2;">
-                                        <td style="padding:6px 10px;width:130px;max-width:130px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;background:#f8fafc;z-index:2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                    <tr style="background:#f8fafc;font-weight:800;border-top:2px solid #cbd5e1;position:sticky;bottom:0;z-index:4;">
+                                        <td style="padding:6px 10px;width:130px;min-width:130px;max-width:130px;color:#1e293b;font-size:10px;text-transform:uppercase;position:sticky;left:0;bottom:0;background:#f8fafc;z-index:5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                                             <?= $isTahunanStacked ? 'TOTAL (YTD)' : 'TOTAL' ?>
                                         </td>
                                         <?php 
@@ -1831,7 +1831,7 @@ $initialDashboardVersion = md5(implode('|', [
                                         }
                                         $grandSumPpm = ($grandTotSample > 0) ? round(($grandSumPcs / $grandTotSample) * 1000000, 1) : 0;
                                         ?>
-                                        <td style="padding:6px 10px;text-align:right;font-family:monospace;color:#dc2626;background:#fee2e2;">
+                                        <td style="padding:6px 10px;width:95px;min-width:95px;text-align:right;font-family:monospace;color:#dc2626;position:sticky;left:130px;bottom:0;background:#fee2e2;z-index:5;box-shadow:2px 0 4px -1px rgba(0,0,0,0.1);">
                                             <span class="defect-metric-total-val" data-pcs="<?= $grandSumPcs ?>" data-ppm="<?= $grandSumPpm ?>"><?= number_format($grandSumPcs) ?></span>
                                         </td>
                                         <?php foreach ($activeDefectPeriodKeys as $dk): 

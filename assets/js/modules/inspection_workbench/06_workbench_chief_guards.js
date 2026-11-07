@@ -501,7 +501,7 @@ function workbenchChiefUnapprove() {
     }
 })();
 
-if (window.OQC_CONFIG.isReadOnlyView) {
+if (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView) {
 /**
  * Non-Disruptive Spectator Mode Client Locking
  * Disables all action triggers, sample buttons, lot scanners, and form inputs

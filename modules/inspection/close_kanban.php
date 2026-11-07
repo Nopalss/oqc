@@ -101,9 +101,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
         <!-- Single Card: Barcode Scanner & Table Lot -->
         <div class="card p-4 bg-white border border-slate-200/80 rounded-xl shadow-xs space-y-4">
             
-            <!-- Area Cepat Scanner Barcode & Tanggal Default & Multi-Box Generator -->
-            <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl grid grid-cols-1 sm:grid-cols-12 gap-3 text-xs items-end">
-                <div class="sm:col-span-5">
+            <!-- Area Cepat Scanner Barcode & Tanggal Default -->
+            <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-3 text-xs">
+                <div>
                     <label class="form-label font-bold text-slate-700">
                         Scan Barcode / QR Lot <span class="text-slate-400 font-normal">(Arahkan Scanner / Enter)</span>
                     </label>
@@ -112,23 +112,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                            class="form-input text-xs font-mono font-bold focus:ring-2 focus:ring-blue-500 focus:border-blue-500" 
                            autofocus autocomplete="off" autocorrect="off" spellcheck="false">
                 </div>
-                <div class="sm:col-span-3">
+                <div>
                     <label class="form-label font-bold text-slate-700">Tanggal Lot Default</label>
-                    <input type="date" id="default_lot_date" value="<?= date('Y-m-d') ?>" onchange="onDefaultDateChange()" class="form-input text-xs font-bold">
-                </div>
-                <div class="sm:col-span-4 flex items-end gap-2">
-                    <div class="flex-1">
-                        <label class="form-label font-bold text-slate-700">
-                            Jumlah Label / Box <span class="text-slate-400 font-normal">(Lot Sama)</span>
-                        </label>
-                        <input type="number" id="quick_multi_boxes" min="1" max="50" value="1" placeholder="1" class="form-input text-xs font-bold font-mono text-center">
+                    <div class="flex items-center gap-2">
+                        <input type="date" id="default_lot_date" value="<?= date('Y-m-d') ?>" class="form-input text-xs font-bold max-w-xs flex-1 sm:flex-none sm:w-64">
+                        <button type="button" onclick="addManualLotRowFromDate()" class="btn-primary py-2 px-4 text-xs font-bold whitespace-nowrap bg-blue-600 hover:bg-blue-700 text-white border border-blue-600 rounded-lg flex items-center gap-1.5 shadow-xs" title="Tambah 1 baris lot manual dengan tanggal ini">
+                            <svg class="w-3.5 h-3.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
+                            </svg>
+                            <span>Tambah Baris</span>
+                        </button>
                     </div>
-                    <button type="button" onclick="generateMultiLabelsFromInput()" class="btn-secondary py-2 px-3 text-xs font-bold whitespace-nowrap bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 flex items-center gap-1" title="Terapkan jumlah label/box untuk lot ini">
-                        <svg class="w-3.5 h-3.5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                        </svg>
-                        <span>Set Label</span>
-                    </button>
                 </div>
             </div>
 
@@ -147,7 +141,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         </tr>
                     </thead>
                     <tbody id="lots-rows-body" class="divide-y divide-slate-100">
-                        <!-- Baris lot dinamis di-render via Javascript -->
+                        <tr id="empty-lots-state">
+                            <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                                <div class="flex flex-col items-center justify-center space-y-1.5">
+                                    <svg class="w-8 h-8 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                                    </svg>
+                                    <span class="text-xs font-medium text-slate-500">Belum ada baris lot fisik.</span>
+                                    <span class="text-[11px] text-slate-400">Silakan arahkan scanner barcode/QR di atas atau klik tombol <b>+ Tambah 1 Baris</b>.</span>
+                                </div>
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -155,20 +159,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             <!-- Tombol Tambah Baris & Info Counter -->
             <div class="flex items-center justify-between pt-1 flex-wrap gap-2">
                 <div class="flex items-center space-x-2">
-                    <button type="button" onclick="addLotRow()" class="btn-secondary py-1.5 px-3 text-xs flex items-center">
+                    <button type="button" onclick="addLotRow()" class="btn-secondary py-1.5 px-3 text-xs flex items-center font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 border-blue-200">
                         <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
                         </svg>
                         Tambah 1 Baris
                     </button>
-                    <button type="button" onclick="addMultipleLotRows(3)" class="btn-secondary py-1.5 px-3 text-xs flex items-center">
-                        <svg class="w-3.5 h-3.5 mr-1 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-                        </svg>
-                        Tambah 3 Baris
-                    </button>
-                    <button type="button" onclick="resetAllLotsToSingle()" class="btn-secondary py-1.5 px-2.5 text-xs text-rose-600 hover:bg-rose-50 border-rose-200" title="Reset ke 1 baris awal">
-                        Reset Tabel
+                    <button type="button" onclick="clearAllLotRows()" class="btn-secondary py-1.5 px-2.5 text-xs text-rose-600 hover:bg-rose-50 border-rose-200" title="Kosongkan seluruh baris di tabel">
+                        Kosongkan Tabel
                     </button>
                 </div>
                 <div class="text-xs text-slate-500 flex items-center gap-2 flex-wrap">
@@ -277,20 +275,7 @@ function generateLotNumber(dateStr) {
     return '06426817D010000';
 }
 
-function onDefaultDateChange() {
-    var newDate = document.getElementById('default_lot_date').value;
-    var rows = document.querySelectorAll('#lots-rows-body tr');
-    rows.forEach(function(row) {
-        var dInput = row.querySelector('.row-date');
-        var lInput = row.querySelector('.row-lot-number');
-        if (dInput && lInput && (!lInput.value || lInput.value.startsWith('064'))) {
-            dInput.value = newDate;
-            lInput.value = generateLotNumber(newDate);
-        }
-    });
-    recalculateDistribution();
-}
-
+// Handler perubahan tanggal pada baris spesifik di tabel
 function onRowDateChange(idx) {
     var dInput = document.getElementById('date-' + idx);
     var lInput = document.getElementById('lot-' + idx);
@@ -308,27 +293,70 @@ function generateUniqueRef(idx) {
     return 'REF-' + dateStr + '-' + (idx + 1) + randomStr;
 }
 
-// Reset tabel kembali ke 1 baris awal
-function resetAllLotsToSingle() {
-    var tbody = document.getElementById('lots-rows-body');
-    tbody.innerHTML = '';
-    rowCounterIdx = 0;
-    var boxInput = document.getElementById('quick_multi_boxes');
-    if (boxInput) {
-        boxInput.value = 1;
-        boxInput.disabled = false;
-    }
-    addLotRow();
+// Render HTML tampilan kosong (empty state)
+function renderEmptyStateHtml() {
+    return `
+        <tr id="empty-lots-state">
+            <td colspan="7" class="px-4 py-8 text-center text-slate-400">
+                <div class="flex flex-col items-center justify-center space-y-1.5">
+                    <svg class="w-8 h-8 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                    </svg>
+                    <span class="text-xs font-medium text-slate-500">Belum ada baris lot fisik.</span>
+                    <span class="text-[11px] text-slate-400">Silakan arahkan scanner barcode/QR di atas atau klik tombol <b>+ Tambah 1 Baris</b>.</span>
+                </div>
+            </td>
+        </tr>
+    `;
 }
 
-// Tambah baris lot baru atau render baris
+// Kosongkan seluruh tabel kembali ke state awal
+function clearAllLotRows() {
+    var tbody = document.getElementById('lots-rows-body');
+    tbody.innerHTML = renderEmptyStateHtml();
+    rowCounterIdx = 0;
+    updateRowCounters();
+    recalculateDistribution();
+    focusScanner(true);
+}
+
+// Tambah 1 baris lot manual berdasarkan input tanggal di card atas
+function addManualLotRowFromDate() {
+    var dInput = document.getElementById('default_lot_date');
+    var curDate = dInput ? dInput.value : '';
+    if (!curDate) {
+        curDate = '<?= date('Y-m-d') ?>';
+        if (dInput) dInput.value = curDate;
+    }
+    var lotNum = generateLotNumber(curDate);
+    var newIdx = addLotRow({
+        date: curDate,
+        lot: lotNum,
+        ref: '',
+        qty: '',
+        is_scan: false
+    });
+
+    var newRow = document.getElementById('row-' + newIdx);
+    if (newRow) {
+        newRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+// Tambah 1 baris lot baru atau render baris
 function addLotRow(initData) {
+    // Hilangkan empty state jika masih ada di tabel
+    var emptyState = document.getElementById('empty-lots-state');
+    if (emptyState) {
+        emptyState.remove();
+    }
+
     rowCounterIdx++;
     var idx = rowCounterIdx;
     var tbody = document.getElementById('lots-rows-body');
     var tr = document.createElement('tr');
     tr.id = 'row-' + idx;
-    tr.className = 'hover:bg-slate-50/80 transition-colors';
+    tr.className = 'hover:bg-slate-50/80 transition-colors lot-data-row';
     tr.setAttribute('data-row-idx', idx);
 
     var defaultDate = (initData && initData.date) ? initData.date : document.getElementById('default_lot_date').value;
@@ -340,7 +368,7 @@ function addLotRow(initData) {
     tr.setAttribute('data-from-scan', isFromScan);
 
     tr.innerHTML = `
-        <td class="px-2 py-2 text-center font-bold text-slate-400 row-number">${tbody.children.length + 1}</td>
+        <td class="px-2 py-2 text-center font-bold text-slate-400 row-number">${document.querySelectorAll('#lots-rows-body tr.lot-data-row').length + 1}</td>
         <td class="px-2 py-2">
             <input type="date" id="date-${idx}" value="${defaultDate}" onchange="onRowDateChange(${idx})" class="form-input py-1 text-xs font-bold row-date">
         </td>
@@ -385,65 +413,25 @@ function markRowModified(idx) {
     }
 }
 
-// Generate N label/box dengan Nomor Lot yang sama, Ref acak unik, dan Qty bagi rata
-function generateMultiLabelsFromInput() {
-    var boxInput = document.getElementById('quick_multi_boxes');
-    var count = parseInt(boxInput ? boxInput.value : 1, 10);
-    if (isNaN(count) || count < 1) count = 1;
-    if (count > 50) {
-        alert('Maksimal pembuatan label sekaligus adalah 50 baris.');
-        count = 50;
-        boxInput.value = 50;
-    }
-
-    var defaultDate = document.getElementById('default_lot_date').value;
-    
-    // Ambil nomor lot dari baris pertama jika ada, atau generate default
-    var baseLotNumber = '';
-    var firstRowLot = document.querySelector('#lots-rows-body tr .row-lot-number');
-    if (firstRowLot && firstRowLot.value.trim()) {
-        baseLotNumber = firstRowLot.value.trim();
-    } else {
-        baseLotNumber = generateLotNumber(defaultDate);
-    }
-
-    // Bersihkan tabel
-    var tbody = document.getElementById('lots-rows-body');
-    tbody.innerHTML = '';
-    rowCounterIdx = 0;
-
-    for (var i = 0; i < count; i++) {
-        var autoRef = (count > 1) ? generateUniqueRef(i) : '';
-        addLotRow({
-            date: defaultDate,
-            lot: baseLotNumber,
-            ref: autoRef,
-            qty: '', // Dikosongkan agar Opsi A (Bagi Rata Otomatis) bekerja
-            is_scan: false
-        });
-    }
-
-    recalculateDistribution();
-}
-
-function addMultipleLotRows(count) {
-    for (var i = 0; i < count; i++) {
-        addLotRow();
-    }
-}
-
 function removeLotRow(idx) {
     var tr = document.getElementById('row-' + idx);
     if (tr) {
-        tr.parentNode.removeChild(tr);
-        updateRowNumbers();
+        var tbody = tr.parentNode;
+        tr.remove();
+
+        var remainingRows = document.querySelectorAll('#lots-rows-body tr.lot-data-row');
+        if (remainingRows.length === 0 && tbody) {
+            tbody.innerHTML = renderEmptyStateHtml();
+        } else {
+            updateRowNumbers();
+        }
         updateRowCounters();
         recalculateDistribution();
     }
 }
 
 function updateRowNumbers() {
-    var rows = document.querySelectorAll('#lots-rows-body tr');
+    var rows = document.querySelectorAll('#lots-rows-body tr.lot-data-row');
     rows.forEach(function(row, i) {
         var num = row.querySelector('.row-number');
         if (num) num.textContent = i + 1;
@@ -451,13 +439,13 @@ function updateRowNumbers() {
 }
 
 function updateRowCounters() {
-    var count = document.querySelectorAll('#lots-rows-body tr').length;
+    var count = document.querySelectorAll('#lots-rows-body tr.lot-data-row').length;
     document.getElementById('row-counter').textContent = count;
 }
 
 // Kalkulasi pembagian rata jika kolom Qty dikosongkan & cek status excess
 function recalculateDistribution() {
-    var rows = document.querySelectorAll('#lots-rows-body tr');
+    var rows = document.querySelectorAll('#lots-rows-body tr.lot-data-row');
     var totalSpecified = 0;
     var unspecifiedRows = [];
 
@@ -491,7 +479,7 @@ function recalculateDistribution() {
     // Tampilkan notifikasi indikator kelebihan (Excess)
     var excessBadge = document.getElementById('excess-indicator-badge');
     if (excessBadge) {
-        if (totalAccumulated > remainingTargetQty) {
+        if (totalAccumulated > remainingTargetQty && rows.length > 0) {
             var diff = totalAccumulated - remainingTargetQty;
             excessBadge.style.display = 'inline-block';
             excessBadge.innerHTML = '⚡ Lebih +' + diff.toLocaleString() + ' pcs &rarr; Otomatis Masuk Safety Stock';
@@ -538,19 +526,7 @@ function checkRowLotStatus(idx) {
                     }).then(function() {
                         focusScanner(true);
                     });
-                    var currentRows = document.querySelectorAll('#lots-rows-body tr');
-                    if (currentRows.length > 1) {
-                        removeLotRow(idx);
-                    } else {
-                        // Jika baris pertama satu-satunya, kosongkan nilainya
-                        if (refEl) refEl.value = '';
-                        if (lotEl) lotEl.value = generateLotNumber();
-                        if (qtyInput) qtyInput.value = '';
-                        if (isSsInput) isSsInput.value = '0';
-                        if (ssNote) ssNote.style.display = 'none';
-                        statusCell.innerHTML = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">OK</span>';
-                    }
-                    recalculateDistribution();
+                    removeLotRow(idx);
                     return;
                 } else {
                     // STOK TERSEDIA -> Gunakan sisa kuota gudang
@@ -621,27 +597,7 @@ function checkRowLotStatus(idx) {
                 }).then(function() {
                     focusScanner(true);
                 });
-                var currentRows = document.querySelectorAll('#lots-rows-body tr');
-                if (currentRows.length > 1) {
-                    // Jika ini baris tambahan dari scan, HAPUS BARIS LANGSUNG agar tidak tersisa di tabel
-                    removeLotRow(idx);
-                } else {
-                    // Jika baris ke-1 satu-satunya, kembalikan ke default bersih (termasuk kosongkan Qty)
-                    if (refEl) refEl.value = '';
-                    if (lotEl) lotEl.value = generateLotNumber();
-                    if (qtyInput) qtyInput.value = '';
-                    var rowEl = document.getElementById('row-' + idx);
-                    if (rowEl) {
-                        rowEl.removeAttribute('data-user-modified');
-                        rowEl.setAttribute('data-from-scan', '0');
-                    }
-                    statusCell.innerHTML = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">OK</span>';
-                }
-                var boxInput = document.getElementById('quick_multi_boxes');
-                if (boxInput) {
-                    boxInput.disabled = false;
-                }
-                recalculateDistribution();
+                removeLotRow(idx);
                 return;
             }
 
@@ -730,61 +686,16 @@ document.getElementById('scan_lot_input').addEventListener('keydown', function(e
             return;
         }
 
-        // Jika menggunakan scanner barcode, sesuaikan default box ke 1 tapi tetap biarkan input aktif jika user ingin input manual
-        var boxInput = document.getElementById('quick_multi_boxes');
-        if (boxInput) {
-            boxInput.value = 1;
-        }
-
-        var rows = document.querySelectorAll('#lots-rows-body tr');
-        var canOverwriteFirstRow = false;
-        var targetRowIdx = null;
-
-        // Cek apakah tabel cuma punya 1 baris DAN baris tersebut masih virgin (belum dimodifikasi / belum scan)
-        if (rows.length === 1) {
-            var firstRow = rows[0];
-            var refVal = firstRow.querySelector('.row-ref-number') ? firstRow.querySelector('.row-ref-number').value.trim() : '';
-            var isModified = firstRow.getAttribute('data-user-modified') === '1';
-            var isFromScan = firstRow.getAttribute('data-from-scan') === '1';
-
-            if (!refVal && !isModified && !isFromScan) {
-                canOverwriteFirstRow = true;
-                targetRowIdx = firstRow.getAttribute('data-row-idx');
-            }
-        }
-
         var scanDate = document.getElementById('default_lot_date').value;
 
-        if (canOverwriteFirstRow && targetRowIdx) {
-            // TIMPA Baris Pertama Default
-            var dateInput = document.getElementById('date-' + targetRowIdx);
-            var lotInput  = document.getElementById('lot-' + targetRowIdx);
-            var refInput  = document.getElementById('ref-' + targetRowIdx);
-            var qtyInput  = document.getElementById('qty-' + targetRowIdx);
-            var firstRow  = document.getElementById('row-' + targetRowIdx);
-
-            if (dateInput) dateInput.value = scanDate;
-            if (lotInput)  lotInput.value  = parsed.lot;
-            if (refInput)  refInput.value  = parsed.ref;
-            if (qtyInput)  qtyInput.value  = parsed.qty > 0 ? parsed.qty : '';
-
-            if (firstRow) {
-                firstRow.setAttribute('data-from-scan', '1');
-                firstRow.setAttribute('data-user-modified', '1');
-            }
-
-            checkRowLotStatus(targetRowIdx);
-            recalculateDistribution();
-        } else {
-            // Tambahkan baris baru jika bukan baris pertama virgin
-            addLotRow({
-                date: scanDate,
-                lot: parsed.lot,
-                ref: parsed.ref,
-                qty: parsed.qty > 0 ? parsed.qty : '',
-                is_scan: true
-            });
-        }
+        // Tambah baris lot baru secara 1-per-1 dari hasil scan
+        addLotRow({
+            date: scanDate,
+            lot: parsed.lot,
+            ref: parsed.ref,
+            qty: parsed.qty > 0 ? parsed.qty : '',
+            is_scan: true
+        });
 
         // Kembalikan fokus ke kolom scanner untuk scan lot berikutnya
         focusScanner(true);
@@ -793,12 +704,12 @@ document.getElementById('scan_lot_input').addEventListener('keydown', function(e
 
 // Submit Form
 function submitCloseKanban() {
-    var rows = document.querySelectorAll('#lots-rows-body tr');
+    var rows = document.querySelectorAll('#lots-rows-body tr.lot-data-row');
     if (rows.length === 0) {
         Swal.fire({
             icon: 'warning',
-            title: 'Tabel Kosong',
-            text: 'Harap tambahkan minimal 1 baris Lot'
+            title: 'Tabel Masih Kosong',
+            text: 'Harap scan barcode lot atau tambahkan minimal 1 baris Lot terlebih dahulu.'
         });
         return;
     }
@@ -913,9 +824,10 @@ function escapeHtml(text) {
     return text.toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-// Inisialisasi awal 1 baris & auto-focus scanner
+// Inisialisasi awal: Default kosong (0 baris) & auto-focus scanner
 document.addEventListener('DOMContentLoaded', function() {
-    addLotRow();
+    updateRowCounters();
+    recalculateDistribution();
     focusScanner(true);
 });
 </script>

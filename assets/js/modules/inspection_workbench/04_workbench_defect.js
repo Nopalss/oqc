@@ -930,6 +930,12 @@ function handleWorkbenchHeaderBack(e) {
     if (e && e.preventDefault) e.preventDefault();
     var defaultIndexUrl = window.OQC_CONFIG.baseUrl + "/modules/inspection/index.php";
 
+    // Mode Pantau (Spectator): Keluar instan tanpa dialog dan tanpa menghapus apapun dari sesi inspektur lain
+    if (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView) {
+        window.location.href = defaultIndexUrl;
+        return;
+    }
+
     // Jika belum ada session aktif yang dimuat
     if (!currentSessionId || !window.lastWorkbenchSessionData || !window.lastWorkbenchSessionData.session) {
         window.location.href = defaultIndexUrl;

@@ -574,14 +574,14 @@ try {
                 // Buat baris SESI SAFETY STOCK BARU untuk sisa kuota (tersedia di gudang)
                 $stmtInsNewSs = $pdo->prepare("
                     INSERT INTO inspection_sessions (
-                        inspection_type, flow_version, did_id, kanban_item_id, part_id,
+                        inspection_type, ss_source, flow_version, did_id, kanban_item_id, part_id,
                         sample_size, total_scanned_qty, batch_sample_size, excess_qty,
                         use_safety_stock_qty, reject_number, samples_checked, ng_count,
                         status, auto_fulfilled_by_session_id, original_ss_session_id,
                         parent_session_id, is_reinspection, reinspection_type, reinspection_notes,
                         inspector_id, line_id, line_name, started_at, closed_at
                     ) VALUES (
-                        'safety_stock', 2, :did_id, :kid, :part_id,
+                        'safety_stock', 'split_leftover', 2, :did_id, :kid, :part_id,
                         :spl_size, :tot_qty, :batch_spl, 0,
                         0, :rej, :samples_chk, 0,
                         'passed', NULL, :orig_ssid,

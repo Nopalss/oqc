@@ -428,7 +428,23 @@ function has_menu_access($menu_key) {
  * Find the first URL that the current user has permission to view
  */
 function get_first_accessible_url() {
+    $user = current_user();
+    $userRole = strtolower(trim($user['role'] ?? ''));
+
+    // Khusus role inspektur/operator: prioritaskan checklist jika belum selesai hari ini
+    if (in_array($userRole, ['inspektur', 'inspektor', 'operator'], true) && can_access('monitoring_oqc')) {
+        $pdo = getDB();
+        $isEarlyDone = is_monitoring_phase_completed($pdo, (int)($user['id'] ?? 0), 'early');
+        if (!$isEarlyDone) {
+            return 'modules/monitoring_oqc/index.php';
+        }
+        if (can_access('inspection')) {
+            return 'modules/inspection/index.php';
+        }
+    }
+
     $menuUrls = [
+        'monitoring_oqc'  => 'modules/monitoring_oqc/index.php',
         'dashboard'       => 'modules/dashboard/index.php',
         'defect_analysis' => 'modules/defect_analysis/index.php',
         'inspection'      => 'modules/inspection/index.php',
@@ -736,8 +752,8 @@ function createAutoSafetyStockForSession($pdo, $sessionId) {
 
                     // 3. Create PASSED inspection_sessions for this specific overflow lot
                     $stmtInsSSSession = $pdo->prepare("INSERT INTO inspection_sessions 
-                        (inspection_type, did_id, kanban_item_id, part_id, inspector_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
-                        VALUES ('safety_stock', :did, :kanban, :part, :insp, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
+                        (inspection_type, ss_source, did_id, kanban_item_id, part_id, inspector_id, sample_size, total_scanned_qty, excess_qty, reject_number, samples_checked, ng_count, status, started_at, closed_at) 
+                        VALUES ('safety_stock', 'kanban_excess', :did, :kanban, :part, :insp, 1, :tqty, 0, 1, 1, 0, 'passed', NOW(), NOW())");
                     $stmtInsSSSession->execute([
                         ':did'    => $ssDidId,
                         ':kanban' => $ssKanbanItemId,

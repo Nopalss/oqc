@@ -488,7 +488,18 @@
                                         '</a>' +
                                     '</div>';
                             } else {
-                                actionContainer.innerHTML = '';
+                                if (info.last_session_id && info.last_session_id > 0) {
+                                    actionContainer.innerHTML = 
+                                        '<a href="' + baseUrl + 'session.php?id=' + info.last_session_id + '" ' +
+                                           'style="background-color: #475569; color: #ffffff;" ' +
+                                           'class="px-3.5 py-1.5 hover:bg-slate-700 active:bg-slate-800 text-white font-extrabold text-xs rounded-md shadow-xs hover:shadow transition-all inline-flex items-center gap-1.5 whitespace-nowrap flex-nowrap" ' +
+                                           'title="Buka kembali kamar inspeksi Kanban ini">' +
+                                            '<svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>' +
+                                            '<span>Buka Sesi</span>' +
+                                        '</a>';
+                                } else {
+                                    actionContainer.innerHTML = '';
+                                }
                             }
                         }
 
@@ -499,26 +510,32 @@
                             var barFill = progressContainer.querySelector('.progress-bar-fill');
                             var barLbl = progressContainer.querySelector('.progress-label');
                             if (barFill && barLbl) {
-                                if (info.is_fully_passed || info.progress_pct >= 100) {
+                                var remQty = (info.remaining_qty !== undefined) 
+                                    ? Number(info.remaining_qty) 
+                                    : Math.max(0, Number(info.target_qty) - Number(info.passed_qty));
+
+                                if (info.is_fully_passed || info.progress_pct >= 100 || remQty <= 0) {
                                     barFill.style.width = '100%';
                                     barFill.style.background = 'linear-gradient(90deg, #10b981 0%, #059669 100%)';
                                     barLbl.className = 'text-[10px] text-emerald-700 font-extrabold block leading-none progress-label';
-                                    barLbl.innerText = '100% selesai';
+                                    barLbl.innerText = 'Lengkap';
+                                    var ssCoverageBox = progressContainer.querySelector('.ss-coverage-box');
+                                    if (ssCoverageBox) ssCoverageBox.style.display = 'none';
                                 } else if (info.has_active_session) {
                                     barFill.style.width = Math.max(8, info.progress_pct) + '%';
                                     barFill.style.background = 'linear-gradient(90deg, #f59e0b 0%, #d97706 100%)';
                                     barLbl.className = 'text-[10px] text-amber-800 font-black block leading-none progress-label';
-                                    barLbl.innerText = (info.progress_pct > 0) ? (info.progress_pct + '% berjalan') : 'Mulai berjalan';
+                                    barLbl.innerText = 'Kurang ' + remQty.toLocaleString() + ' pcs';
                                 } else if (info.progress_pct > 0) {
                                     barFill.style.width = info.progress_pct + '%';
                                     barFill.style.background = 'linear-gradient(90deg, #f59e0b 0%, #d97706 100%)';
                                     barLbl.className = 'text-[10px] text-amber-800 font-extrabold block leading-none progress-label';
-                                    barLbl.innerText = info.progress_pct + '% parsial';
+                                    barLbl.innerText = 'Kurang ' + remQty.toLocaleString() + ' pcs';
                                 } else {
                                     barFill.style.width = '0%';
                                     barFill.style.background = '#cbd5e1';
                                     barLbl.className = 'text-[10px] text-slate-400 font-medium block leading-none progress-label';
-                                    barLbl.innerText = 'Belum mulai';
+                                    barLbl.innerText = 'Kurang ' + Number(info.target_qty).toLocaleString() + ' pcs';
                                 }
                             }
                         }

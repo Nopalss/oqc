@@ -658,9 +658,10 @@ function renderPlanningTableRows(items) {
         var barColor = (progressPct >= 100) ? 'background: linear-gradient(90deg, #10b981 0%, #059669 100%);' :
                        (k.active_session_id || progressPct > 0) ? 'background: linear-gradient(90deg, #f59e0b 0%, #d97706 100%);' :
                        'background-color: #cbd5e1;';
-        var barLabel = (progressPct >= 100) ? '100% selesai' :
-                       (k.active_session_id) ? (progressPct + '% dikerjakan') :
-                       (progressPct > 0) ? (progressPct + '% parsial') : 'Belum mulai';
+        var barLabel = (progressPct >= 100 || remainingQty <= 0) ? 'Lengkap' :
+                       ('Kurang ' + remainingQty.toLocaleString() + ' pcs');
+        var barLabelClass = (progressPct >= 100 || remainingQty <= 0) ? 'text-emerald-700 font-extrabold' :
+                            (k.active_session_id || progressPct > 0) ? 'text-amber-800 font-extrabold' : 'text-slate-500 font-bold';
         var barFillWidth = (progressPct >= 100) ? 100 : Math.max(progressPct > 0 ? progressPct : 0, k.active_session_id ? 15 : 0);
 
         // Status category group for KPI filtering & row color matching
@@ -705,7 +706,7 @@ function renderPlanningTableRows(items) {
         } else if (isInProgress) {
             // Kuning / Amber - Sedang Berjalan / Parsial
             rowStyle = 'background-color: #fef3c7; border-left: 4.5px solid #d97706;';
-            var progressText = k.active_session_id ? 'Sedang Dikerjakan' : 'Parsial (' + progressPct + '%)';
+            var progressText = k.active_session_id ? 'Sedang Dikerjakan' : 'Parsial';
             statusBadge = '<span style="background-color: #d97706; color: #ffffff; font-weight: 800; font-size: 10px; padding: 2.5px 8px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 3.5px;">' +
                           '<span style="width: 5px; height: 5px; border-radius: 9999px; background-color: #ffffff;"></span>' +
                           progressText +
@@ -800,7 +801,7 @@ function renderPlanningTableRows(items) {
                         '<div class="w-16 rounded-full overflow-hidden mx-auto my-1 bg-slate-200" style="height: 6px; border: 1px solid #cbd5e1;">' +
                             '<div style="height: 100%; width: ' + barFillWidth + '%; ' + barColor + ' border-radius: 9999px;"></div>' +
                         '</div>' +
-                        '<span class="text-[9.5px] font-bold text-slate-500 block leading-none">' + barLabel + '</span>' +
+                        '<span class="text-[9.5px] ' + barLabelClass + ' block leading-none">' + barLabel + '</span>' +
                     '</td>' +
                     
                     // Col 6: Status
@@ -954,6 +955,7 @@ function hasUninspectedLotsInWorkbench() {
 
 // 1. Proteksi konfirmasi browser saat tab hendak ditutup / direload
 window.addEventListener('beforeunload', function(e) {
+    if (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView) return;
     if (hasUninspectedLotsInWorkbench()) {
         e.preventDefault();
         e.returnValue = 'Anda masih memiliki box yang belum selesai diinspeksi. Keluar sekarang akan membatalkan box yang belum selesai.';
@@ -964,6 +966,7 @@ window.addEventListener('beforeunload', function(e) {
 // 2. Jika user tetap memilih menutup browser (pagehide / unload):
 // Kirim sinyal sendBeacon ke background server untuk membersihkan box yang belum selesai
 window.addEventListener('pagehide', function(e) {
+    if (window.OQC_CONFIG && window.OQC_CONFIG.isReadOnlyView) return;
     if (window.isWorkbenchIntentionallyExiting) return;
     if (hasUninspectedLotsInWorkbench() && currentSessionId) {
         try {
