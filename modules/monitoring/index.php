@@ -8,6 +8,15 @@ require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
 
+// Proteksi akses login & segera lepaskan session lock agar request concurrent tidak terblokir
+if (!is_logged_in()) {
+    redirect(base_url('auth/login.php'));
+    exit;
+}
+if (session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
 $pdo = getDB();
 
 // ── Filter Parameters ────────────────────────────────────────────────────────
@@ -230,7 +239,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             <!-- Live Auto Refresh Controls -->
             <div style="display: flex; align-items: center; gap: 8px; background-color: rgba(30,41,59,0.9); border: 1px solid #334155; border-radius: 10px; padding: 6px 12px; font-size: 11px;">
                 <span style="width: 8px; height: 8px; border-radius: 9999px; background-color: #34d399; display: inline-block;" class="animate-ping"></span>
-                <span style="color: #cbd5e1; font-weight: 500; white-space: nowrap;">Auto Refresh: <b id="countdown-timer" style="color: #34d399; font-family: monospace;">30</b>s</span>
+                <span style="color: #cbd5e1; font-weight: 500; white-space: nowrap;">Auto Refresh: <b id="countdown-timer" style="color: #34d399; font-family: monospace;">60</b>s</span>
                 <button type="button" id="toggle-refresh-btn" onclick="toggleAutoRefresh()" style="background-color: #334155; color: #ffffff; border-radius: 4px; padding: 2px 8px; font-size: 10px; font-weight: 700; border: none; cursor: pointer;">
                     Pause
                 </button>
@@ -563,18 +572,27 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
     </main>
 
     <script>
-    // Realtime Auto-Refresh 30 Seconds Countdown
-    var timeLeft = 30;
+    // Realtime Auto-Refresh 60 Seconds with Anti-Thundering Jitter & Visibility Protection
+    var defaultInterval = 60;
+    var timeLeft = defaultInterval;
     var timerRunning = true;
     var timerElem = document.getElementById('countdown-timer');
     var btnElem   = document.getElementById('toggle-refresh-btn');
 
     var intervalId = setInterval(function() {
         if (!timerRunning) return;
+        // Jangan refresh atau decrement waktu saat user sedang di tab lain / browser diminimize
+        if (document.hidden) return;
+
         timeLeft--;
         if (timerElem) timerElem.innerText = timeLeft;
         if (timeLeft <= 0) {
-            window.location.reload();
+            timerRunning = false;
+            // Random Jitter 0 - 3000ms agar multi-PC tidak reload bersamaan
+            var jitter = Math.floor(Math.random() * 3000);
+            setTimeout(function() {
+                window.location.reload();
+            }, jitter);
         }
     }, 1000);
 
@@ -585,6 +603,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             btnElem.style.backgroundColor = timerRunning ? '#334155' : '#059669';
         }
     }
+
+    // Auto pause saat tab ditinggalkan, resume saat dibuka kembali
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+            // Optional: diamkan timer saat background
+        } else {
+            // Jika user baru balik dan sisa waktu sudah habis, reload dengan jitter
+            if (timeLeft <= 0 && timerRunning) {
+                window.location.reload();
+            }
+        }
+    });
     </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

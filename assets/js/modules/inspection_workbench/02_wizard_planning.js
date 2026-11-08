@@ -754,6 +754,31 @@ function renderPlanningTableRows(items) {
         var isPartial = (progressPct > 0 && progressPct < 100);
         var isUncompleted = (!isCompleted);
 
+        var ssBadgeHtml = '';
+        if (k.ss_alloc && k.ss_alloc.allocated_qty > 0 && !isCompleted && remainingQty > 0) {
+            var isSsFull = (k.ss_alloc.fulfill_type === 'full');
+            var allocQty = parseInt(k.ss_alloc.allocated_qty) || 0;
+            var shortQty = parseInt(k.ss_alloc.shortage_qty) || 0;
+
+            if (isSsFull) {
+                ssBadgeHtml = '<div class="mt-1">' +
+                    '<div class="inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold tracking-tight border bg-emerald-50 text-emerald-800 border-emerald-300 leading-tight text-center shadow-2xs" ' +
+                         'title="Stok SS di gudang cukup untuk menutup Kanban ini (' + remainingQty.toLocaleString() + ' pcs)">' +
+                        '<div class="flex items-center justify-center gap-1 font-extrabold text-emerald-900"><span>📦</span> <span>Stok SS Cukup</span></div>' +
+                        '<div class="text-[8px] font-extrabold text-emerald-800 leading-none mt-0.5">(Bisa Tutup ' + remainingQty.toLocaleString() + ' pcs)</div>' +
+                    '</div>' +
+                '</div>';
+            } else {
+                ssBadgeHtml = '<div class="mt-1">' +
+                    '<div class="inline-block px-1.5 py-0.5 rounded text-[8.5px] font-bold tracking-tight border bg-amber-50 text-amber-900 border-amber-300 leading-tight text-center shadow-2xs" ' +
+                         'title="Stok SS hanya bisa menutup sebagian (' + allocQty.toLocaleString() + ' pcs). Kanban masih kurang ' + shortQty.toLocaleString() + ' pcs.">' +
+                        '<div class="flex items-center justify-center gap-1 font-extrabold text-amber-950"><span>⚠</span> <span>Stok SS Cuma Ada ' + allocQty.toLocaleString() + '</span></div>' +
+                        '<div class="text-[8px] font-extrabold text-amber-900 leading-none mt-0.5">(Kurang ' + shortQty.toLocaleString() + ' pcs)</div>' +
+                    '</div>' +
+                '</div>';
+            }
+        }
+
         html += '<tr class="kanban-table-row transition-colors" ' +
                     'style="' + rowStyle + '" ' +
                     'data-kanban-id="' + kid + '" ' +
@@ -802,6 +827,7 @@ function renderPlanningTableRows(items) {
                             '<div style="height: 100%; width: ' + barFillWidth + '%; ' + barColor + ' border-radius: 9999px;"></div>' +
                         '</div>' +
                         '<span class="text-[9.5px] ' + barLabelClass + ' block leading-none">' + barLabel + '</span>' +
+                        ssBadgeHtml +
                     '</td>' +
                     
                     // Col 6: Status

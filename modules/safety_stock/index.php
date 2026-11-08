@@ -14,6 +14,9 @@ require_once __DIR__ . '/../../config/helper.php';
 
 require_menu_access('safety_stock');
 
+$currentUser = current_user();
+$canManageLots = in_array($currentUser['role'] ?? '', ['admin', 'chief']);
+
 $pdo = getDB();
 
 // ── 1. Parameter Filter & Tab ────────────────────────────────────────────────
@@ -1113,22 +1116,21 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
                         <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
-                                <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
-                                <th style="padding: 10px 14px; min-width: 180px;">Kode & Nama Part</th>
-                                <th style="padding: 10px 14px; text-align: center; width: 100px;">Kemasan Box</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #0369a1;">📥 Masuk Normal</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #b45309;">🔄 Sisa Kanban</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 110px; color: #7e22ce;">📤 Terpakai</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 120px; color: #15803d; background-color: #f0fdf4;">📦 Sisa di Rak</th>
-                                <th style="padding: 10px 14px; width: 100px; text-align: center;">Status</th>
-                                <th style="padding: 10px 14px; min-width: 120px;">Tgl Terakhir</th>
-                                <th style="padding: 10px 14px; text-align: right; min-width: 175px;">Aksi</th>
+                                <th style="padding: 10px 14px; width: 40px; text-align: center; white-space: nowrap;">No</th>
+                                <th style="padding: 10px 14px; min-width: 180px; white-space: nowrap;">Kode & Nama Part</th>
+                                <th style="padding: 10px 14px; text-align: center; min-width: 110px; white-space: nowrap;">Kemasan Box</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 130px; white-space: nowrap; color: #0369a1;">📥 Masuk Normal</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 135px; white-space: nowrap; color: #b45309;">🔄 Sisa Kanban</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 120px; white-space: nowrap; color: #7e22ce;">📤 Terpakai</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 130px; white-space: nowrap; color: #15803d; background-color: #f0fdf4;">📦 Sisa di Rak</th>
+                                <th style="padding: 10px 14px; min-width: 90px; text-align: center; white-space: nowrap;">Status</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 175px; white-space: nowrap;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (empty($items)): ?>
                                 <tr>
-                                    <td colspan="10" style="padding: 48px; text-align: center; color: #94a3b8;">
+                                    <td colspan="9" style="padding: 48px; text-align: center; color: #94a3b8;">
                                         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center;">
                                             <?php if ($kpiFilter !== 'all'): ?>
                                                 <span style="font-weight: 800; color: #334155; font-size: 14px;">Tidak Ada Part untuk Kriteria Filter Ini</span>
@@ -1179,58 +1181,58 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             <div style="font-weight: 600; color: #1e293b; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px;" title="<?= htmlspecialchars($it['part_name']) ?>">
                                                 <?= htmlspecialchars($it['part_name']) ?>
                                             </div>
+                                            <?php if (!empty($it['last_started_at'])): ?>
+                                                <div style="font-size: 10px; color: #94a3b8; font-weight: 600; margin-top: 2px; white-space: nowrap;" title="Terakhir aktif: <?= date('d M Y, H:i', strtotime($it['last_started_at'])) ?>">
+                                                    Aktif: <?= date('d M, H:i', strtotime($it['last_started_at'])) ?>
+                                                </div>
+                                            <?php endif; ?>
                                         </td>
 
                                         <!-- Kemasan Box -->
-                                        <td style="padding: 10px 14px; text-align: center;">
-                                            <span style="font-weight: 800; color: #1e293b; background-color: #f8fafc; padding: 3px 8px; border-radius: 9999px; border: 1px solid #cbd5e1; font-size: 11px;">
+                                        <td style="padding: 10px 14px; text-align: center; white-space: nowrap;">
+                                            <span style="font-weight: 800; color: #1e293b; background-color: #f8fafc; padding: 3px 8px; border-radius: 9999px; border: 1px solid #cbd5e1; font-size: 11px; display: inline-block; white-space: nowrap;">
                                                 <?= number_format($totalBoxes) ?> Box
                                             </span>
                                         </td>
 
                                         <!-- Masuk Normal -->
-                                        <td style="padding: 10px 14px; text-align: right;">
-                                            <span style="font-weight: 800; color: #0284c7; font-size: 12px; font-family: monospace;">
+                                        <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
+                                            <span style="font-weight: 800; color: #0284c7; font-size: 12px; font-family: monospace; display: inline-block; white-space: nowrap;">
                                                 <?= number_format($normalIn) ?> <span style="font-size: 10px; font-weight: 600; color: #64748b;">pcs</span>
                                             </span>
                                         </td>
 
                                         <!-- Masuk Sisa Kanban -->
-                                        <td style="padding: 10px 14px; text-align: right;">
+                                        <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
                                             <?php if ($sisaIn > 0): ?>
-                                                <span style="font-weight: 800; color: #d97706; font-size: 12px; font-family: monospace; background-color: #fffbeb; padding: 2px 6px; border-radius: 6px; border: 1px solid #fde68a;">
+                                                <span style="font-weight: 800; color: #d97706; font-size: 12px; font-family: monospace; background-color: #fffbeb; padding: 2px 8px; border-radius: 6px; border: 1px solid #fde68a; display: inline-block; white-space: nowrap;">
                                                     +<?= number_format($sisaIn) ?> pcs
                                                 </span>
                                             <?php else: ?>
-                                                <span style="color: #94a3b8; font-size: 11px;">0 pcs</span>
+                                                <span style="color: #94a3b8; font-size: 11px; white-space: nowrap;">0 pcs</span>
                                             <?php endif; ?>
                                         </td>
 
                                         <!-- Terpakai Kanban -->
-                                        <td style="padding: 10px 14px; text-align: right;">
-                                            <span style="font-weight: 800; color: #7e22ce; font-size: 12px; font-family: monospace;">
+                                        <td style="padding: 10px 14px; text-align: right; white-space: nowrap;">
+                                            <span style="font-weight: 800; color: #7e22ce; font-size: 12px; font-family: monospace; display: inline-block; white-space: nowrap;">
                                                 <?= number_format($usedQty) ?> <span style="font-size: 10px; font-weight: 600; color: #7e22ce;">pcs</span>
                                             </span>
                                         </td>
 
                                         <!-- Sisa di Rak Gudang -->
-                                        <td style="padding: 10px 14px; text-align: right; background-color: <?= ($availQty > 0) ? '#f0fdf4' : 'transparent' ?>;">
-                                            <div style="font-weight: 900; color: <?= ($availQty > 0) ? '#15803d' : '#94a3b8' ?>; font-size: 13px; font-family: monospace;">
+                                        <td style="padding: 10px 14px; text-align: right; white-space: nowrap; background-color: <?= ($availQty > 0) ? '#f0fdf4' : 'transparent' ?>;">
+                                            <div style="font-weight: 900; color: <?= ($availQty > 0) ? '#15803d' : '#94a3b8' ?>; font-size: 13px; font-family: monospace; white-space: nowrap;">
                                                 <?= number_format($availQty) ?> <span style="font-size: 10px; font-weight: 700;">pcs</span>
                                             </div>
-                                            <div style="font-size: 10px; color: <?= ($availQty > 0) ? '#166534' : '#94a3b8' ?>; font-weight: 600;">
+                                            <div style="font-size: 10px; color: <?= ($availQty > 0) ? '#166534' : '#94a3b8' ?>; font-weight: 600; white-space: nowrap;">
                                                 (<?= number_format($availBoxes) ?> Box)
                                             </div>
                                         </td>
 
                                         <!-- Status -->
-                                        <td style="padding: 10px 14px; text-align: center;">
+                                        <td style="padding: 10px 14px; text-align: center; white-space: nowrap;">
                                             <?= $statusBadge ?>
-                                        </td>
-
-                                        <!-- Tanggal Terakhir -->
-                                        <td style="padding: 10px 14px; color: #64748b; font-weight: 500; font-size: 11px;">
-                                            <?= !empty($it['last_started_at']) ? date('d M Y, H:i', strtotime($it['last_started_at'])) : '-' ?>
                                         </td>
 
                                         <!-- Aksi -->
@@ -1248,6 +1250,18 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                     </svg>
                                                 </button>
 
+                                                <?php if ($canManageLots): ?>
+                                                    <button type="button" 
+                                                            onclick="openManageLotsModal('<?= htmlspecialchars($it['part_code'], ENT_QUOTES) ?>', '<?= htmlspecialchars($it['part_name'], ENT_QUOTES) ?>')" 
+                                                            style="padding: 5px 9px; background-color: #fff1f2; color: #dc2626; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #fecaca; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; transition: all 0.15s;"
+                                                            title="Hapus lot atau sesuaikan kuantiti fisik box di gudang">
+                                                        <svg style="width: 12px; height: 12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                                        </svg>
+                                                        <span>Hapus Lot</span>
+                                                    </button>
+                                                <?php endif; ?>
+
                                                 <a href="<?= base_url('modules/safety_stock/detail.php?part_code=' . urlencode($it['part_code']) . '&period=' . urlencode($period) . (!empty($startDate) ? '&start_date=' . urlencode($startDate) . '&end_date=' . urlencode($endDate) : '')) ?>" 
                                                    style="padding: 5px 10px; background-color: #eff6ff; color: #1d4ed8; font-weight: 700; font-size: 11px; border-radius: 6px; border: 1px solid #bfdbfe; text-decoration: none; display: inline-flex; align-items: center; gap: 3px;">
                                                     <span>Detail</span> &raquo;
@@ -1258,7 +1272,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
                                     <!-- Expandable Child Row untuk Horizontal Timeline -->
                                     <tr id="<?= $timelineRowId ?>" class="timeline-child-row" style="display: none; background-color: #f8fafc;">
-                                        <td colspan="10" style="padding: 10px 14px 14px 14px; border-bottom: 2px solid #cbd5e1; background-color: #f8fafc; max-width: 0 !important; width: 100%; overflow: hidden;">
+                                        <td colspan="9" style="padding: 10px 14px 14px 14px; border-bottom: 2px solid #cbd5e1; background-color: #f8fafc; max-width: 0 !important; width: 100%; overflow: hidden;">
                                             <div class="timeline-content-box" data-loaded="0" data-part="<?= htmlspecialchars($it['part_code']) ?>" style="width: 100%; max-width: 100%; box-sizing: border-box; overflow: hidden;">
                                                 <!-- Content loaded via AJAX lazy load -->
                                             </div>
@@ -1315,14 +1329,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
                         <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
                             <tr>
-                                <th style="padding: 10px 14px; width: 40px; text-align: center;">No</th>
-                                <th style="padding: 10px 14px; min-width: 130px;">Waktu Terjadi</th>
-                                <th style="padding: 10px 14px; min-width: 180px;">Part (Kode & Nama)</th>
-                                <th style="padding: 10px 14px; min-width: 120px;">No. Lot / No. Ref</th>
-                                <th style="padding: 10px 14px; text-align: right; min-width: 155px; color: #b45309;">Rincian Qty (Asli &rarr; Sisa)</th>
-                                <th style="padding: 10px 14px; min-width: 240px;">Keterangan Asal Sisa</th>
-                                <th style="padding: 10px 14px; width: 120px; text-align: center;">Status Fisik</th>
-                                <th style="padding: 10px 14px; text-align: right; width: 80px;">Aksi</th>
+                                <th style="padding: 10px 14px; width: 40px; text-align: center; white-space: nowrap;">No</th>
+                                <th style="padding: 10px 14px; min-width: 130px; white-space: nowrap;">Waktu Terjadi</th>
+                                <th style="padding: 10px 14px; min-width: 180px; white-space: nowrap;">Part (Kode & Nama)</th>
+                                <th style="padding: 10px 14px; min-width: 120px; white-space: nowrap;">No. Lot / No. Ref</th>
+                                <th style="padding: 10px 14px; text-align: right; min-width: 155px; white-space: nowrap; color: #b45309;">Rincian Qty (Asli &rarr; Sisa)</th>
+                                <th style="padding: 10px 14px; min-width: 240px; white-space: nowrap;">Keterangan Asal Sisa</th>
+                                <th style="padding: 10px 14px; width: 120px; text-align: center; white-space: nowrap;">Status Fisik</th>
+                                <th style="padding: 10px 14px; text-align: right; width: 80px; white-space: nowrap;">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1741,6 +1755,76 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
 
         </div>
 
+        <!-- MODAL KELOLA & HAPUS LOT FISIK GUDANG (KHUSUS ADMIN / CHIEF) -->
+        <?php if ($canManageLots): ?>
+        <div id="modalManageLots" style="display: none; position: fixed; inset: 0; z-index: 50; background-color: rgba(15, 23, 42, 0.65); backdrop-filter: blur(2px); align-items: center; justify-content: center; padding: 16px;">
+            <div style="background-color: #ffffff; border-radius: 14px; max-width: 860px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); overflow: hidden; border: 1px solid #cbd5e1;">
+                
+                <!-- Header Modal -->
+                <div style="padding: 14px 18px; background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: #ffffff; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155;">
+                    <div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="background-color: #dc2626; color: #ffffff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; gap: 4px;">
+                                <svg style="width: 12px; height: 12px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                </svg>
+                                KELOLA & HAPUS LOT
+                            </span>
+                            <span id="manageModalPartCode" style="font-family: monospace; font-size: 14px; font-weight: 800; color: #60a5fa;">-</span>
+                        </div>
+                        <div id="manageModalPartName" style="font-size: 12px; color: #cbd5e1; font-weight: 600; margin-top: 3px;">-</div>
+                    </div>
+                    <button type="button" onclick="closeManageLotsModal()" style="color: #94a3b8; border: none; background: transparent; font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 6px;" title="Tutup Modal">&times;</button>
+                </div>
+
+                <!-- Info Alert -->
+                <div style="padding: 10px 18px; background-color: #fff7ed; border-bottom: 1px solid #fed7aa; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: #9a3412; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <svg style="width: 15px; height: 15px; flex-shrink: 0; color: #ea580c;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        <span>Centang lot yang ingin dihapus (bisa pilih banyak), atau ubah angka kuantiti pada kolom penyesuaian jika ada selisih pcs fisik.</span>
+                    </div>
+                    <div id="manageModalTotalReady" style="font-weight: 800; color: #ea580c; white-space: nowrap;">
+                        Total: 0 Box (0 pcs)
+                    </div>
+                </div>
+
+                <!-- Body Modal (Daftar Lot) -->
+                <div id="manageModalBody" style="padding: 16px 18px; flex: 1; overflow-y: auto; max-height: calc(90vh - 210px); min-height: 220px; background-color: #ffffff;">
+                    <!-- Content populated via AJAX -->
+                </div>
+
+                <!-- Footer Modal -->
+                <div style="padding: 12px 18px; background-color: #f8fafc; border-top: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span id="manageSelectedCounter" style="font-size: 12px; font-weight: 800; color: #475569; background-color: #f1f5f9; padding: 4px 10px; border-radius: 6px; border: 1px solid #cbd5e1;">
+                            0 lot dipilih (0 pcs)
+                        </span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <button type="button" onclick="closeManageLotsModal()" style="padding: 7px 14px; background-color: #ffffff; color: #475569; font-weight: 700; font-size: 12px; border-radius: 8px; border: 1px solid #cbd5e1; cursor: pointer;">
+                            Tutup
+                        </button>
+                        <button type="button" id="btnSaveLotQtys" onclick="submitBatchUpdateQty()" disabled style="padding: 7px 14px; background-color: #2563eb; color: #ffffff; font-weight: 700; font-size: 12px; border-radius: 8px; border: none; cursor: not-allowed; opacity: 0.5; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s;">
+                            <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                            <span>Simpan Penyesuaian Qty</span>
+                        </button>
+                        <button type="button" id="btnDeleteSelectedLots" onclick="submitBatchDeleteLots()" disabled style="padding: 7px 16px; background-color: #dc2626; color: #ffffff; font-weight: 700; font-size: 12px; border-radius: 8px; border: none; cursor: not-allowed; opacity: 0.5; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s;">
+                            <svg style="width: 14px; height: 14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                            <span id="btnDeleteText">Hapus Terpilih (0)</span>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+        <?php endif; ?>
+
     </main>
 
     <script>
@@ -1916,7 +2000,7 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                           '&period=' + encodeURIComponent(periodParam) + 
                           '&start_date=' + encodeURIComponent(startParam) + 
                           '&end_date=' + encodeURIComponent(endParam) + 
-                          '&chunk=50';
+                          '&chunk=30';
 
                 fetch(url)
                     .then(function(res) {
@@ -1984,6 +2068,424 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
             }
         }
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Modal Kelola & Hapus Lot Fisik Safety Stock (Batch & Inline Edit)
+    // ═════════════════════════════════════════════════════════════════════════
+    var currentManagePartCode = '';
+    var currentManagePartName = '';
+    var currentManageLotsData = [];
+
+    function openManageLotsModal(partCode, partName) {
+        var modal = document.getElementById('modalManageLots');
+        if (!modal) return;
+
+        currentManagePartCode = partCode;
+        currentManagePartName = partName || partCode;
+        currentManageLotsData = [];
+
+        document.getElementById('manageModalPartCode').textContent = partCode;
+        document.getElementById('manageModalPartName').textContent = currentManagePartName;
+        document.getElementById('manageModalTotalReady').textContent = 'Memuat data...';
+
+        var body = document.getElementById('manageModalBody');
+        body.innerHTML = `
+            <div style="padding: 40px; text-align: center; color: #64748b; font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;">
+                <svg style="animation: spin 1s linear infinite; width: 24px; height: 24px; color: #dc2626;" fill="none" viewBox="0 0 24 24">
+                    <circle style="opacity: 0.25;" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path style="opacity: 0.75;" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span>Mengambil data lot fisik siap pakai untuk part <b>${escapeHtml(partCode)}</b>...</span>
+            </div>
+        `;
+
+        modal.style.display = 'flex';
+        updateManageLotsSelectionState();
+
+        var url = '<?= base_url("modules/safety_stock/ajax_get_lots.php") ?>?part_code=' + encodeURIComponent(partCode);
+        fetch(url)
+            .then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(function(data) {
+                if (!data.success) {
+                    throw new Error(data.message || 'Gagal memuat lot.');
+                }
+                currentManageLotsData = data.lots || [];
+                renderManageLotsTable(data);
+            })
+            .catch(function(err) {
+                body.innerHTML = `
+                    <div style="padding: 30px; text-align: center; color: #dc2626;">
+                        <div style="font-weight: 800; font-size: 14px; margin-bottom: 6px;">Gagal Memuat Data Lot</div>
+                        <div style="font-size: 12px; color: #64748b;">${escapeHtml(err.message)}</div>
+                        <button type="button" onclick="openManageLotsModal('${escapeHtml(partCode)}', '${escapeHtml(partName)}')" 
+                                style="margin-top: 14px; padding: 6px 14px; background-color: #2563eb; color: #ffffff; border-radius: 6px; font-weight: 700; font-size: 11px; border: none; cursor: pointer;">
+                            Coba Lagi
+                        </button>
+                    </div>
+                `;
+            });
+    }
+
+    function closeManageLotsModal() {
+        var modal = document.getElementById('modalManageLots');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+    }
+
+    function renderManageLotsTable(data) {
+        var body = document.getElementById('manageModalBody');
+        var lots = data.lots || [];
+
+        document.getElementById('manageModalTotalReady').textContent = 
+            'Total: ' + lots.length + ' Box (' + Number(data.total_qty || 0).toLocaleString() + ' pcs)';
+
+        if (lots.length === 0) {
+            body.innerHTML = `
+                <div style="padding: 40px; text-align: center; color: #94a3b8;">
+                    <div style="font-weight: 800; color: #334155; font-size: 14px;">Tidak Ada Lot Fisik Ready di Rak</div>
+                    <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Seluruh stok untuk part ini mungkin sudah habis atau telah teralokasi untuk pemotongan Kanban.</div>
+                </div>
+            `;
+            updateManageLotsSelectionState();
+            return;
+        }
+
+        var html = `
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; color: #334155;">
+                <thead style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; font-size: 10px; font-weight: 800; color: #475569; text-transform: uppercase;">
+                    <tr>
+                        <th style="padding: 8px 10px; width: 36px; text-align: center;">
+                            <input type="checkbox" id="manageSelectAllMaster" onchange="toggleSelectAllManageLots(this)" style="cursor: pointer; width: 15px; height: 15px;" title="Pilih Semua Lot">
+                        </th>
+                        <th style="padding: 8px 10px; width: 36px; text-align: center;">No</th>
+                        <th style="padding: 8px 10px; min-width: 140px;">No. Lot / No. Ref</th>
+                        <th style="padding: 8px 10px; width: 110px;">Asal Box</th>
+                        <th style="padding: 8px 10px; width: 130px;">Waktu Masuk</th>
+                        <th style="padding: 8px 10px; text-align: right; width: 110px;">Qty Asli</th>
+                        <th style="padding: 8px 10px; text-align: right; width: 140px;">Sesuaikan Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+        `;
+
+        lots.forEach(function(l, idx) {
+            var isSisa = (l.source_type === 'kanban_excess' || l.source_type === 'split_leftover');
+            var badgeStyle = isSisa 
+                ? 'background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a;' 
+                : 'background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd;';
+            
+            html += `
+                <tr style="border-bottom: 1px solid #f1f5f9; transition: background-color 0.1s;" class="manage-lot-row" id="manage-lot-row-${l.lot_id}-${l.session_id}">
+                    <td style="padding: 8px 10px; text-align: center;">
+                        <input type="checkbox" class="manage-lot-checkbox" 
+                               data-lot-id="${l.lot_id}" 
+                               data-session-id="${l.session_id}" 
+                               data-qty="${l.qty}" 
+                               onchange="updateManageLotsSelectionState()" 
+                               style="cursor: pointer; width: 15px; height: 15px;">
+                    </td>
+                    <td style="padding: 8px 10px; text-align: center; color: #64748b; font-weight: 700;">
+                        ${idx + 1}
+                    </td>
+                    <td style="padding: 8px 10px;">
+                        <div style="font-weight: 800; color: #1e293b; font-family: monospace;">Lot: ${escapeHtml(l.lot_number)}</div>
+                        <div style="font-size: 11px; color: #64748b; font-family: monospace;">Ref: ${escapeHtml(l.ref_number)}</div>
+                    </td>
+                    <td style="padding: 8px 10px;">
+                        <span style="font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 6px; display: inline-block; ${badgeStyle}">
+                            ${escapeHtml(l.source_label)}
+                        </span>
+                    </td>
+                    <td style="padding: 8px 10px; font-size: 11px; color: #64748b; white-space: nowrap;">
+                        ${escapeHtml(l.date_formatted)}
+                    </td>
+                    <td style="padding: 8px 10px; text-align: right; font-weight: 800; color: #0f172a; font-family: monospace; font-size: 13px;">
+                        ${Number(l.qty).toLocaleString()} <span style="font-size: 10px; font-weight: 600; color: #64748b;">pcs</span>
+                    </td>
+                    <td style="padding: 8px 10px; text-align: right;">
+                        <input type="number" min="1" 
+                               value="${l.qty}" 
+                               data-orig-qty="${l.qty}" 
+                               data-lot-id="${l.lot_id}" 
+                               data-session-id="${l.session_id}" 
+                               class="manage-lot-qty-input" 
+                               oninput="markQtyChanged(this)" 
+                               style="width: 90px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; font-weight: 700; font-family: monospace; text-align: right; outline: none; background-color: #ffffff;"
+                               title="Ketik angka baru jika ingin mengubah jumlah pcs fisik">
+                    </td>
+                </tr>
+            `;
+        });
+
+        html += `
+                </tbody>
+            </table>
+        `;
+
+        body.innerHTML = html;
+        updateManageLotsSelectionState();
+    }
+
+    function toggleSelectAllManageLots(masterCheckbox) {
+        var checkboxes = document.querySelectorAll('.manage-lot-checkbox');
+        checkboxes.forEach(function(cb) {
+            cb.checked = masterCheckbox.checked;
+            var row = cb.closest('tr');
+            if (row) {
+                row.style.backgroundColor = cb.checked ? '#fff1f2' : 'transparent';
+            }
+        });
+        updateManageLotsSelectionState();
+    }
+
+    function updateManageLotsSelectionState() {
+        var checkboxes = document.querySelectorAll('.manage-lot-checkbox');
+        var checkedBoxes = document.querySelectorAll('.manage-lot-checkbox:checked');
+        var master = document.getElementById('manageSelectAllMaster');
+
+        var totalSelectedQty = 0;
+        checkedBoxes.forEach(function(cb) {
+            totalSelectedQty += parseInt(cb.getAttribute('data-qty') || 0, 10);
+            var row = cb.closest('tr');
+            if (row) row.style.backgroundColor = '#fff1f2';
+        });
+
+        document.querySelectorAll('.manage-lot-checkbox:not(:checked)').forEach(function(cb) {
+            var row = cb.closest('tr');
+            if (row) row.style.backgroundColor = 'transparent';
+        });
+
+        if (master && checkboxes.length > 0) {
+            master.checked = (checkboxes.length === checkedBoxes.length);
+            master.indeterminate = (checkedBoxes.length > 0 && checkedBoxes.length < checkboxes.length);
+        }
+
+        var counterEl = document.getElementById('manageSelectedCounter');
+        if (counterEl) {
+            counterEl.textContent = checkedBoxes.length + ' lot dipilih (' + totalSelectedQty.toLocaleString() + ' pcs)';
+        }
+
+        var btnDel = document.getElementById('btnDeleteSelectedLots');
+        var btnDelText = document.getElementById('btnDeleteText');
+        if (btnDel) {
+            if (checkedBoxes.length > 0) {
+                btnDel.disabled = false;
+                btnDel.style.cursor = 'pointer';
+                btnDel.style.opacity = '1';
+                btnDelText.textContent = 'Hapus Terpilih (' + checkedBoxes.length + ')';
+            } else {
+                btnDel.disabled = true;
+                btnDel.style.cursor = 'not-allowed';
+                btnDel.style.opacity = '0.5';
+                btnDelText.textContent = 'Hapus Terpilih (0)';
+            }
+        }
+    }
+
+    function markQtyChanged(inputEl) {
+        var orig = parseInt(inputEl.getAttribute('data-orig-qty'), 10);
+        var curr = parseInt(inputEl.value, 10);
+
+        if (!isNaN(curr) && curr !== orig && curr >= 1) {
+            inputEl.style.backgroundColor = '#eff6ff';
+            inputEl.style.borderColor = '#2563eb';
+            inputEl.style.color = '#1d4ed8';
+        } else {
+            inputEl.style.backgroundColor = '#ffffff';
+            inputEl.style.borderColor = '#cbd5e1';
+            inputEl.style.color = '#0f172a';
+        }
+
+        var anyChanged = false;
+        document.querySelectorAll('.manage-lot-qty-input').forEach(function(inp) {
+            var o = parseInt(inp.getAttribute('data-orig-qty'), 10);
+            var c = parseInt(inp.value, 10);
+            if (!isNaN(c) && c !== o && c >= 1) anyChanged = true;
+        });
+
+        var btnSave = document.getElementById('btnSaveLotQtys');
+        if (btnSave) {
+            btnSave.disabled = !anyChanged;
+            btnSave.style.cursor = anyChanged ? 'pointer' : 'not-allowed';
+            btnSave.style.opacity = anyChanged ? '1' : '0.5';
+        }
+    }
+
+    function submitBatchDeleteLots() {
+        var checkedBoxes = document.querySelectorAll('.manage-lot-checkbox:checked');
+        if (checkedBoxes.length === 0) {
+            alert('Pilih minimal satu lot untuk dihapus.');
+            return;
+        }
+
+        var lotIds = [];
+        var sessionIds = [];
+        var totalQty = 0;
+
+        checkedBoxes.forEach(function(cb) {
+            var lId = parseInt(cb.getAttribute('data-lot-id') || 0, 10);
+            var sId = parseInt(cb.getAttribute('data-session-id') || 0, 10);
+            var q = parseInt(cb.getAttribute('data-qty') || 0, 10);
+            if (lId > 0) {
+                lotIds.push(lId);
+            } else if (sId > 0) {
+                sessionIds.push(sId);
+            }
+            totalQty += q;
+        });
+
+        var confirmMsg = 'Apakah Anda YAKIN ingin menghapus ' + checkedBoxes.length + ' box/lot (' + totalQty.toLocaleString() + ' pcs) dari stok gudang?\n\n' +
+                         '• Part: ' + currentManagePartCode + '\n' +
+                         '• Stok di rak dan 4 Kartu KPI akan otomatis dikurangi secara realtime.\n' +
+                         '• Data yang dihapus tidak dapat dibatalkan.';
+
+        if (!confirm(confirmMsg)) return;
+
+        var btnDel = document.getElementById('btnDeleteSelectedLots');
+        if (btnDel) {
+            btnDel.disabled = true;
+            btnDel.innerHTML = '<span>Menghapus data...</span>';
+        }
+
+        var formData = new FormData();
+        formData.append('action', 'batch_delete_lots');
+        formData.append('part_code', currentManagePartCode);
+        formData.append('is_ajax', '1');
+        formData.append('lot_ids', JSON.stringify(lotIds));
+        formData.append('session_ids', JSON.stringify(sessionIds));
+
+        fetch('<?= base_url("modules/safety_stock/action.php") ?>', {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        })
+        .then(function(data) {
+            if (data.success) {
+                alert(data.message || 'Lot berhasil dihapus.');
+                location.reload();
+            } else {
+                alert('Gagal: ' + (data.message || 'Terjadi kesalahan sistem.'));
+                if (btnDel) {
+                    btnDel.disabled = false;
+                    btnDel.innerHTML = '<span id="btnDeleteText">Hapus Terpilih (' + checkedBoxes.length + ')</span>';
+                }
+            }
+        })
+        .catch(function(err) {
+            alert('Kesalahan jaringan: ' + err.message);
+            if (btnDel) {
+                btnDel.disabled = false;
+                btnDel.innerHTML = '<span id="btnDeleteText">Hapus Terpilih (' + checkedBoxes.length + ')</span>';
+            }
+        });
+    }
+
+    function submitBatchUpdateQty() {
+        var changedLots = {};
+        var changedSessions = {};
+        var changeCount = 0;
+
+        document.querySelectorAll('.manage-lot-qty-input').forEach(function(inp) {
+            var orig = parseInt(inp.getAttribute('data-orig-qty'), 10);
+            var curr = parseInt(inp.value, 10);
+            var lId  = parseInt(inp.getAttribute('data-lot-id') || 0, 10);
+            var sId  = parseInt(inp.getAttribute('data-session-id') || 0, 10);
+
+            if (!isNaN(curr) && curr !== orig) {
+                if (curr < 1) {
+                    alert('Kuantiti harus minimal 1 pcs.');
+                    inp.focus();
+                    return false;
+                }
+                if (lId > 0) {
+                    changedLots[lId] = curr;
+                } else if (sId > 0) {
+                    changedSessions[sId] = curr;
+                }
+                changeCount++;
+            }
+        });
+
+        if (changeCount === 0) {
+            alert('Tidak ada kuantiti yang diubah.');
+            return;
+        }
+
+        if (!confirm('Simpan penyesuaian kuantiti untuk ' + changeCount + ' box/lot pada part ' + currentManagePartCode + '?')) {
+            return;
+        }
+
+        var btnSave = document.getElementById('btnSaveLotQtys');
+        if (btnSave) {
+            btnSave.disabled = true;
+            btnSave.innerHTML = '<span>Menyimpan...</span>';
+        }
+
+        var formData = new FormData();
+        formData.append('action', 'batch_update_qty');
+        formData.append('part_code', currentManagePartCode);
+        formData.append('is_ajax', '1');
+        formData.append('lot_qtys', JSON.stringify(changedLots));
+        formData.append('session_qtys', JSON.stringify(changedSessions));
+
+        fetch('<?= base_url("modules/safety_stock/action.php") ?>', {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.json();
+        })
+        .then(function(data) {
+            if (data.success) {
+                alert(data.message || 'Kuantiti berhasil diperbarui.');
+                location.reload();
+            } else {
+                alert('Gagal: ' + (data.message || 'Terjadi kesalahan sistem.'));
+                if (btnSave) {
+                    btnSave.disabled = false;
+                    btnSave.innerHTML = '<span>Simpan Penyesuaian Qty</span>';
+                }
+            }
+        })
+        .catch(function(err) {
+            alert('Kesalahan jaringan: ' + err.message);
+            if (btnSave) {
+                btnSave.disabled = false;
+                btnSave.innerHTML = '<span>Simpan Penyesuaian Qty</span>';
+            }
+        });
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    // Close modal on escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            closeManageLotsModal();
+        }
+    });
     </script>
 
 <?php require_once __DIR__ . '/../../layouts/footer.php'; ?>

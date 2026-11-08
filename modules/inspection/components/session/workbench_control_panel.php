@@ -159,17 +159,6 @@
                     </div>
                 </div>
 
-                <!-- SECTION 2: Toggle Lihat Ringkasan Seluruh Box -->
-                <div style="margin-bottom: 6px;">
-                    <button type="button" id="btn-toggle-all-boxes" onclick="toggleAllBoxesView()" style="width: 100%; padding: 7px 12px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 11px; font-weight: 800; color: #475569; cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: all 0.15s;" onmouseover="this.style.backgroundColor='#f1f5f9'" onmouseout="this.style.backgroundColor='#f8fafc'">
-                        <div style="display: flex; align-items: center; gap: 6px;">
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-                            <span id="all-boxes-toggle-title">Lihat Ringkasan Seluruh Box</span>
-                        </div>
-                        <svg id="all-boxes-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="transform: rotate(0deg); transition: transform 0.2s;"><polyline points="6 9 12 15 18 9"/></svg>
-                    </button>
-                </div>
-
                 <!-- SECTION 3: Toggle Riwayat & Top 5 Defect Part Ini -->
                 <div style="margin-bottom: 6px;">
                     <button type="button" id="btn-toggle-part-ng-history" onclick="togglePartNgHistory()" style="width: 100%; padding: 7px 12px; background-color: #fff1f2; border: 1px solid #fecdd3; border-radius: 10px; font-size: 11px; font-weight: 800; color: #be123c; cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: all 0.15s;" onmouseover="this.style.backgroundColor='#ffe4e6'" onmouseout="this.style.backgroundColor='#fff1f2'">
@@ -186,33 +175,6 @@
                 <div id="part-ng-history-content" style="display: none; flex-direction: column; background: #ffffff; border: 1px solid #fecdd3; border-radius: 12px; padding: 10px; margin-bottom: 8px; box-shadow: 0 2px 4px rgba(225, 29, 72, 0.05); max-height: 420px; overflow-y: auto;" class="custom-scrollbar">
                     <div id="part-ng-history-body" class="space-y-3">
                         <div class="text-center py-6 text-slate-400 text-xs">Memuat data riwayat defect part...</div>
-                    </div>
-                </div>
-
-                <!-- Konten Seluruh Box (Collapsible) -->
-                <div id="all-boxes-content" style="display: none; flex-direction: column; flex: 1; min-height: 200px; overflow: hidden;">
-                    <!-- Tab Filter Status Lot -->
-                    <div style="display: flex; gap: 4px; margin-bottom: 8px; overflow-x: auto; padding-bottom: 2px;" class="custom-scrollbar">
-                        <button type="button" id="tab-lot-filter-all" onclick="switchLotFilterTab('all')" style="padding: 4px 8px; font-size: 10px; font-weight: 800; border-radius: 8px; border: 1px solid #cbd5e1; background-color: #0f172a; color: #ffffff; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; transition: all 0.15s;">
-                            <span>Semua</span>
-                            <span id="tab-count-lot-all" style="background-color: rgba(255,255,255,0.2); padding: 0 5px; border-radius: 9999px; font-size: 9px;">0</span>
-                        </button>
-                        <button type="button" id="tab-lot-filter-pending" onclick="switchLotFilterTab('pending')" style="padding: 4px 8px; font-size: 10px; font-weight: 700; border-radius: 8px; border: 1px solid #e2e8f0; background-color: #ffffff; color: #64748b; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; transition: all 0.15s;">
-                            <span>Belum Dicek</span>
-                            <span id="tab-count-lot-pending" style="background-color: #fef3c7; color: #b45309; padding: 0 5px; border-radius: 9999px; font-size: 9px; font-weight: 800;">0</span>
-                        </button>
-                        <button type="button" id="tab-lot-filter-passed" onclick="switchLotFilterTab('passed')" style="padding: 4px 8px; font-size: 10px; font-weight: 700; border-radius: 8px; border: 1px solid #e2e8f0; background-color: #ffffff; color: #64748b; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; transition: all 0.15s;">
-                            <span>Passed</span>
-                            <span id="tab-count-lot-passed" style="background-color: #d1fae5; color: #065f46; padding: 0 5px; border-radius: 9999px; font-size: 9px; font-weight: 800;">0</span>
-                        </button>
-                        <button type="button" id="tab-lot-filter-rejected" onclick="switchLotFilterTab('rejected')" style="padding: 4px 8px; font-size: 10px; font-weight: 700; border-radius: 8px; border: 1px solid #e2e8f0; background-color: #ffffff; color: #64748b; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; transition: all 0.15s;">
-                            <span>Rejected</span>
-                            <span id="tab-count-lot-rejected" style="background-color: #ffe4e6; color: #be123c; padding: 0 5px; border-radius: 9999px; font-size: 9px; font-weight: 800;">0</span>
-                        </button>
-                    </div>
-
-                    <div id="lot-cards-container" style="flex: 1; overflow-y: auto; padding-right: 2px;" class="space-y-2.5 custom-scrollbar">
-                        <div class="text-center py-8 text-slate-400 text-xs">Memuat data lot...</div>
                     </div>
                 </div>
             </div>

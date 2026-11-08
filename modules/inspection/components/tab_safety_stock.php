@@ -3,7 +3,16 @@
                 <!-- ═══════════════════════════════════════════════════════════════ -->
                 <div class="w-full mb-8" style="min-width: 0; max-width: 100%; margin-bottom: 32px;">
                     <div id="ss-table-wrapper" class="overflow-visible w-full" style="width: 100%; max-width: 100%;">
-                        <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; border-collapse: collapse;">
+                        <table class="w-full text-left text-xs text-slate-700 table-fixed" style="width: 100%; border-collapse: collapse;">
+                            <colgroup>
+                                <col style="width: 44px;">
+                                <col style="width: 29%;">
+                                <col style="width: 18%;">
+                                <col style="width: 11%;">
+                                <col style="width: 11%;">
+                                <col style="width: 13%;">
+                                <col style="width: 18%;">
+                            </colgroup>
                             <thead class="text-white font-bold text-[11px] uppercase tracking-wider select-none" style="background-color: #581c87; color: #ffffff;">
                                 <tr>
                                     <th style="padding: 10px 10px; width: 40px; text-align: center; color: #ffffff; background-color: #581c87;">#</th>
@@ -141,30 +150,12 @@
                                 <?php else: ?>
                                     <?php foreach ($ssKanbans as $idx => $pg): 
                                         $pCode = $pg['part_code'];
-                                        $pLots = $ssPartLots[$pCode] ?? [];
-                                        $totalLots = count($pLots);
-                                        $totalQty = 0;
-                                        $hasActive = false;
-                                        $hasNg = false;
-                                        $passedCount = 0;
-                                        foreach ($pLots as $pl) {
-                                            $totalQty += (int)($pl['qty'] ?? 0);
-                                            $res = strtolower($pl['lot_result'] ?? '');
-                                            $st = strtolower($pl['lot_status'] ?? '');
-                                            if ($res === 'in_progress' || $st === 'in_progress' || ($pl['session_status'] ?? '') === 'in_progress') {
-                                                $hasActive = true;
-                                            }
-                                            if ($res === 'rejected' || $st === 'rejected' || !empty($pl['defects'])) {
-                                                $hasNg = true;
-                                            }
-                                            if ($res === 'passed') {
-                                                $passedCount++;
-                                            }
-                                        }
-                                    ?>
-                                        <!-- Part Group Master Row -->
-                                        <?php
-                                            $ssStatusLabel = $hasActive ? 'Sedang Dikerjakan' : ($hasNg ? 'Ada NG' : ($passedCount > 0 ? 'PASSED (SS)' : 'Belum Ada Lot'));
+                                        $totalLots = (int)($pg['total_lots'] ?? 0);
+                                        $totalQty = (int)($pg['total_qty'] ?? 0);
+                                        $hasActive = ((int)($pg['in_progress_lots'] ?? 0) > 0);
+                                        $hasNg = ((int)($pg['rejected_lots'] ?? 0) > 0);
+                                        $passedCount = (int)($pg['passed_lots'] ?? 0);
+                                        $ssStatusLabel = $hasActive ? 'Sedang Dikerjakan' : ($hasNg ? 'Ada NG' : ($passedCount > 0 ? 'PASSED (SS)' : 'Belum Ada Lot'));
                                         ?>
                                         <tr class="hover:bg-purple-50/50 transition-colors bg-white font-semibold ss-master-row"
                                             data-ss-part="<?= htmlspecialchars($pCode . ' ' . $pg['display_part_name']) ?>"
@@ -218,181 +209,27 @@
                                                         <span>+ Cek Fisik</span>
                                                     </a>
                                                     <button type="button" 
-                                                            onclick="toggleSsPartDetail('ss-detail-<?= $idx ?>')"
+                                                            onclick="toggleSsPartDetail('ss-detail-<?= $idx ?>', '<?= htmlspecialchars($pCode) ?>', <?= $idx ?>)"
                                                             class="px-2.5 py-1.5 bg-slate-100 hover:bg-purple-100 text-slate-700 hover:text-purple-800 font-extrabold text-xs rounded-lg border border-slate-300 hover:border-purple-300 inline-flex items-center gap-1 transition-all cursor-pointer">
                                                         <span>Lihat Lot (<?= $totalLots ?>)</span>
-                                                        <svg class="w-3.5 h-3.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                                                        <svg id="ss-chevron-<?= $idx ?>" class="w-3.5 h-3.5 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                                                     </button>
                                                 </div>
                                             </td>
                                         </tr>
 
-                                        <!-- Child Accordion Row (Sub-Tabel Lot Persis Riwayat Saya) -->
-                                        <tr id="ss-detail-<?= $idx ?>" class="hidden bg-slate-50/80">
-                                            <td colspan="7" class="p-3">
-                                                <div class="bg-white rounded-xl border border-purple-200 shadow-sm overflow-hidden">
-                                                    <div class="px-4 py-2.5 bg-purple-900 text-white flex items-center justify-between">
-                                                        <div class="font-extrabold text-xs flex items-center gap-2">
-                                                            <span class="w-2 h-2 rounded-full bg-purple-300 animate-ping"></span>
-                                                            <span>RINCIAN LOT INSPEKSI SAFETY STOCK: <?= htmlspecialchars($pCode) ?> - <?= htmlspecialchars($pg['display_part_name']) ?></span>
-                                                        </div>
-                                                        <span class="text-[10px] font-bold bg-purple-800 px-2 py-0.5 rounded text-purple-100">
-                                                            Total <?= $totalLots ?> Lot / Box
-                                                        </span>
-                                                    </div>
-
-                                                    <div class="overflow-x-auto custom-scrollbar w-full" style="width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
-                                                        <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; min-width: 1450px; border-collapse: collapse;">
-                                                            <thead class="bg-slate-900 text-white font-bold text-[10.5px] uppercase tracking-wider select-none">
-                                                                <tr>
-                                                                    <th style="padding: 9px 10px; width: 40px; text-align: center;">#</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 140px;">WAKTU</th>
-                                                                    <th style="padding: 9px 10px; width: 120px;">PART CODE</th>
-                                                                    <th style="padding: 9px 10px; min-width: 150px;">PART NAME</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 95px;">MODEL</th>
-                                                                    <th style="padding: 9px 10px; width: 120px;">LOT NO</th>
-                                                                    <th style="padding: 9px 10px; width: 110px;">REF NO</th>
-                                                                    <th style="padding: 9px 10px; text-align: right; width: 90px;">QTY LOT</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 100px;">SAMPLING</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 65px;">NG</th>
-                                                                    <th style="padding: 9px 10px; min-width: 170px;">DEFECT TEMUAN</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 130px;">STATUS LOT</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 80px;">SESI</th>
-                                                                    <th style="padding: 9px 10px; text-align: center; width: 85px;">SHIFT</th>
-                                                                    <th style="padding: 9px 10px; width: 130px;">INSPEKTUR</th>
-                                                                </tr>
-                                                            </thead>
-                                                            <tbody class="divide-y divide-slate-100 text-[11px]">
-                                                                <?php if (empty($pLots)): ?>
-                                                                    <tr>
-                                                                        <td colspan="15" class="py-6 text-center text-slate-400 font-medium">
-                                                                            Belum ada lot inspeksi yang dicatat untuk part ini.
-                                                                        </td>
-                                                                    </tr>
-                                                                <?php else: ?>
-                                                                    <?php foreach ($pLots as $lIdx => $rLot): 
-                                                                        $hasNg = ((int)($rLot['ng_count'] ?? 0) > 0 || !empty($rLot['defects']));
-                                                                        $defList = !empty($rLot['defects']) ? $rLot['defects'] : [];
-                                                                        if (!empty($defList)) {
-                                                                            $defParts = [];
-                                                                            foreach ($defList as $df) {
-                                                                                $defParts[] = '<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200/80">' . htmlspecialchars($df['defect_name']) . ' <b class="text-rose-900 font-extrabold">(' . (int)($df['qty_ng'] ?? 1) . ' pcs)</b></span>';
-                                                                            }
-                                                                            $defectHtml = implode(' ', $defParts);
-                                                                        } else {
-                                                                            $defectHtml = '<span class="text-slate-400 font-medium">-</span>';
-                                                                        }
-
-                                                                        // Waktu calculation
-                                                                        $startTimeTs = !empty($rLot['created_at']) ? strtotime($rLot['created_at']) : (!empty($rLot['session_started_at']) ? strtotime($rLot['session_started_at']) : 0);
-                                                                        $endTimeTs = !empty($rLot['closed_at']) ? strtotime($rLot['closed_at']) : (!empty($rLot['action_noted_at']) ? strtotime($rLot['action_noted_at']) : (!empty($rLot['session_closed_at']) ? strtotime($rLot['session_closed_at']) : 0));
-                                                                        
-                                                                        $dateDisplay = $startTimeTs ? date('d/m/Y', $startTimeTs) : '-';
-                                                                        $startTimeStr = $startTimeTs ? date('H:i', $startTimeTs) : '';
-                                                                        $endTimeStr = $endTimeTs ? date('H:i', $endTimeTs) : '';
-                                                                        $timeRangeStr = ($startTimeStr && $endTimeStr) ? ($startTimeStr . ' - ' . $endTimeStr . ' WIB') : ($startTimeStr ? ($startTimeStr . ' WIB') : '-');
-
-                                                                        $durStr = '';
-                                                                        if ($startTimeTs > 0 && $endTimeTs >= $startTimeTs) {
-                                                                            $diffSec = $endTimeTs - $startTimeTs;
-                                                                            $hrs = floor($diffSec / 3600);
-                                                                            $mins = floor(($diffSec % 3600) / 60);
-                                                                            $secs = $diffSec % 60;
-                                                                            if ($hrs > 0) $durStr = "{$hrs}j {$mins}m";
-                                                                            elseif ($mins > 0) $durStr = "{$mins}m {$secs}s";
-                                                                            else $durStr = "{$secs}s";
-                                                                        }
-                                                                    ?>
-                                                                        <tr class="<?= getLotRowClass($rLot) ?>">
-                                                                            <td style="padding: 8px 10px; text-align: center; font-weight: 700; color: #94a3b8;"><?= $lIdx + 1 ?></td>
-                                                                            <td style="padding: 8px 10px; text-align: center; font-family: monospace; color: #334155; white-space: nowrap;">
-                                                                                <div style="font-weight: 800; color: #0f172a;"><?= $dateDisplay ?></div>
-                                                                                <div style="font-size: 9.5px; color: #64748b; font-weight: 600; font-family: sans-serif; margin-top: 1px;"><?= $timeRangeStr ?></div>
-                                                                                <?php if ($durStr !== ''): ?>
-                                                                                    <div style="margin-top: 2px;">
-                                                                                        <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-slate-100 text-slate-700 border border-slate-200">
-                                                                                            ⏱️ <?= $durStr ?>
-                                                                                        </span>
-                                                                                    </div>
-                                                                                <?php else: ?>
-                                                                                    <div style="margin-top: 2px;">
-                                                                                        <span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9.5px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                                                                                            ⏳ Aktif
-                                                                                        </span>
-                                                                                    </div>
-                                                                                <?php endif; ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-family: monospace; font-weight: 800; color: #0284c7; white-space: nowrap;">
-                                                                                <?= htmlspecialchars($rLot['part_code']) ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-weight: 700; color: #1e293b;">
-                                                                                <?= htmlspecialchars($rLot['part_name']) ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; font-weight: 700; color: #64748b;">
-                                                                                <?= htmlspecialchars($rLot['model_name']) ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-family: monospace; font-weight: 700; color: #334155; white-space: nowrap;">
-                                                                                <?= htmlspecialchars($rLot['lot_number'] ?: '-') ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-family: monospace; font-weight: 800; color: #7c3aed; white-space: nowrap;">
-                                                                                <?= htmlspecialchars($rLot['ref_number'] ?: '-') ?>
-                                                                                <?php if (!empty($rLot['ref_number']) && ($rLot['ref_number'] === 'DIRECT-PASS' || strpos($rLot['ref_number'], 'DIRECT-PASS') !== false)): ?>
-                                                                                    <span style="font-size: 8.5px; font-weight: 800; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 1px 4px; border-radius: 4px; display: inline-block; margin-left: 3px;">
-                                                                                        DIRECT
-                                                                                    </span>
-                                                                                <?php elseif (!empty($rLot['remarks']) && stripos($rLot['remarks'], 'Tutup Kanban') !== false): ?>
-                                                                                    <span style="font-size: 8.5px; font-weight: 800; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; padding: 1px 4px; border-radius: 4px; display: inline-block; margin-left: 3px;">
-                                                                                        CLOSE KB
-                                                                                    </span>
-                                                                                <?php endif; ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: right; font-weight: 800; color: #0f172a; white-space: nowrap;">
-                                                                                <?= number_format((int)($rLot['qty'] ?? 0)) ?> <span class="text-[10px] font-normal text-slate-500">pcs</span>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; font-weight: 800; color: #2563eb; white-space: nowrap;">
-                                                                                <?= number_format((int)($rLot['sample_size'] ?? 0)) ?> <span class="text-[10px] font-normal text-slate-500">pcs</span>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; font-weight: 800; white-space: nowrap;">
-                                                                                <?php if ($hasNg): ?>
-                                                                                    <span class="inline-block px-2 py-0.5 rounded text-[10px] font-black bg-rose-100 text-rose-700 border border-rose-200">
-                                                                                        <?= (int)count($rLot['defects']) ?>
-                                                                                    </span>
-                                                                                <?php else: ?>
-                                                                                    <span class="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                                                                        0
-                                                                                    </span>
-                                                                                <?php endif; ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-weight: 600;">
-                                                                                <?= $defectHtml ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
-                                                                                <?= renderLotStatusBadge($rLot) ?>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; white-space: nowrap;">
-                                                                                <a href="<?= base_url('modules/inspection/session.php?id=' . (int)$rLot['inspection_session_id']) ?>"
-                                                                                   class="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold text-[10px] inline-flex items-center gap-1 border border-slate-300">
-                                                                                    <span>Lihat</span>
-                                                                                </a>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; text-align: center; font-family: monospace; font-weight: 700; color: #475569; white-space: nowrap;">
-                                                                                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
-                                                                                    <?= htmlspecialchars(getShiftName($rLot['created_at'] ?? $rLot['session_started_at'])) ?>
-                                                                                </span>
-                                                                            </td>
-                                                                            <td style="padding: 8px 10px; font-weight: 700; color: #334155; white-space: nowrap;">
-                                                                                <div class="flex items-center gap-1.5" title="QC Inspector: <?= htmlspecialchars($rLot['inspector_name'] ?? 'QC Inspector') ?>">
-                                                                                    <div class="w-5 h-5 rounded-full bg-purple-100 text-purple-700 font-extrabold flex items-center justify-center text-[10px] border border-purple-200 uppercase">
-                                                                                        <?= mb_substr($rLot['inspector_name'] ?? 'Q', 0, 1) ?>
-                                                                                    </div>
-                                                                                    <span class="truncate max-w-[110px]"><?= htmlspecialchars($rLot['inspector_name'] ?? 'QC Inspector') ?></span>
-                                                                                </div>
-                                                                            </td>
-                                                                        </tr>
-                                                                    <?php endforeach; ?>
-                                                                <?php endif; ?>
-                                                            </tbody>
-                                                        </table>
+                                        <!-- Child Accordion Row (Lazy Loaded on Demand via AJAX) -->
+                                        <tr id="ss-detail-<?= $idx ?>" class="hidden bg-slate-50/80" data-loaded="false" data-part="<?= htmlspecialchars($pCode) ?>" data-idx="<?= $idx ?>">
+                                            <td colspan="7" class="p-3" style="max-width: 0; width: 100%; overflow: hidden;">
+                                                <div id="ss-detail-content-<?= $idx ?>" class="bg-white rounded-xl border border-purple-200 shadow-sm overflow-hidden" style="width: 100%; max-width: 100%;">
+                                                    <!-- Loading Skeleton Placeholder -->
+                                                    <div class="p-8 text-center text-purple-900 bg-purple-50/50 flex flex-col items-center justify-center gap-2.5">
+                                                        <svg class="w-7 h-7 animate-spin text-purple-600" fill="none" viewBox="0 0 24 24">
+                                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                        <div class="font-extrabold text-xs text-purple-900">Memuat Rincian Lot Fisik: <?= htmlspecialchars($pCode) ?>...</div>
+                                                        <div class="text-[11px] text-purple-600 font-medium">Mengambil data <?= $totalLots ?> lot dari rak Safety Stock gudang</div>
                                                     </div>
                                                 </div>
                                             </td>
@@ -459,8 +296,8 @@
                         </div>
 
                         <!-- Table Wrapper 2 -->
-                        <div id="ss-used-table-wrapper" class="overflow-visible w-full" style="width: 100%; max-width: 100%;">
-                            <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; border-collapse: collapse;">
+                        <div id="ss-used-table-wrapper" class="overflow-x-auto custom-scrollbar w-full" style="width: 100%; max-width: 100%; -webkit-overflow-scrolling: touch;">
+                            <table class="w-full text-left text-xs text-slate-700 table-auto" style="width: 100%; min-width: 1250px; border-collapse: collapse;">
                                 <thead class="bg-slate-900 text-white font-bold text-[11px] uppercase tracking-wider select-none border-b border-indigo-900" style="background-color: #0f172a; color: #ffffff;">
                                     <tr>
                                         <th style="padding: 10px 8px; width: 35px; text-align: center;">#</th>

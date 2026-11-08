@@ -1597,7 +1597,7 @@ $initialDashboardVersion = md5(implode('|', [
                             <span id="defectCardMainTitle"><?= htmlspecialchars($cardDefectTitle) ?> (<span id="defectMetricScaleBadge">PCS</span>)</span>
                         </div>
                         <div style="font-size:10px;color:#94a3b8;margin-top:2px;" id="defectCardSubTitle">
-                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <span id="defectRankDisplayText"><?= $selectedDefectRank ?></span> besar/<?= $cardSubPeriodText ?> (Tabel <?= $isTahunanStacked ? 'Bulanan' : 'Harian' ?>)
+                            <?= date('d M', strtotime($startDate)) ?> &ndash; <?= date('d M Y', strtotime($endDate)) ?> &middot; <span class="no-print"><span id="defectRankDisplayText"><?= $selectedDefectRank ?></span> besar/<?= $cardSubPeriodText ?> (Tabel <?= $isTahunanStacked ? 'Bulanan' : 'Harian' ?>)</span><span class="print-only font-bold text-slate-600">Top 10 Jenis Defect (Tabel <?= $isTahunanStacked ? 'Bulanan' : 'Harian' ?>)</span>
                         </div>
                     </div>
 
@@ -2353,7 +2353,7 @@ $initialDashboardVersion = md5(implode('|', [
                 padding: 6px 8px !important;
             }
 
-            /* Baris Grafik 1: Tren & Top Defect Matrix (Diperbesar agar mengisi space) */
+            /* Baris Grafik 1: Tren & Top Defect Matrix (Optimal 235px agar Diagram & Tabel Gagah & Proporsional) */
             #dash-row-1 {
                 display: grid !important;
                 grid-template-columns: 1.25fr 1fr !important;
@@ -2364,26 +2364,26 @@ $initialDashboardVersion = md5(implode('|', [
             }
 
             #dash-row-1 > .card {
-                padding: 10px 12px !important;
+                padding: 8px 12px !important;
                 margin-bottom: 0 !important;
             }
 
             #trendChartScrollContainer {
-                height: 255px !important;
-                min-height: 255px !important;
+                height: 235px !important;
+                min-height: 235px !important;
             }
 
             #chartTrendNG {
-                height: 255px !important;
-                max-height: 255px !important;
+                height: 235px !important;
+                max-height: 235px !important;
             }
 
             #dash-row-1 div[style*="height:240px;min-height:240px"] {
-                height: 255px !important;
-                min-height: 255px !important;
+                height: 235px !important;
+                min-height: 235px !important;
             }
 
-            /* Baris Grafik 2: 3 Donut Charts (Defect, Model, Part) */
+            /* Baris Grafik 2: 3 Donut Charts (Defect, Model, Part) - Pas 155px & Dikunci Pemisah Halaman */
             #dash-row-2 {
                 display: grid !important;
                 grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
@@ -2392,6 +2392,8 @@ $initialDashboardVersion = md5(implode('|', [
                 margin-bottom: 0 !important;
                 page-break-inside: avoid !important;
                 break-inside: avoid !important;
+                page-break-after: always !important;
+                break-after: page !important;
             }
 
             #dash-row-2 > .card {
@@ -2401,7 +2403,7 @@ $initialDashboardVersion = md5(implode('|', [
             }
 
             #dash-row-2 div[style*="min-height:160px"] {
-                min-height: 145px !important;
+                min-height: 155px !important;
                 display: flex !important;
                 align-items: center !important;
                 gap: 8px !important;
@@ -2420,23 +2422,23 @@ $initialDashboardVersion = md5(implode('|', [
 
             /* Tampilkan seluruh Top 10 secara penuh tanpa scrollbar */
             #dash-row-2 div[id*="LegendContainer"] {
-                max-height: none !important;
+                max-height: 155px !important;
                 height: auto !important;
                 overflow: visible !important;
                 display: flex !important;
                 flex-direction: column !important;
-                gap: 2.5px !important;
+                gap: 2px !important;
             }
 
             #dash-row-2 div[id*="LegendContainer"] > div {
                 padding: 1.5px 5px !important;
-                font-size: 8.5px !important;
+                font-size: 8px !important;
                 border-radius: 4px !important;
-                line-height: 1.25 !important;
+                line-height: 1.2 !important;
             }
 
             #dash-row-2 div[id*="LegendContainer"] > div span {
-                font-size: 8.5px !important;
+                font-size: 8px !important;
             }
 
             /* Chart & Table Matrix */
@@ -2446,14 +2448,34 @@ $initialDashboardVersion = md5(implode('|', [
 
             #defectTimelineChartView {
                 overflow: hidden !important;
-                height: 255px !important;
-                max-height: 255px !important;
+                height: 235px !important;
+                max-height: 235px !important;
             }
 
             #defectTimelineTableView {
-                overflow: visible !important;
-                height: 255px !important;
-                max-height: 255px !important;
+                overflow: hidden !important;
+                height: 235px !important;
+                max-height: 235px !important;
+                border: 1px solid #cbd5e1 !important;
+            }
+
+            /* Batasi baris tabel defect hanya 10 besar teratas pada mode cetak */
+            #defectTimelineTableView tbody tr:nth-child(n+11) {
+                display: none !important;
+            }
+
+            #defectTimelineTableView table {
+                font-size: 8.5px !important;
+                line-height: 1.2 !important;
+            }
+
+            #defectTimelineTableView table th,
+            #defectTimelineTableView table td {
+                padding-top: 2.5px !important;
+                padding-bottom: 2.5px !important;
+                padding-left: 5px !important;
+                padding-right: 5px !important;
+                box-shadow: none !important;
             }
 
             /* Tabel evaluasi part */
@@ -2469,8 +2491,10 @@ $initialDashboardVersion = md5(implode('|', [
                 display: table-header-group !important;
             }
 
-            /* Riwayat Temuan Cacat Inspeksi Terperinci (Mode Cetak: Tampilkan Full Tanpa Scroll) */
+            /* Riwayat Temuan Cacat Inspeksi Terperinci (Jika dibuka, mulai di halaman baru agar tidak mengotori Halaman 1) */
             #cascadeFindingsSection {
+                page-break-before: always !important;
+                break-before: page !important;
                 page-break-inside: auto !important;
                 break-inside: auto !important;
                 margin-top: 10px !important;

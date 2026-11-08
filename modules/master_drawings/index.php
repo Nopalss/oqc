@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
 
+$canManage = can_manage_drawings();
 $pdo = getDB();
 $csrfToken = generate_csrf_token();
 $drawings = [];
@@ -560,10 +561,12 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         Hasil Filter: <span class="font-bold text-slate-800"><?= $totalItems ?></span> dari <?= $kpi['total'] ?> Part
                     </div>
 
+                    <?php if ($canManage): ?>
                     <a href="<?= base_url('modules/master_drawings/import_zip.php') ?>" class="btn-primary py-1 px-3 text-xs font-bold inline-flex items-center gap-1.5 rounded-lg shadow-xs hover:shadow-sm">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
                         <span>Import Berkas (ZIP)</span>
                     </a>
+                    <?php endif; ?>
                 </div>
 
             </div>
@@ -677,28 +680,33 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                                 </a>
                                             <?php endif; ?>
 
-                                            <!-- Upload / Update File -->
-                                            <?php if ($hasAnyFile): ?>
-                                                <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $row['part_id']) ?>" 
-                                                   class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 transition-colors inline-flex items-center gap-1 shadow-2xs" title="Perbarui Berkas Drawing / Dokumen Mutu">
-                                                    <span>Update File</span>
-                                                </a>
-                                            <?php else: ?>
-                                                <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $row['part_id']) ?>" 
-                                                   class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 transition-colors inline-flex items-center gap-1 shadow-2xs" title="Upload Berkas Baru">
-                                                    <span>Upload</span>
-                                                </a>
-                                            <?php endif; ?>
+                                            <!-- Aksi Mutasi (Upload / Update / Hapus) Khusus Role Pengelola -->
+                                            <?php if ($canManage): ?>
+                                                <!-- Upload / Update File -->
+                                                <?php if ($hasAnyFile): ?>
+                                                    <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $row['part_id']) ?>" 
+                                                       class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 transition-colors inline-flex items-center gap-1 shadow-2xs" title="Perbarui Berkas Drawing / Dokumen Mutu">
+                                                        <span>Update File</span>
+                                                    </a>
+                                                <?php else: ?>
+                                                    <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $row['part_id']) ?>" 
+                                                       class="py-1 px-2.5 text-[11px] font-bold rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 transition-colors inline-flex items-center gap-1 shadow-2xs" title="Upload Berkas Baru">
+                                                        <span>Upload</span>
+                                                    </a>
+                                                <?php endif; ?>
 
-                                            <!-- Delete Drawing & Documents (Secure POST with CSRF) -->
-                                            <?php if ($hasAnyFile): ?>
-                                                <button type="button" 
-                                                        onclick="confirmPostDelete('<?= base_url('modules/master_drawings/delete.php') ?>', '<?= !empty($row['drawing_id']) ? $row['drawing_id'] : '' ?>', 'Drawing Part <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>', '<?= $csrfToken ?>', { part_id: '<?= $row['part_id'] ?>' })"
-                                                        class="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 transition-colors" title="Hapus Berkas &amp; Folder Dokumen Part">
-                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                                    </svg>
-                                                </button>
+                                                <!-- Delete Drawing & Documents (Secure POST with CSRF) -->
+                                                <?php if ($hasAnyFile): ?>
+                                                    <button type="button" 
+                                                            onclick="confirmPostDelete('<?= base_url('modules/master_drawings/delete.php') ?>', '<?= !empty($row['drawing_id']) ? $row['drawing_id'] : '' ?>', 'Drawing Part <?= htmlspecialchars($row['part_code'], ENT_QUOTES) ?>', '<?= $csrfToken ?>', { part_id: '<?= $row['part_id'] ?>' })"
+                                                            class="p-1 rounded-lg bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white border border-rose-200 transition-colors" title="Hapus Berkas &amp; Folder Dokumen Part">
+                                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                                        </svg>
+                                                    </button>
+                                                <?php endif; ?>
+                                            <?php elseif (!$hasAnyFile): ?>
+                                                <span class="text-[10.5px] text-slate-400 italic px-1">Tidak ada berkas</span>
                                             <?php endif; ?>
                                         </div>
                                     </td>

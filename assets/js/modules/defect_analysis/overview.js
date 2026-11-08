@@ -7,9 +7,9 @@
         loadOverviewDefects(function() {
             if (overviewState.selectedDefectId) {
                 loadOverviewTrend();
-                loadOverviewModels();
-                loadOverviewParts();
-                loadOverviewHistory();
+                setTimeout(loadOverviewModels, 120);
+                setTimeout(loadOverviewParts, 240);
+                setTimeout(loadOverviewHistory, 360);
             }
         });
     }
@@ -257,11 +257,11 @@
         highlightOverviewRankPill(defectId);
         closeOverviewDefectMenu();
 
-        // Load components in parallel
+        // Load components sequentially with small stagger to prevent socket congestion
         loadOverviewTrend();
-        loadOverviewModels();
-        loadOverviewParts();
-        loadOverviewHistory();
+        setTimeout(loadOverviewModels, 120);
+        setTimeout(loadOverviewParts, 240);
+        setTimeout(loadOverviewHistory, 360);
     }
 
     function switchOverviewResolution(res) {

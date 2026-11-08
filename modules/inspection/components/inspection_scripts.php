@@ -881,10 +881,73 @@ function estimateAqlSampleSize(qty) {
         }
     }
 
-    function toggleSsPartDetail(rowId) {
+    function scrollSubTable(containerId, amount) {
+        var wrapper = document.getElementById(containerId);
+        if (wrapper) {
+            wrapper.scrollBy({ left: amount, behavior: 'smooth' });
+        }
+    }
+
+    // Horizontal Mouse Wheel Scroll listener for wide scrollable tables
+    document.addEventListener('wheel', function(e) {
+        var scrollContainer = e.target.closest('[id^="ss-subtable-scroll-"], #ss-used-table-wrapper, #my-lots-table-wrapper');
+        if (scrollContainer && scrollContainer.scrollWidth > scrollContainer.clientWidth) {
+            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                scrollContainer.scrollLeft += (e.deltaY * 1.2);
+                e.preventDefault();
+            }
+        }
+    }, { passive: false });
+
+    function toggleSsPartDetail(rowId, partCode, idx) {
         var row = document.getElementById(rowId);
-        if (row) {
-            row.classList.toggle('hidden');
+        if (!row) return;
+
+        var isHidden = row.classList.contains('hidden');
+        var chevron = document.getElementById('ss-chevron-' + idx);
+
+        if (isHidden) {
+            row.classList.remove('hidden');
+            if (chevron) chevron.classList.add('rotate-180');
+
+            // Check if data is already loaded
+            var isLoaded = row.getAttribute('data-loaded');
+            if (isLoaded !== 'true') {
+                var urlParams = new URLSearchParams(window.location.search);
+                var period = urlParams.get('period') || 'today';
+                var startDate = urlParams.get('start_date') || '';
+                var endDate = urlParams.get('end_date') || '';
+                var inspectorId = urlParams.get('inspector_id') || '0';
+
+                var apiUrl = '<?= base_url("modules/inspection/api/get_safety_stock_part_lots.php") ?>'
+                    + '?part_code=' + encodeURIComponent(partCode)
+                    + '&period=' + encodeURIComponent(period)
+                    + '&start_date=' + encodeURIComponent(startDate)
+                    + '&end_date=' + encodeURIComponent(endDate)
+                    + '&inspector_id=' + encodeURIComponent(inspectorId)
+                    + '&idx=' + encodeURIComponent(idx);
+
+                fetch(apiUrl)
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        var container = document.getElementById('ss-detail-content-' + idx);
+                        if (container && data.success) {
+                            container.innerHTML = data.html;
+                            row.setAttribute('data-loaded', 'true');
+                        } else if (container) {
+                            container.innerHTML = '<div class="p-6 text-center text-rose-600 font-bold text-xs">' + (data.message || 'Gagal memuat rincian lot.') + '</div>';
+                        }
+                    })
+                    .catch(function(err) {
+                        var container = document.getElementById('ss-detail-content-' + idx);
+                        if (container) {
+                            container.innerHTML = '<div class="p-6 text-center text-rose-600 font-bold text-xs">Terjadi kesalahan jaringan saat mengambil data lot.</div>';
+                        }
+                    });
+            }
+        } else {
+            row.classList.add('hidden');
+            if (chevron) chevron.classList.remove('rotate-180');
         }
     }
 

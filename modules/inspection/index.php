@@ -675,15 +675,21 @@ if ($pdo) {
         $ssBaseParams = [];
         $ssBaseWhere[] = "(k.plan_type = 'safety_stock' OR k.check_type = 'Safety Stock' OR k.kanban_no LIKE 'SS-%' OR k.str_loc IN ('WH-SS-OVERFLOW', 'WH-SS-SPLIT') OR EXISTS (SELECT 1 FROM inspection_sessions s_ss WHERE s_ss.kanban_item_id = k.id AND s_ss.inspection_type = 'safety_stock'))";
 
+        $ssInspCond = "";
+        if (!$isAdminOrSupervisor) {
+            $ssInspCond = " AND s_sub.inspector_id = " . (int)$currentUserId;
+        } elseif ($inspectorFilterId > 0) {
+            $ssInspCond = " AND s_sub.inspector_id = " . (int)$inspectorFilterId;
+        }
+
         if ($period === 'today') {
             $ssBaseWhere[] = "EXISTS (
                 SELECT 1 FROM inspection_sessions s_today 
                 JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_today.id
                 WHERE s_today.kanban_item_id = k.id 
-                  AND s_today.inspector_id = :ss_t_uid
+                  " . str_replace('s_sub', 's_today', $ssInspCond) . "
                   AND (s_today.started_at BETWEEN :ss_t_start1 AND :ss_t_end1 OR s_today.status = 'in_progress')
             )";
-            $ssBaseParams[':ss_t_uid']    = $currentUserId;
             $ssBaseParams[':ss_t_start1'] = $todayStart;
             $ssBaseParams[':ss_t_end1']   = $todayEnd;
         } elseif ($period === 'this_week') {
@@ -691,10 +697,9 @@ if ($pdo) {
                 SELECT 1 FROM inspection_sessions s_week 
                 JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_week.id
                 WHERE s_week.kanban_item_id = k.id 
-                  AND s_week.inspector_id = :ss_w_uid
+                  " . str_replace('s_sub', 's_week', $ssInspCond) . "
                   AND (s_week.started_at BETWEEN :ss_w_start1 AND :ss_w_end1 OR s_week.status = 'in_progress')
             )";
-            $ssBaseParams[':ss_w_uid']    = $currentUserId;
             $ssBaseParams[':ss_w_start1'] = $wStart;
             $ssBaseParams[':ss_w_end1']   = $wEnd;
         } elseif ($period === 'this_month') {
@@ -702,10 +707,9 @@ if ($pdo) {
                 SELECT 1 FROM inspection_sessions s_month 
                 JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_month.id
                 WHERE s_month.kanban_item_id = k.id 
-                  AND s_month.inspector_id = :ss_m_uid
+                  " . str_replace('s_sub', 's_month', $ssInspCond) . "
                   AND (s_month.started_at BETWEEN :ss_m_start1 AND :ss_m_end1 OR s_month.status = 'in_progress')
             )";
-            $ssBaseParams[':ss_m_uid']    = $currentUserId;
             $ssBaseParams[':ss_m_start1'] = $mStart;
             $ssBaseParams[':ss_m_end1']   = $mEnd;
         } elseif ($period === 'custom') {
@@ -714,12 +718,11 @@ if ($pdo) {
                     SELECT 1 FROM inspection_sessions s_custom 
                     JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
                     WHERE s_custom.kanban_item_id = k.id 
-                      AND s_custom.inspector_id = :ss_c_uid
+                      " . str_replace('s_sub', 's_custom', $ssInspCond) . "
                       AND (s_custom.started_at BETWEEN :ss_c_start1 AND :ss_c_end1 OR s_custom.status = 'in_progress')
                 )";
                 $cStart = $startDate . ' 00:00:00';
                 $cEnd   = $endDate . ' 23:59:59';
-                $ssBaseParams[':ss_c_uid']    = $currentUserId;
                 $ssBaseParams[':ss_c_start1'] = $cStart;
                 $ssBaseParams[':ss_c_end1']   = $cEnd;
             } elseif (!empty($startDate)) {
@@ -727,33 +730,30 @@ if ($pdo) {
                     SELECT 1 FROM inspection_sessions s_custom 
                     JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
                     WHERE s_custom.kanban_item_id = k.id 
-                      AND s_custom.inspector_id = :ss_c_uid
+                      " . str_replace('s_sub', 's_custom', $ssInspCond) . "
                       AND (s_custom.started_at >= :ss_c_start1 OR s_custom.status = 'in_progress')
                 )";
                 $cStart = $startDate . ' 00:00:00';
-                $ssBaseParams[':ss_c_uid']    = $currentUserId;
                 $ssBaseParams[':ss_c_start1'] = $cStart;
             } elseif (!empty($endDate)) {
                 $ssBaseWhere[] = "EXISTS (
                     SELECT 1 FROM inspection_sessions s_custom 
                     JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_custom.id
                     WHERE s_custom.kanban_item_id = k.id 
-                      AND s_custom.inspector_id = :ss_c_uid
+                      " . str_replace('s_sub', 's_custom', $ssInspCond) . "
                       AND (s_custom.started_at <= :ss_c_end1 OR s_custom.status = 'in_progress')
                 )";
                 $cEnd = $endDate . ' 23:59:59';
-                $ssBaseParams[':ss_c_uid']  = $currentUserId;
                 $ssBaseParams[':ss_c_end1'] = $cEnd;
             }
         } else {
-            // Period 'all' atau periode lainnya: wajib ada lot yang diinspeksi oleh user login
+            // Period 'all' atau periode lainnya
             $ssBaseWhere[] = "EXISTS (
                 SELECT 1 FROM inspection_sessions s_all 
                 JOIN inspection_session_lots isl_chk ON isl_chk.inspection_session_id = s_all.id
                 WHERE s_all.kanban_item_id = k.id 
-                  AND s_all.inspector_id = :ss_all_uid
+                  " . str_replace('s_sub', 's_all', $ssInspCond) . "
             )";
-            $ssBaseParams[':ss_all_uid'] = $currentUserId;
         }
 
         // =====================================================================
@@ -1339,17 +1339,21 @@ if ($pdo) {
                         COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty,
                         ss.started_at,
                         isl.created_at,
-                        UPPER(TRIM(COALESCE(did.part_code, ki_ss.item_code, ''))) AS part_code
+                        UPPER(TRIM(COALESCE(did.part_code, ki_ss.item_code, mp_ss.part_code, ''))) AS part_code
                     FROM inspection_session_lots isl
                     JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
                     LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
                     LEFT JOIN kanban_items ki_ss ON ki_ss.id = ss.kanban_item_id
+                    LEFT JOIN master_parts mp_ss ON mp_ss.id = ss.part_id
                     WHERE ss.inspection_type = 'safety_stock'
                       AND ss.status = 'passed'
                       AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
                       AND (isl.lot_status IS NULL OR isl.lot_status != 'action_closed')
                       AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
-                    ORDER BY COALESCE(ss.started_at, isl.created_at) ASC, isl.id ASC
+                    ORDER BY 
+                        CASE WHEN COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover') THEN 1 ELSE 2 END ASC,
+                        COALESCE(ss.started_at, isl.created_at) ASC, 
+                        isl.id ASC
                 ");
                 $allSsLots = $stSsLots->fetchAll(PDO::FETCH_ASSOC);
 
@@ -1569,8 +1573,14 @@ if ($pdo) {
                 $ssBaseParams[':ss_s6'] = '%' . $search . '%';
             }
 
-            // Build Session Period Filter for Safety Stock (khusus user yang sedang login)
-            $sessWherePeriod = " AND s.inspector_id = " . (int)$currentUserId;
+            // Build Session Period Filter for Safety Stock
+            $sessWherePeriod = "";
+            if (!$isAdminOrSupervisor) {
+                $sessWherePeriod = " AND s.inspector_id = " . (int)$currentUserId;
+            } elseif ($inspectorFilterId > 0) {
+                $sessWherePeriod = " AND s.inspector_id = " . (int)$inspectorFilterId;
+            }
+
             if ($period === 'today') {
                 $sessWherePeriod .= " AND (s.started_at BETWEEN " . $pdo->quote($todayStart) . " AND " . $pdo->quote($todayEnd) . " OR s.status = 'in_progress')";
             } elseif ($period === 'this_week') {
@@ -1714,7 +1724,7 @@ if ($pdo) {
             if ($page > $totalPages) $page = $totalPages;
             $offset = ($page - 1) * $limit;
 
-            // Fetch Safety Stock Items Grouped by Part Code
+            // Fetch Safety Stock Items Grouped by Part Code (Aggregated with lot counts & stats)
             $sql = "
                 SELECT k.item_code AS part_code,
                        COALESCE(NULLIF(mp.part_name, ''), MAX(k.item_description), k.item_code) AS display_part_name,
@@ -1723,11 +1733,18 @@ if ($pdo) {
                        MAX(k.str_loc) AS str_loc,
                        GROUP_CONCAT(DISTINCT k.id) AS kanban_ids,
                        COUNT(DISTINCT k.id) AS total_kanban_count,
-                       MAX(s.started_at) AS latest_checked_at
+                       MAX(s.started_at) AS latest_checked_at,
+                       COUNT(DISTINCT isl.id) AS total_lots,
+                       COALESCE(SUM(isl.qty), 0) AS total_qty,
+                       COUNT(DISTINCT CASE WHEN s.status = 'in_progress' OR isl.lot_result = 'in_progress' THEN isl.id END) AS in_progress_lots,
+                       COUNT(DISTINCT CASE WHEN isl.lot_result = 'rejected' OR s.status = 'rejected' THEN isl.id END) AS rejected_lots,
+                       COUNT(DISTINCT CASE WHEN (isl.lot_result = 'passed' OR s.status = 'passed' OR k.status = 'completed') AND (isl.lot_result != 'rejected' OR isl.lot_result IS NULL) AND s.status != 'rejected' THEN isl.id END) AS passed_lots
                 FROM kanban_items k
                 LEFT JOIN master_parts mp ON mp.part_code = k.item_code
                 LEFT JOIN master_models mm ON mm.id = mp.model_id
-                LEFT JOIN inspection_sessions s ON s.kanban_item_id = k.id
+                LEFT JOIN inspection_sessions s ON s.kanban_item_id = k.id {$sessWherePeriod}
+                LEFT JOIN inspection_session_lots isl ON isl.inspection_session_id = s.id
+                    AND (isl.remarks IS NULL OR (isl.remarks NOT LIKE '%Sisa Split Safety Stock%' AND isl.remarks NOT LIKE '%Alokasi Safety Stock%'))
                 WHERE {$tableWhereClause}
                 GROUP BY k.item_code
                 ORDER BY COALESCE(MAX(s.started_at), MAX(k.created_at)) DESC
@@ -1737,193 +1754,43 @@ if ($pdo) {
             $stmtSS->execute($tableParams);
             $ssKanbans = $stmtSS->fetchAll(PDO::FETCH_ASSOC);
 
-            // Batch fetch session details and lots grouped by Part Code
-            $ssPartLots = [];
-            $allKanbanIds = [];
-            foreach ($ssKanbans as $pg) {
-                if (!empty($pg['kanban_ids'])) {
-                    $ids = explode(',', $pg['kanban_ids']);
-                    foreach ($ids as $idVal) {
-                        $allKanbanIds[] = (int)$idVal;
-                    }
-                }
-            }
-
-            if (!empty($allKanbanIds)) {
-                $inKanbanIds = implode(',', array_unique($allKanbanIds));
-                $lotSql = "
-                    SELECT 
-                        isl.id AS lot_id,
-                        isl.inspection_session_id,
-                        isl.lot_number,
-                        isl.ref_number,
-                        isl.qty,
-                        isl.sample_size,
-                        isl.lot_result,
-                        isl.lot_status,
-                        isl.remarks,
-                        isl.scanned_qr_raw,
-                        isl.action_noted_at,
-                        isl.created_at,
-                        isl.closed_at,
-                        isl.replaced_by_lot_id,
-                        s.started_at AS session_started_at,
-                        s.closed_at AS session_closed_at,
-                        s.status AS session_status,
-                        s.parent_session_id,
-                        s.is_reinspection,
-                        s.reinspection_type,
-                        s.reinspection_notes,
-                        s.inspector_id,
-                        (SELECT COUNT(*) FROM lot_substitution_log sub 
-                         WHERE sub.ng_session_lot_id = isl.id 
-                            OR sub.replacement_session_lot_id = isl.id
-                            OR sub.reinspection_session_id = s.id) AS has_subst_log,
-                        (SELECT COUNT(*) FROM inspection_ng_records ngr 
-                         WHERE ngr.session_lot_id = isl.id 
-                           AND ngr.is_sorted = 1) AS has_sorted_ng,
-                        (SELECT COUNT(*) 
-                         FROM inspection_session_lots prev_isl
-                         JOIN inspection_sessions prev_s ON prev_s.id = prev_isl.inspection_session_id
-                         WHERE prev_isl.lot_number = isl.lot_number
-                           AND (
-                               (isl.ref_number IS NOT NULL AND prev_isl.ref_number = isl.ref_number)
-                               OR (isl.ref_number IS NULL)
-                           )
-                           AND prev_isl.id != isl.id
-                           AND prev_isl.created_at < isl.created_at
-                           AND (prev_isl.lot_result = 'rejected' OR prev_isl.ng_count > 0 OR prev_isl.lot_status IN ('ng_found', 'ng_quarantine', 'replaced'))
-                        ) AS has_prev_rejected,
-                        COALESCE(u.name, 'QC Inspector') AS inspector_name,
-                        k.item_code AS part_code,
-                        COALESCE(NULLIF(mp.part_name, ''), k.item_description, k.item_code) AS part_name,
-                        COALESCE(mm.name, mp.model, '-') AS model_name
-                    FROM inspection_session_lots isl
-                    JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                    JOIN kanban_items k ON k.id = s.kanban_item_id
-                    LEFT JOIN master_parts mp ON mp.part_code = k.item_code
-                    LEFT JOIN master_models mm ON mm.id = mp.model_id
-                    LEFT JOIN users u ON u.id = s.inspector_id
-                    WHERE s.kanban_item_id IN ($inKanbanIds)
-                      AND s.inspector_id = {$currentUserId}
-                      -- Sembunyikan sesi virtual (sisa split / alokasi) agar hanya inspeksi fisik asli yang tampil
-                      AND (isl.remarks IS NULL OR (
-                          isl.remarks NOT LIKE '%Sisa Split Safety Stock%'
-                          AND isl.remarks NOT LIKE '%Sisa Kelebihan Kanban%'
-                          AND isl.remarks NOT LIKE '%Alokasi Safety Stock%'
-                      ))
-                      {$sessWherePeriod}
-                    ORDER BY isl.id DESC
-                ";
-                $stmtLots = $pdo->query($lotSql);
-                $lotRows = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
-
-                $allSessionIds = array_unique(array_column($lotRows, 'inspection_session_id'));
-                $defectsByLot = [];
-                if (!empty($allSessionIds)) {
-                    $inSessIds = implode(',', array_map('intval', $allSessionIds));
-                    $ngSql = "
-                        SELECT n.*, dt.name as defect_name, dt.code as defect_code,
-                               COALESCE(n.is_sorted, 0) as is_sorted
-                        FROM inspection_ng_records n
-                        JOIN defect_types dt ON dt.id = n.defect_type_id
-                        WHERE n.inspection_session_id IN ($inSessIds)
-                          AND (n.is_cancelled IS NULL OR n.is_cancelled = 0)
-                        ORDER BY n.id ASC
-                    ";
-                    $stmtNg = $pdo->query($ngSql);
-                    while ($nRow = $stmtNg->fetch(PDO::FETCH_ASSOC)) {
-                        $slotId = (int)($nRow['session_lot_id'] ?? 0);
-                        if ($slotId > 0) {
-                            $defectsByLot[$slotId][] = $nRow;
-                        }
-                    }
-                }
-
-                foreach ($lotRows as $lRow) {
-                    $pCode = $lRow['part_code'];
-                    $slotId = (int)$lRow['lot_id'];
-                    $allDefects = $defectsByLot[$slotId] ?? [];
-                    $activeDefects = array_values(array_filter($allDefects, function($df) {
-                        return empty($df['is_sorted']);
-                    }));
-                    $lRow['defects'] = $activeDefects;
-                    $lRow['all_defects'] = $allDefects;
-
-                    $remUpper = strtoupper(($lRow['remarks'] ?? '') . ' ' . ($lRow['reinspection_notes'] ?? ''));
-                    $isLotReinspected = !empty($lRow['is_reinspection'])
-                        || !empty($lRow['parent_session_id'])
-                        || !empty($lRow['reinspection_type'])
-                        || (strtolower($lRow['lot_status'] ?? '') === 'reinspected')
-                        || ((int)($lRow['has_subst_log'] ?? 0) > 0)
-                        || ((int)($lRow['has_sorted_ng'] ?? 0) > 0)
-                        || ((int)($lRow['has_prev_rejected'] ?? 0) > 0)
-                        || (strpos($remUpper, 'RE-INSPEKSI') !== false)
-                        || (strpos($remUpper, 'REINSPEKSI') !== false)
-                        || (strpos($remUpper, 'RE-INSPECT') !== false)
-                        || (strpos($remUpper, 'REINSPECT') !== false)
-                        || (strpos($remUpper, 'PENGGANTI') !== false)
-                        || (strpos($remUpper, 'SORTIR') !== false);
-
-                    if ($isLotReinspected) {
-                        $lRow['is_reinspected_lot'] = true;
-                        $lRow['is_reinspection'] = true;
-                        if (strtolower($lRow['lot_result'] ?? '') === 'rejected') {
-                            $lRow['status_label'] = 'REJECTED (RE-INSPEKSI)';
-                            $lRow['status_badge'] = 'REJECTED (RE-INSPEKSI)';
-                        } elseif (strtolower($lRow['lot_result'] ?? '') === 'passed' || strtolower($lRow['lot_status'] ?? '') === 'reinspected') {
-                            $lRow['status_label'] = 'PASSED (RE-INSPEKSI)';
-                            $lRow['status_badge'] = 'PASSED (RE-INSPEKSI)';
-                        }
-                    }
-                    $ssPartLots[$pCode][] = $lRow;
-                }
-            }
-
             // Ambil data Part Safety Stock yang KELUAR / DIPAKAI oleh Kanban (untuk Tabel 2)
             $ssUsedWhere = [
-                "s.inspector_id = :ss_u_uid",
-                "s.inspection_type != 'safety_stock'",
-                "(
-                    isl.remarks LIKE '%Alokasi Safety Stock%' 
-                    OR isl.lot_status = 'safety_stock_alloc'
-                    OR s.use_safety_stock_qty > 0
-                    OR EXISTS (
-                        SELECT 1 
-                        FROM inspection_session_lots isl_ss
-                        JOIN inspection_sessions s_ss ON s_ss.id = isl_ss.inspection_session_id
-                        LEFT JOIN daily_inspection_data d_ss ON d_ss.id = s_ss.did_id
-                        LEFT JOIN kanban_items k_ss ON k_ss.id = s_ss.kanban_item_id
-                        LEFT JOIN master_parts mp_ss ON mp_ss.id = s_ss.part_id
-                        WHERE s_ss.inspection_type = 'safety_stock'
-                          AND s_ss.id != s.id
-                          AND isl_ss.ref_number IS NOT NULL AND isl_ss.ref_number != '' AND isl_ss.ref_number != '-'
-                          AND isl_ss.ref_number = isl.ref_number
-                          AND isl_ss.lot_number = isl.lot_number
-                          AND COALESCE(d_ss.part_code, k_ss.item_code, mp_ss.part_code) = COALESCE(k.item_code, mp.part_code)
-                    )
-                )"
+                "s_ss.inspection_type = 'safety_stock'",
+                "s_ss.auto_fulfilled_by_session_id > 0"
             ];
-            $ssUsedParams = [
-                ':ss_u_uid' => (int)$currentUserId
-            ];
+            $ssUsedParams = [];
+
+            if (!$isAdminOrSupervisor) {
+                $ssUsedWhere[] = "s_kanban.inspector_id = :ss_u_uid";
+                $ssUsedParams[':ss_u_uid'] = (int)$currentUserId;
+            } elseif ($inspectorFilterId > 0) {
+                $ssUsedWhere[] = "s_kanban.inspector_id = :ss_u_uid";
+                $ssUsedParams[':ss_u_uid'] = (int)$inspectorFilterId;
+            }
 
             if ($period === 'today') {
-                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_t_start AND :ss_u_t_end";
+                $ssUsedWhere[] = "s_kanban.started_at BETWEEN :ss_u_t_start AND :ss_u_t_end";
                 $ssUsedParams[':ss_u_t_start'] = $todayStart;
                 $ssUsedParams[':ss_u_t_end']   = $todayEnd;
             } elseif ($period === 'this_week') {
-                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_w_start AND :ss_u_w_end";
+                $ssUsedWhere[] = "s_kanban.started_at BETWEEN :ss_u_w_start AND :ss_u_w_end";
                 $ssUsedParams[':ss_u_w_start'] = $wStart;
                 $ssUsedParams[':ss_u_w_end']   = $wEnd;
             } elseif ($period === 'this_month') {
-                $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_m_start AND :ss_u_m_end";
+                $ssUsedWhere[] = "s_kanban.started_at BETWEEN :ss_u_m_start AND :ss_u_m_end";
                 $ssUsedParams[':ss_u_m_start'] = $mStart;
                 $ssUsedParams[':ss_u_m_end']   = $mEnd;
             } elseif ($period === 'custom') {
                 if (!empty($startDate) && !empty($endDate)) {
-                    $ssUsedWhere[] = "s.started_at BETWEEN :ss_u_c_start AND :ss_u_c_end";
+                    $ssUsedWhere[] = "s_kanban.started_at BETWEEN :ss_u_c_start AND :ss_u_c_end";
                     $ssUsedParams[':ss_u_c_start'] = $startDate . ' 00:00:00';
+                    $ssUsedParams[':ss_u_c_end']   = $endDate . ' 23:59:59';
+                } elseif (!empty($startDate)) {
+                    $ssUsedWhere[] = "s_kanban.started_at >= :ss_u_c_start";
+                    $ssUsedParams[':ss_u_c_start'] = $startDate . ' 00:00:00';
+                } elseif (!empty($endDate)) {
+                    $ssUsedWhere[] = "s_kanban.started_at <= :ss_u_c_end";
                     $ssUsedParams[':ss_u_c_end']   = $endDate . ' 23:59:59';
                 }
             }
@@ -1931,37 +1798,36 @@ if ($pdo) {
             $ssUsedWhereSql = implode(" AND ", $ssUsedWhere);
             $ssUsedSql = "
                 SELECT 
-                    isl.id AS lot_id,
-                    isl.lot_number,
-                    isl.ref_number,
-                    -- Qty yang benar-benar diambil dari SS (bukan qty fisik label box)
-                    CASE
-                        WHEN COALESCE(s.use_safety_stock_qty, 0) > 0 THEN s.use_safety_stock_qty
-                        ELSE GREATEST(0, isl.qty - COALESCE(s.excess_qty, 0))
-                    END AS qty_used,
-                    isl.qty AS label_qty,
-                    isl.remarks,
-                    isl.lot_result,
-                    isl.lot_status,
-                    isl.created_at AS allocated_at,
-                    s.id AS session_id,
-                    s.status AS kanban_session_status,
-                    s.started_at AS session_started_at,
+                    s_ss.id AS ss_session_id,
+                    s_kanban.id AS kanban_session_id,
+                    s_kanban.started_at AS allocated_at,
                     k.id AS kanban_item_id,
                     k.kanban_no,
                     COALESCE(k.customer, 'PT. Indonesia Epson Industry') AS customer,
-                    COALESCE(k.item_code, mp.part_code, '-') AS part_code,
-                    COALESCE(k.item_description, mp.part_name, '-') AS part_name,
+                    COALESCE(did.part_code, ki_ss.item_code, k.item_code, '-') AS part_code,
+                    COALESCE(did.part_name, ki_ss.item_description, k.item_description, '-') AS part_name,
                     COALESCE(mm.name, mp.model, '-') AS model_name,
-                    COALESCE(u.name, 'Operator') AS operator_name
-                FROM inspection_session_lots isl
-                JOIN inspection_sessions s ON s.id = isl.inspection_session_id
-                LEFT JOIN kanban_items k ON k.id = s.kanban_item_id
-                LEFT JOIN master_parts mp ON (mp.id = s.part_id OR UPPER(mp.part_code) = UPPER(k.item_code))
+                    COALESCE(MAX(NULLIF(TRIM(isl_ss.lot_number), '')), MAX(did.lot_number), 'LOT-SS') AS lot_number,
+                    COALESCE(MAX(NULLIF(TRIM(isl_ss.ref_number), '')), MAX(did.lot_number), '-') AS ref_number,
+                    s_ss.total_scanned_qty AS qty_used,
+                    s_kanban.status AS kanban_session_status,
+                    COALESCE(u.name, 'Operator QC') AS operator_name
+                FROM inspection_sessions s_ss
+                JOIN inspection_sessions s_kanban ON s_kanban.id = s_ss.auto_fulfilled_by_session_id
+                LEFT JOIN daily_inspection_data did ON did.id = s_ss.did_id
+                LEFT JOIN kanban_items ki_ss ON ki_ss.id = s_ss.kanban_item_id
+                LEFT JOIN kanban_items k ON k.id = s_kanban.kanban_item_id
+                LEFT JOIN master_parts mp ON mp.part_code = COALESCE(did.part_code, ki_ss.item_code, k.item_code)
                 LEFT JOIN master_models mm ON mm.id = mp.model_id
-                LEFT JOIN users u ON u.id = s.inspector_id
+                LEFT JOIN users u ON u.id = s_kanban.inspector_id
+                LEFT JOIN inspection_session_lots isl_ss ON isl_ss.inspection_session_id = s_ss.id
                 WHERE {$ssUsedWhereSql}
-                ORDER BY isl.id DESC
+                GROUP BY s_ss.id, s_kanban.id, s_kanban.started_at, k.id, k.kanban_no, k.customer,
+                         COALESCE(did.part_code, ki_ss.item_code, k.item_code, '-'),
+                         COALESCE(did.part_name, ki_ss.item_description, k.item_description, '-'),
+                         COALESCE(mm.name, mp.model, '-'),
+                         s_ss.total_scanned_qty, s_kanban.status, u.name
+                ORDER BY s_kanban.id DESC, s_ss.id DESC
             ";
             $stmtSsUsed = $pdo->prepare($ssUsedSql);
             $stmtSsUsed->execute($ssUsedParams);

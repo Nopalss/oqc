@@ -2,8 +2,16 @@
 require_once __DIR__ . '/../../config/app.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../config/helper.php';
+require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
+
+// Hanya role pengelola (admin, chief, inspektur/inspektor) yang diizinkan mengakses import ZIP
+if (!can_manage_drawings()) {
+    set_flash('danger', 'Akses ditolak: Anda tidak memiliki izin untuk mengimpor berkas drawing.');
+    redirect('modules/master_drawings/index.php');
+    exit;
+}
 
 $breadcrumbCategory = "MASTER DATA";
 $pageTitle = "Import Massal Berkas Drawing & Dokumen (ZIP)";

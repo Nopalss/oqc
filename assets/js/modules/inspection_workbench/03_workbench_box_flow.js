@@ -147,7 +147,6 @@ function renderPartNgHistory(data) {
                     '</div>' +
                     '<div class="flex items-center gap-1.5 flex-shrink-0 font-mono text-[10.5px]">' +
                         '<span class="font-extrabold" style="color: ' + color.text + ';">' + item.total_qty + ' pcs</span>' +
-                        '<span class="text-[9.5px] opacity-75">(' + pct + '%)</span>' +
                     '</div>' +
                 '</div>' +
                 '<div style="background-color: rgba(255,255,255,0.7); height: 5px; border-radius: 9999px; overflow: hidden;">' +

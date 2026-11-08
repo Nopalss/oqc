@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../config/document_helper.php';
 
 require_menu_access('master_drawings');
 
+$canManage = can_manage_drawings();
 $part_id = (int)($_GET['part_id'] ?? 0);
 $pdo = getDB();
 $part = null;
@@ -108,12 +109,14 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 </div>
 
                 <div class="flex items-center gap-2 flex-wrap">
+                    <?php if ($canManage): ?>
                     <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="btn-primary py-1.5 px-3 text-xs flex items-center whitespace-nowrap">
                         <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
                         </svg>
                         Kelola / Upload Dokumen
                     </a>
+                    <?php endif; ?>
                 </div>
 
             </div>
@@ -145,7 +148,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <a href="<?= base_url($dPi['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-indigo-600 hover:underline">Lihat PDF &nearr;</a>
                     <?php else: ?>
                         <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
-                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php if ($canManage): ?>
+                            <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -173,7 +178,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <a href="<?= base_url($dQp['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-amber-700 hover:underline">Lihat PDF &nearr;</a>
                     <?php else: ?>
                         <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
-                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php if ($canManage): ?>
+                            <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -201,7 +208,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <a href="<?= base_url($dPac['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-emerald-700 hover:underline">Lihat PDF &nearr;</a>
                     <?php else: ?>
                         <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
-                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php if ($canManage): ?>
+                            <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -229,7 +238,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <a href="<?= base_url($dPack['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-orange-700 hover:underline">Lihat PDF &nearr;</a>
                     <?php else: ?>
                         <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
-                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php if ($canManage): ?>
+                            <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -257,7 +268,9 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                         <a href="<?= base_url($dMi['latest']['relative_url']) ?>" target="_blank" class="text-[11px] font-bold text-cyan-700 hover:underline">Lihat PDF &nearr;</a>
                     <?php else: ?>
                         <span class="text-[10px] text-slate-400 italic">Tidak ada file</span>
-                        <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php if ($canManage): ?>
+                            <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="text-[10px] font-bold text-blue-600 hover:underline">+ Upload</a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -312,9 +325,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                     <span class="text-[10px] font-mono px-2.5 py-1 rounded bg-slate-100 text-slate-600 border border-slate-200">
                         Total: <strong><?= count($allVersionRows) ?></strong> berkas
                     </span>
+                    <?php if ($canManage): ?>
                     <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="btn-secondary py-1 px-2 text-[11px] font-bold">
                         + Unggah Revisi Baru
                     </a>
+                    <?php endif; ?>
                 </div>
             </div>
 
@@ -374,15 +389,17 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                                             <a href="<?= $fileUrl ?>" target="_blank" class="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold rounded transition-colors" title="Buka / Download File">
                                                 Lihat &nearr;
                                             </a>
-                                            <!-- Tombol Hapus Berkas Usang dengan Form CSRF -->
-                                            <form action="<?= base_url('modules/master_drawings/delete_version.php') ?>" method="POST" onsubmit="return confirm('Apakah Anda yakin ingin menghapus berkas <?= htmlspecialchars($row['filename']) ?>? Tindakan ini tidak dapat dibatalkan.');" class="inline">
-                                                <?= csrf_field() ?>
-                                                <input type="hidden" name="part_id" value="<?= htmlspecialchars($part['id']) ?>">
-                                                <input type="hidden" name="filename" value="<?= htmlspecialchars($row['filename']) ?>">
-                                                <button type="submit" class="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 hover:border-rose-300 text-[10px] font-bold rounded transition-colors" title="Hapus berkas versi ini">
-                                                    Hapus
-                                                </button>
-                                            </form>
+                                            <?php if ($canManage): ?>
+                                                <!-- Tombol Hapus Berkas Usang dengan Form CSRF -->
+                                                <form action="<?= base_url('modules/master_drawings/delete_version.php') ?>" method="POST" onsubmit="return confirm('Apakah Anda yakin ingin menghapus berkas <?= htmlspecialchars($row['filename']) ?>? Tindakan ini tidak dapat dibatalkan.');" class="inline">
+                                                    <?= csrf_field() ?>
+                                                    <input type="hidden" name="part_id" value="<?= htmlspecialchars($part['id']) ?>">
+                                                    <input type="hidden" name="filename" value="<?= htmlspecialchars($row['filename']) ?>">
+                                                    <button type="submit" class="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 hover:border-rose-300 text-[10px] font-bold rounded transition-colors" title="Hapus berkas versi ini">
+                                                        Hapus
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
                                         </div>
                                     </td>
                                 </tr>
@@ -457,9 +474,11 @@ require_once __DIR__ . '/../../layouts/sidebar.php';
                 <div id="viewer-empty-state" class="flex flex-col items-center justify-center h-full text-slate-400 p-6 text-center <?= !empty($drawing['drawing_2d_path']) ? 'hidden' : '' ?>">
                     <svg class="w-12 h-12 mb-2 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414A1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     <p class="text-xs font-medium" id="empty-state-text">Berkas belum diunggah untuk dokumen ini.</p>
+                    <?php if ($canManage): ?>
                     <a href="<?= base_url('modules/master_drawings/upload.php?part_id=' . $part['id']) ?>" class="btn-primary py-1.5 px-3 text-xs mt-3">
                         + Upload Berkas
                     </a>
+                    <?php endif; ?>
                 </div>
             </div>
 

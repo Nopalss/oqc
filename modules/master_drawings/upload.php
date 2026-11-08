@@ -9,6 +9,13 @@ if (!can_access('master_drawings') && !can_access('inspection')) {
     require_menu_access('master_drawings');
 }
 
+// Hanya role pengelola (admin, chief, inspektur/inspektor) yang diizinkan mengunggah/mengubah berkas
+if (!can_manage_drawings()) {
+    set_flash('danger', 'Akses ditolak: Anda tidak memiliki izin untuk mengunggah atau memperbarui berkas drawing.');
+    redirect('modules/master_drawings/index.php');
+    exit;
+}
+
 $part_id = (int)($_GET['part_id'] ?? 0);
 $part_code = trim((string)($_GET['part_code'] ?? ''));
 $pdo = getDB();

@@ -404,6 +404,96 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
         $stmtPlan->execute($params);
         $items = $stmtPlan->fetchAll(PDO::FETCH_ASSOC);
 
+        // Hitung Ketersediaan Safety Stock Ready (FIFO Depletion Pool) untuk setiap Kanban Item
+        $ssAllocationByKanbanId = [];
+        try {
+            $stSsLots = $pdo->query("
+                SELECT 
+                    isl.id AS lot_id,
+                    isl.inspection_session_id,
+                    isl.lot_number,
+                    isl.ref_number,
+                    COALESCE(isl.qty, ss.total_scanned_qty, 0) AS qty,
+                    ss.started_at,
+                    isl.created_at,
+                    UPPER(TRIM(COALESCE(did.part_code, ki_ss.item_code, mp_ss.part_code, ''))) AS part_code
+                FROM inspection_session_lots isl
+                JOIN inspection_sessions ss ON ss.id = isl.inspection_session_id
+                LEFT JOIN daily_inspection_data did ON did.id = ss.did_id
+                LEFT JOIN kanban_items ki_ss ON ki_ss.id = ss.kanban_item_id
+                LEFT JOIN master_parts mp_ss ON mp_ss.id = ss.part_id
+                WHERE ss.inspection_type = 'safety_stock'
+                  AND ss.status = 'passed'
+                  AND (ss.auto_fulfilled_by_session_id IS NULL OR ss.auto_fulfilled_by_session_id = 0)
+                  AND (isl.lot_status IS NULL OR isl.lot_status != 'action_closed')
+                  AND (isl.lot_result IS NULL OR isl.lot_result != 'rejected')
+                ORDER BY 
+                    CASE WHEN COALESCE(ss.ss_source, 'direct') IN ('kanban_excess', 'split_leftover') THEN 1 ELSE 2 END ASC,
+                    COALESCE(ss.started_at, isl.created_at) ASC, 
+                    isl.id ASC
+            ");
+            $allSsLots = $stSsLots ? $stSsLots->fetchAll(PDO::FETCH_ASSOC) : [];
+
+            $ssLotsPool = [];
+            foreach ($allSsLots as $sl) {
+                $pCode = $sl['part_code'];
+                if (empty($pCode)) continue;
+                if (!isset($ssLotsPool[$pCode])) {
+                    $ssLotsPool[$pCode] = [];
+                }
+                $ssLotsPool[$pCode][] = [
+                    'lot_id'        => $sl['lot_id'],
+                    'remaining_qty' => (int)$sl['qty']
+                ];
+            }
+
+            if (!empty($ssLotsPool)) {
+                foreach ($items as $ck) {
+                    $pCode = strtoupper(trim($ck['item_code']));
+                    if (empty($ssLotsPool[$pCode])) continue;
+
+                    $currentPool = &$ssLotsPool[$pCode];
+                    $poolRemainingQty = 0;
+                    foreach ($currentPool as $pItem) {
+                        $poolRemainingQty += $pItem['remaining_qty'];
+                    }
+                    if ($poolRemainingQty <= 0) continue;
+
+                    $demand = (int)$ck['qty'];
+                    $passed = (int)$ck['total_passed_qty'];
+                    $needed = max(0, $demand - $passed);
+
+                    if ($needed <= 0 || ($ck['status'] ?? '') === 'completed') {
+                        continue;
+                    }
+
+                    $remDemand = $needed;
+                    $totalAllocatedThisKanban = 0;
+
+                    foreach ($currentPool as &$l) {
+                        if ($remDemand <= 0) break;
+                        if ($l['remaining_qty'] <= 0) continue;
+
+                        $take = min($l['remaining_qty'], $remDemand);
+                        $l['remaining_qty'] -= $take;
+                        $remDemand -= $take;
+                        $totalAllocatedThisKanban += $take;
+                    }
+                    unset($l);
+
+                    if ($totalAllocatedThisKanban > 0) {
+                        $fulfillType = ($totalAllocatedThisKanban >= $needed) ? 'full' : 'partial';
+                        $ssAllocationByKanbanId[(int)$ck['id']] = [
+                            'allocated_qty' => $totalAllocatedThisKanban,
+                            'needed_qty'    => $needed,
+                            'fulfill_type'  => $fulfillType,
+                            'shortage_qty'  => max(0, $needed - $totalAllocatedThisKanban)
+                        ];
+                    }
+                }
+            }
+        } catch (Exception $eSsCalc) {}
+
         // Buat mapping batch_id => batch_number (1, 2, 3...)
         $batchNumMap = [];
         if (!empty($todayBatches)) {
@@ -414,6 +504,15 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_planning_items' && $pdo) 
         foreach ($items as &$itm) {
             $bId = $itm['batch_id'] ?? null;
             $itm['batch_number'] = ($bId && isset($batchNumMap[$bId])) ? $batchNumMap[$bId] : null;
+
+            $kid = (int)$itm['id'];
+            if (isset($ssAllocationByKanbanId[$kid])) {
+                $itm['ss_alloc'] = $ssAllocationByKanbanId[$kid];
+                $itm['avail_ss_qty'] = $ssAllocationByKanbanId[$kid]['allocated_qty'];
+            } else {
+                $itm['ss_alloc'] = null;
+                $itm['avail_ss_qty'] = 0;
+            }
         }
         unset($itm);
     } catch (PDOException $ePlan) {

@@ -1330,7 +1330,24 @@ function getCsrfToken() {
             .finally(function() {
                 if (fetchTimeout) clearTimeout(fetchTimeout);
                 inFlight = false;
+                if (isPollingActive) {
+                    scheduleNextPoll();
+                }
             });
+        }
+
+        function scheduleNextPoll() {
+            if (!isPollingActive) return;
+            if (pollTimer) {
+                clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+            // Anti-thundering herd: Random jitter ±2 detik agar 10 PC tidak polling serempak
+            var jitter = Math.floor(Math.random() * 4000) - 2000;
+            var nextDelay = Math.max(8000, pollInterval + jitter);
+            pollTimer = setTimeout(function() {
+                checkLiveStatus();
+            }, nextDelay);
         }
 
         function start() {
@@ -1340,7 +1357,7 @@ function getCsrfToken() {
             }
             if (!isPollingActive) {
                 isPollingActive = true;
-                pollTimer = setInterval(checkLiveStatus, pollInterval);
+                scheduleNextPoll();
             }
         }
 

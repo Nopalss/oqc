@@ -167,12 +167,55 @@ foreach ($allEvents as $e) {
 }
 $grandBalance = max(0, ($grandNormal + $grandSisa) - $grandKeluar);
 
-// ── Chunking per 50 Transaksi ────────────────────────────────────────────────
+// ── Pengelompokan Data Harian (Daily Grouping: 1 Tanggal = 1 Kolom) ──────────
+$dailyMap = [];
+foreach ($periodEvents as $ev) {
+    $d = date('Y-m-d', strtotime($ev['time']));
+    if (!isset($dailyMap[$d])) {
+        $dailyMap[$d] = [
+            'date'       => $d,
+            'time_first' => $ev['time'],
+            'mNorm'      => 0,
+            'normBoxes'  => 0,
+            'normList'   => [],
+            'mSisa'      => 0,
+            'sisaBoxes'  => 0,
+            'sisaList'   => [],
+            'mUsed'      => 0,
+            'usedOrders' => 0,
+            'usedList'   => []
+        ];
+    }
+    
+    $timeFormatted = date('H:i', strtotime($ev['time']));
+    if ($ev['flow'] === 'IN') {
+        if ($ev['source'] === 'direct') {
+            $dailyMap[$d]['mNorm'] += $ev['qty'];
+            $dailyMap[$d]['normBoxes']++;
+            $dailyMap[$d]['normList'][] = "{$timeFormatted} - {$ev['ref']} (+" . number_format($ev['qty']) . " pcs)";
+        } else {
+            $dailyMap[$d]['mSisa'] += $ev['qty'];
+            $dailyMap[$d]['sisaBoxes']++;
+            $dailyMap[$d]['sisaList'][] = "{$timeFormatted} - {$ev['ref']} (+" . number_format($ev['qty']) . " pcs)";
+        }
+    } else {
+        $dailyMap[$d]['mUsed'] += $ev['qty'];
+        $dailyMap[$d]['usedOrders']++;
+        $dailyMap[$d]['usedList'][] = "{$timeFormatted} - {$ev['ref']} (-" . number_format($ev['qty']) . " pcs)";
+    }
+}
+
+ksort($dailyMap);
+$allDays = array_values($dailyMap);
+$totalDaysInPeriod = count($allDays);
 $totalInPeriod = count($periodEvents);
+
+// ── Chunking per 30 Hari Transaksi ───────────────────────────────────────────
+$chunk = max(10, (int)($_GET['chunk'] ?? 30));
 $hasMorePast   = false;
 $remainingPast = 0;
 
-$openingNormal = 0; $openingSisa = 0; $openingKeluar = 0; $openingBalance = 0;
+$openingNormal = 0; $openingSisa = 0; $openingKeluar = 0;
 
 // Hitung saldo awal dari transaksi sebelum periode (jika ada filter tanggal)
 foreach ($priorEvents as $pe) {
@@ -184,64 +227,61 @@ foreach ($priorEvents as $pe) {
     }
 }
 
-if ($totalInPeriod > $chunk) {
+if ($totalDaysInPeriod > $chunk) {
     $hasMorePast   = true;
-    $remainingPast = $totalInPeriod - $chunk;
+    $remainingPast = $totalDaysInPeriod - $chunk;
     
-    // Ambil $remainingPast data pertama untuk diakumulasi ke Saldo Awal
-    $olderChunk = array_slice($periodEvents, 0, $remainingPast);
-    $activeChunk = array_slice($periodEvents, $remainingPast);
+    // Ambil hari-hari lampau untuk diakumulasi ke Saldo Awal
+    $olderDays = array_slice($allDays, 0, $remainingPast);
+    $activeDays = array_slice($allDays, $remainingPast);
 
-    foreach ($olderChunk as $oe) {
-        if ($oe['flow'] === 'IN') {
-            if ($oe['source'] === 'direct') $openingNormal += $oe['qty'];
-            else $openingSisa += $oe['qty'];
-        } else {
-            $openingKeluar += $oe['qty'];
-        }
+    foreach ($olderDays as $od) {
+        $openingNormal += $od['mNorm'];
+        $openingSisa   += $od['mSisa'];
+        $openingKeluar += $od['mUsed'];
     }
 } else {
-    $activeChunk = $periodEvents;
+    $activeDays = $allDays;
 }
 
 $openingBalance = max(0, ($openingNormal + $openingSisa) - $openingKeluar);
 $hasOpeningCol  = ($hasMorePast || !empty($priorEvents) || $openingBalance > 0);
 
-// Hitung Running Balance untuk batch yang ditampilkan
+// Hitung Running Balance Harian untuk kolom tanggal yang ditampilkan
 $runningBalance = $openingBalance;
 $timelineCols   = [];
 
-foreach ($activeChunk as $idx => $ev) {
-    $mNorm = 0; $mSisa = 0; $mUsed = 0;
-    if ($ev['flow'] === 'IN') {
-        if ($ev['source'] === 'direct') {
-            $mNorm = $ev['qty'];
-            $runningBalance += $mNorm;
-        } else {
-            $mSisa = $ev['qty'];
-            $runningBalance += $mSisa;
-        }
-    } else {
-        $mUsed = $ev['qty'];
-        $runningBalance = max(0, $runningBalance - $mUsed);
-    }
+foreach ($activeDays as $idx => $day) {
+    $mNorm = $day['mNorm'];
+    $mSisa = $day['mSisa'];
+    $mUsed = $day['mUsed'];
+    $runningBalance = max(0, $runningBalance + $mNorm + $mSisa - $mUsed);
+
+    $normTooltip = !empty($day['normList']) ? implode("\n", $day['normList']) : '';
+    $sisaTooltip = !empty($day['sisaList']) ? implode("\n", $day['sisaList']) : '';
+    $usedTooltip = !empty($day['usedList']) ? implode("\n", $day['usedList']) : '';
 
     $timelineCols[] = [
-        'idx'     => $idx + 1,
-        'time'    => $ev['time'],
-        'flow'    => $ev['flow'],
-        'source'  => $ev['source'],
-        'ref'     => $ev['ref'],
-        'mNorm'   => $mNorm,
-        'mSisa'   => $mSisa,
-        'mUsed'   => $mUsed,
-        'balance' => $runningBalance
+        'idx'         => $idx + 1,
+        'date'        => $day['date'],
+        'date_label'  => date('d M Y', strtotime($day['date'])),
+        'is_today'    => ($day['date'] === date('Y-m-d')),
+        'mNorm'       => $mNorm,
+        'normBoxes'   => $day['normBoxes'],
+        'normTooltip' => $normTooltip,
+        'mSisa'       => $mSisa,
+        'sisaBoxes'   => $day['sisaBoxes'],
+        'sisaTooltip' => $sisaTooltip,
+        'mUsed'       => $mUsed,
+        'usedOrders'  => $day['usedOrders'],
+        'usedTooltip' => $usedTooltip,
+        'balance'     => $runningBalance
     ];
 }
 
 $partDisplayName = $partInfo['part_name'] ?? 'Part ' . $partCode;
 $trackId = 'timeline-track-' . md5($partCode);
-$nextChunk = $chunk + 50;
+$nextChunk = $chunk + 30;
 ?>
 
 <div style="background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); width: 100%; max-width: 100%; box-sizing: border-box; overflow: hidden;">
@@ -262,7 +302,7 @@ $nextChunk = $chunk + 50;
         
         <div style="display: flex; align-items: center; gap: 10px; font-size: 11px;">
             <span style="background-color: #f1f5f9; color: #475569; padding: 2px 8px; border-radius: 9999px; font-weight: 700; border: 1px solid #cbd5e1;">
-                Menampilkan: <b><?= count($timelineCols) ?></b> dari <?= $totalInPeriod ?> Mutasi
+                Menampilkan: <b><?= count($timelineCols) ?></b> Hari (<?= $totalInPeriod ?> Mutasi)
                 <?php if ($period === 'tahunan'): ?>
                     <span style="color: #2563eb;">(Tahun Ini)</span>
                 <?php elseif ($period === 'semua'): ?>
@@ -338,11 +378,11 @@ $nextChunk = $chunk + 50;
                     <?php if ($hasMorePast): ?>
                         <th style="padding: 6px 12px; text-align: center; background-color: #fef3c7; border-right: 1px solid #fde68a; min-width: 140px;">
                             <button type="button" 
-                                    class="btn-timeline-load-more"
-                                    onclick="loadMoreTimelineChunk('<?= htmlspecialchars($partCode, ENT_QUOTES) ?>', <?= $nextChunk ?>, this)"
-                                    style="padding: 4px 10px; background-color: #d97706; color: #ffffff; border: none; border-radius: 6px; font-weight: 800; font-size: 10px; cursor: pointer; display: inline-flex; flex-direction: column; align-items: center; gap: 2px; box-shadow: 0 1px 2px rgba(217,119,6,0.3);">
-                                <span>◄ Muat 50 Sebelumnya</span>
-                                <span style="font-size: 9px; opacity: 0.9; font-weight: 600;">(Sisa <?= number_format($remainingPast) ?> Data)</span>
+                                     class="btn-timeline-load-more"
+                                     onclick="loadMoreTimelineChunk('<?= htmlspecialchars($partCode, ENT_QUOTES) ?>', <?= $nextChunk ?>, this)"
+                                     style="padding: 4px 10px; background-color: #d97706; color: #ffffff; border: none; border-radius: 6px; font-weight: 800; font-size: 10px; cursor: pointer; display: inline-flex; flex-direction: column; align-items: center; gap: 2px; box-shadow: 0 1px 2px rgba(217,119,6,0.3);">
+                                <span>◄ Muat 30 Hari Sebelumnya</span>
+                                <span style="font-size: 9px; opacity: 0.9; font-weight: 600;">(Sisa <?= number_format($remainingPast) ?> Hari)</span>
                             </button>
                         </th>
                     <?php endif; ?>
@@ -355,12 +395,15 @@ $nextChunk = $chunk + 50;
                         </th>
                     <?php endif; ?>
 
-                    <!-- Kolom Transaksi Tanggal Aktif (Chronological) -->
+                    <!-- Kolom Tanggal Harian (Chronological) -->
                     <?php foreach ($timelineCols as $col): ?>
-                        <th style="padding: 8px 14px; text-align: center; border-right: 1px solid #e2e8f0; font-weight: 700; color: #334155; min-width: 125px;">
-                            <div style="font-size: 11px; font-weight: 800; color: #1e293b;"><?= date('d M Y', strtotime($col['time'])) ?></div>
-                            <div style="font-size: 10px; color: #64748b; font-weight: 600;"><?= date('H:i', strtotime($col['time'])) ?></div>
-                            <div style="font-size: 9px; color: #0284c7; margin-top: 2px; font-family: monospace; font-weight: 700;"><?= htmlspecialchars($col['ref']) ?></div>
+                        <th style="padding: 8px 14px; text-align: center; border-right: 1px solid #e2e8f0; font-weight: 700; color: #334155; min-width: 130px; background-color: <?= $col['is_today'] ? '#eff6ff' : '#f8fafc' ?>;">
+                            <div style="font-size: 11px; font-weight: 800; color: #1e293b;"><?= $col['date_label'] ?></div>
+                            <?php if ($col['is_today']): ?>
+                                <div style="font-size: 9px; color: #2563eb; font-weight: 800; margin-top: 1px;">(Hari Ini)</div>
+                            <?php else: ?>
+                                <div style="font-size: 9px; color: #64748b; font-weight: 600; margin-top: 1px;">(<?= date('D', strtotime($col['date'])) ?>)</div>
+                            <?php endif; ?>
                         </th>
                     <?php endforeach; ?>
                 </tr>
@@ -387,11 +430,13 @@ $nextChunk = $chunk + 50;
                         </td>
                     <?php endif; ?>
 
-                    <!-- Transaksi Normal per Waktu -->
+                    <!-- Akumulasi Masuk Normal per Tanggal -->
                     <?php foreach ($timelineCols as $col): ?>
                         <?php if ($col['mNorm'] > 0): ?>
-                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #0284c7; background-color: #f0f9ff; border-right: 1px solid #e2e8f0;">
-                                +<?= number_format($col['mNorm']) ?> pcs
+                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #0284c7; background-color: #f0f9ff; border-right: 1px solid #e2e8f0; cursor: help;"
+                                title="<?= htmlspecialchars($col['normTooltip']) ?>">
+                                <div>+<?= number_format($col['mNorm']) ?> pcs</div>
+                                <div style="font-size: 9px; color: #0369a1; font-weight: 700; font-family: sans-serif; margin-top: 1px;"><?= $col['normBoxes'] ?> Box ℹ️</div>
                             </td>
                         <?php else: ?>
                             <td style="padding: 9px 14px; text-align: center; color: #cbd5e1; border-right: 1px solid #e2e8f0;">-</td>
@@ -421,11 +466,13 @@ $nextChunk = $chunk + 50;
                         </td>
                     <?php endif; ?>
 
-                    <!-- Transaksi Sisa Kanban per Waktu -->
+                    <!-- Akumulasi Sisa Kanban per Tanggal -->
                     <?php foreach ($timelineCols as $col): ?>
                         <?php if ($col['mSisa'] > 0): ?>
-                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #b45309; background-color: #fffbeb; border-right: 1px solid #e2e8f0;">
-                                +<?= number_format($col['mSisa']) ?> pcs
+                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #b45309; background-color: #fffbeb; border-right: 1px solid #e2e8f0; cursor: help;"
+                                title="<?= htmlspecialchars($col['sisaTooltip']) ?>">
+                                <div>+<?= number_format($col['mSisa']) ?> pcs</div>
+                                <div style="font-size: 9px; color: #b45309; font-weight: 700; font-family: sans-serif; margin-top: 1px;"><?= $col['sisaBoxes'] ?> Box ℹ️</div>
                             </td>
                         <?php else: ?>
                             <td style="padding: 9px 14px; text-align: center; color: #cbd5e1; border-right: 1px solid #e2e8f0;">-</td>
@@ -455,11 +502,13 @@ $nextChunk = $chunk + 50;
                         </td>
                     <?php endif; ?>
 
-                    <!-- Transaksi Pemotongan Kanban per Waktu -->
+                    <!-- Akumulasi Pemotongan Kanban per Tanggal -->
                     <?php foreach ($timelineCols as $col): ?>
                         <?php if ($col['mUsed'] > 0): ?>
-                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #7e22ce; background-color: #faf5ff; border-right: 1px solid #e2e8f0;">
-                                -<?= number_format($col['mUsed']) ?> pcs
+                            <td style="padding: 9px 14px; text-align: right; font-family: monospace; font-weight: 800; color: #7e22ce; background-color: #faf5ff; border-right: 1px solid #e2e8f0; cursor: help;"
+                                title="<?= htmlspecialchars($col['usedTooltip']) ?>">
+                                <div>-<?= number_format($col['mUsed']) ?> pcs</div>
+                                <div style="font-size: 9px; color: #7e22ce; font-weight: 700; font-family: sans-serif; margin-top: 1px;"><?= $col['usedOrders'] ?> Order ℹ️</div>
                             </td>
                         <?php else: ?>
                             <td style="padding: 9px 14px; text-align: center; color: #cbd5e1; border-right: 1px solid #e2e8f0;">-</td>
@@ -493,10 +542,13 @@ $nextChunk = $chunk + 50;
                         </td>
                     <?php endif; ?>
 
-                    <!-- Saldo Berjalan per Waktu -->
+                    <!-- Saldo Berjalan Harian per Tanggal -->
                     <?php foreach ($timelineCols as $col): ?>
                         <td style="padding: 11px 14px; text-align: right; font-family: monospace; font-weight: 900; color: #15803d; background-color: #f0fdf4; border-right: 1px solid #bbf7d0;">
-                            <?= number_format($col['balance']) ?> <span style="font-size: 9px; font-weight: 700;">pcs</span>
+                            <div style="font-size: 12px;"><?= number_format($col['balance']) ?> <span style="font-size: 9px; font-weight: 700;">pcs</span></div>
+                            <div style="font-size: 9px; font-weight: 700; color: <?= ($col['balance'] > 0) ? '#166534' : '#94a3b8' ?>;">
+                                <?= ($col['balance'] > 0) ? 'Sisa di Rak' : 'Habis' ?>
+                            </div>
                         </td>
                     <?php endforeach; ?>
                 </tr>

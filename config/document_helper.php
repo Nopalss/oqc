@@ -329,3 +329,22 @@ if (!function_exists('resolve_safe_document_upload_name')) {
     }
 }
 
+if (!function_exists('can_manage_drawings')) {
+    /**
+     * Check if the current user has permission to manage (create/upload, update, delete, import) master drawings & QC docs.
+     * Whitelist: admin, chief, inspektur, inspektor.
+     * Other roles (e.g. viewers/guests) are view-only.
+     *
+     * @return bool
+     */
+    function can_manage_drawings() {
+        if (!function_exists('current_user')) {
+            require_once __DIR__ . '/helper.php';
+        }
+        $user = current_user();
+        $role = strtolower(trim($user['role'] ?? ''));
+        return in_array($role, ['admin', 'chief', 'inspektur', 'inspektor'], true);
+    }
+}
+
+

@@ -2959,9 +2959,12 @@
         }
         if (!isLiveSyncActive) return;
         var d = (typeof delay === 'number') ? delay : liveSyncCurrentDelayMs;
+        // Anti-thundering herd: Random jitter ±1.5 detik agar 10 PC tidak menembak di detik yang sama
+        var jitter = Math.floor(Math.random() * 3000) - 1500;
+        var finalDelay = Math.max(7000, d + jitter);
         liveSyncTimer = setTimeout(function() {
             checkLiveHeartbeat();
-        }, d);
+        }, finalDelay);
     }
 
     function updateLiveSyncToggleUI() {

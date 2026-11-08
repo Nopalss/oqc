@@ -561,18 +561,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 // Qty yang dikurangi dari saldo SS = min(qty fisik label, saldo SS)
                                 $takeFromSS = min($lQty, $ssAvail);
 
+                                // Periksa apakah sesi SS ini adalah sesi multi-lot (memiliki lot aktif lain yang tidak sedang di-scan)
+                                $stOtherLots = $pdo->prepare("
+                                    SELECT id, qty, lot_number, ref_number 
+                                    FROM inspection_session_lots 
+                                    WHERE inspection_session_id = :sid 
+                                      AND id != :lid
+                                      AND (lot_status IS NULL OR lot_status IN ('ok', 'reinspected', 'passed', ''))
+                                      AND (lot_result IS NULL OR lot_result != 'rejected')
+                                      AND qty > 0
+                                ");
+                                $stOtherLots->execute([':sid' => $matchedSsSessId, ':lid' => $matchedSsLotId]);
+                                $otherLots = $stOtherLots->fetchAll(PDO::FETCH_ASSOC);
+
+                                if (!empty($otherLots)) {
+                                    // Sesi ini multi-lot: Pisahkan lot-lot yang belum terpakai ke sesi Safety Stock baru agar tidak terkunci
+                                    $otherTotalQty = 0;
+                                    foreach ($otherLots as $ol) {
+                                        $otherTotalQty += (int)$ol['qty'];
+                                    }
+
+                                    $stOrigSess = $pdo->prepare("SELECT * FROM inspection_sessions WHERE id = :sid");
+                                    $stOrigSess->execute([':sid' => $matchedSsSessId]);
+                                    $origSess = $stOrigSess->fetch(PDO::FETCH_ASSOC);
+
+                                    if ($origSess) {
+                                        $firstOtherLotNum = $otherLots[0]['lot_number'] ?? 'SS';
+                                        $stInsK = $pdo->prepare("INSERT INTO kanban_items 
+                                            (batch_id, plan_type, kanban_no, item_code, item_description, customer, req_date, qty, str_loc, supply_area, check_type, status, remark, created_at, updated_at) 
+                                            VALUES (1, 'safety_stock', :kno, :code, :desc, 'INTERNAL SAFETY STOCK', :started, :qty, 'WH-SS', '', 'Safety Stock', 'completed', :rem, :started, :started)");
+                                        $stInsK->execute([
+                                            ':kno'     => 'SS-' . $firstOtherLotNum,
+                                            ':code'    => $partCode,
+                                            ':desc'    => $origSess['part_name'] ?? 'Safety Stock',
+                                            ':started' => $origSess['started_at'] ?? date('Y-m-d H:i:s'),
+                                            ':qty'     => $otherTotalQty,
+                                            ':rem'     => "Sisa Stok Safety Stock (Split dari Sesi #{$matchedSsSessId}, sisa {$otherTotalQty} pcs)"
+                                        ]);
+                                        $newKId = (int)$pdo->lastInsertId();
+
+                                        $stInsSess = $pdo->prepare("INSERT INTO inspection_sessions 
+                                            (inspection_type, flow_version, did_id, kanban_item_id, part_id, sample_size, total_scanned_qty, batch_sample_size, excess_qty, use_safety_stock_qty, reject_number, samples_checked, ng_count, status, auto_fulfilled_by_session_id, original_ss_session_id, ss_source, inspector_id, line_id, line_name, started_at, closed_at, is_approved) 
+                                            VALUES ('safety_stock', :fv, :did, :kid, :pid, 0, :tqty, 0, 0, 0, :rej, 0, 0, 'passed', NULL, :orig_id, :source, :insp, :lid, :lname, :started, :closed, 1)");
+                                        $stInsSess->execute([
+                                            ':fv'      => $origSess['flow_version'] ?? 2,
+                                            ':did'     => $origSess['did_id'],
+                                            ':kid'     => $newKId,
+                                            ':pid'     => $origSess['part_id'] ?? null,
+                                            ':tqty'    => $otherTotalQty,
+                                            ':rej'     => $origSess['reject_number'] ?? 1,
+                                            ':orig_id' => $origSess['original_ss_session_id'] ?: $matchedSsSessId,
+                                            ':source'  => $origSess['ss_source'] ?? 'direct',
+                                            ':insp'    => $origSess['inspector_id'] ?? null,
+                                            ':lid'     => $origSess['line_id'] ?? null,
+                                            ':lname'   => $origSess['line_name'] ?? null,
+                                            ':started' => $origSess['started_at'] ?? date('Y-m-d H:i:s'),
+                                            ':closed'  => $origSess['closed_at'] ?: ($origSess['started_at'] ?? date('Y-m-d H:i:s'))
+                                        ]);
+                                        $newSsSessId = (int)$pdo->lastInsertId();
+
+                                        // Pindahkan lot-lot yang belum diambil ke sesi baru
+                                        $otherLotIds = array_column($otherLots, 'id');
+                                        $inOther = implode(',', array_fill(0, count($otherLotIds), '?'));
+                                        $stMove = $pdo->prepare("UPDATE inspection_session_lots SET inspection_session_id = ? WHERE id IN ($inOther)");
+                                        $stMove->execute(array_merge([$newSsSessId], $otherLotIds));
+                                    }
+                                }
+
+                                // Sekarang sesi $matchedSsSessId HANYA mewakili lot yang diambil ini
                                 if ($takeFromSS >= $ssAvail) {
-                                    // Saldo SS habis terpakai seluruhnya → tandai fulfilled
-                                    $stmtUpdSSFull = $pdo->prepare("UPDATE inspection_sessions SET auto_fulfilled_by_session_id = :ksid WHERE id = :ssid");
-                                    $stmtUpdSSFull->execute([':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
+                                    // Saldo lot ini habis terpakai seluruhnya → tandai fulfilled dengan qty yang diambil
+                                    $stmtUpdSSFull = $pdo->prepare("UPDATE inspection_sessions SET total_scanned_qty = :tqty, auto_fulfilled_by_session_id = :ksid WHERE id = :ssid");
+                                    $stmtUpdSSFull->execute([':tqty' => $takeFromSS, ':ksid' => $sessionId, ':ssid' => $matchedSsSessId]);
+
+                                    $stmtUpdK = $pdo->prepare("UPDATE kanban_items SET qty = :qty WHERE id = (SELECT kanban_item_id FROM inspection_sessions WHERE id = :ssid) AND plan_type = 'safety_stock'");
+                                    $stmtUpdK->execute([':qty' => $takeFromSS, ':ssid' => $matchedSsSessId]);
                                 } else {
-                                    // Saldo SS terpakai sebagian → kurangi saldo SS yang tersisa
+                                    // Saldo lot ini terpakai sebagian → kurangi saldo SS yang tersisa
                                     $newLeftoverQty = $ssAvail - $takeFromSS;
                                     $stmtUpdSSPartLot = $pdo->prepare("UPDATE inspection_session_lots SET qty = :nqty WHERE id = :lid");
                                     $stmtUpdSSPartLot->execute([':nqty' => $newLeftoverQty, ':lid' => $matchedSsLotId]);
 
                                     $stmtUpdSSPartSess = $pdo->prepare("UPDATE inspection_sessions SET total_scanned_qty = :nqty WHERE id = :ssid");
                                     $stmtUpdSSPartSess->execute([':nqty' => $newLeftoverQty, ':ssid' => $matchedSsSessId]);
+
+                                    $stmtUpdK = $pdo->prepare("UPDATE kanban_items SET qty = :qty WHERE id = (SELECT kanban_item_id FROM inspection_sessions WHERE id = :ssid) AND plan_type = 'safety_stock'");
+                                    $stmtUpdK->execute([':qty' => $newLeftoverQty, ':ssid' => $matchedSsSessId]);
                                 }
                             }
                         }

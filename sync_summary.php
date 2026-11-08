@@ -164,3 +164,24 @@ if (php_sapi_name() === 'cli') {
 </body>
 </html>
 
+
+
+
+# if you want to increase the number of PHP processes, put this line (without #) on usr/laragon.ini, under [nginx]
+# [nginx]
+# Upstream=5
+upstream php_upstream {
+	server 127.0.0.1:9003 weight=1 max_fails=0;
+	server 127.0.0.1:9004 weight=1 max_fails=0;
+	server 127.0.0.1:9005 weight=1 max_fails=0;
+	server 127.0.0.1:9006 weight=1 max_fails=0;
+	server 127.0.0.1:9007 weight=1 max_fails=0;
+	server 127.0.0.1:9008 weight=1 max_fails=0;
+	server 127.0.0.1:9009 weight=1 max_fails=0;
+	server 127.0.0.1:9010 weight=1 max_fails=0;
+	server 127.0.0.1:9011 weight=1 max_fails=0;
+	server 127.0.0.1:9012 weight=1 max_fails=0;
+	server 127.0.0.1:9013 weight=1 max_fails=0;
+	server 127.0.0.1:9014 weight=1 max_fails=0;
+	server 127.0.0.1:9015 weight=1 max_fails=0;
+}

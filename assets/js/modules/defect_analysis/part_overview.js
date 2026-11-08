@@ -261,10 +261,10 @@
         highlightPartOverviewRankPill(partId);
         closePartOverviewMenu();
 
-        // Load 3 components in parallel
+        // Load 3 components sequentially with small stagger to avoid concurrent worker saturation
         loadPartOverviewTrend();
-        loadPartOverviewDefects();
-        loadPartOverviewHistory();
+        setTimeout(loadPartOverviewDefects, 140);
+        setTimeout(loadPartOverviewHistory, 280);
     }
 
     function switchPartOverviewInterval(interval) {
